@@ -15,13 +15,16 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_TIMEOUT, GetLastError, HANDL
 use windows::Win32::System::Threading::{GetProcessId, TerminateProcess, WaitForSingleObject};
 use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SMTO_NORMAL,
+    EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SMTO_NORMAL,
     SW_SHOWNORMAL, SendMessageTimeoutW, WM_CLOSE, WM_NULL,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR};
 
 const WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSIVENESS_TIMEOUT_MS: u32 = 1000;
+/// Minimum time a window stays open before WM_CLOSE is posted: a GL app can still be starting up
+/// right after its window appears, and an early WM_CLOSE may not be honoured.
+const CLOSE_SETTLE: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
 struct Report {
@@ -67,7 +70,6 @@ fn main() -> Result<()> {
 
     let stats_path = std::env::temp_dir().join("negotium-frame-stats.json");
     if is_negotium {
-        let _ = std::fs::remove_file(&stats_path);
         // SAFETY: single-threaded at this point; no other thread reads the environment.
         unsafe { std::env::set_var("NEGOTIUM_FRAME_STATS", &stats_path) };
     }
@@ -82,11 +84,16 @@ fn main() -> Result<()> {
         if running_pid(&exe_name)?.is_some() {
             bail!("{exe_name} is already running; close it first (Task Manager is single-instance)");
         }
+        if is_negotium {
+            // Per-run reset: a run that fails to write its stats must not leave an earlier run's behind.
+            let _ = std::fs::remove_file(&stats_path);
+        }
         let t0 = Instant::now();
         // An early return below drops `target`, which cleans the launched process up.
         let mut target = launch(&path, launch_args)?;
         let hwnd = wait_for_window(target.pid)?;
         target.hwnd = Some(hwnd.0 as usize);
+        target.appeared = Some(Instant::now());
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("run {}: first window after {ms:.0} ms", run + 1);
         startup_ms.push(ms);
@@ -99,7 +106,16 @@ fn main() -> Result<()> {
     target.close()?;
 
     let frame_stats = if is_negotium {
-        std::fs::read_to_string(&stats_path).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        let read = std::fs::read_to_string(&stats_path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string()));
+        match read {
+            Ok(v) => Some(v),
+            Err(reason) => {
+                eprintln!("frame stats unavailable: {reason}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -140,6 +156,8 @@ struct Launched {
     pid: u32,
     handle: HANDLE,
     hwnd: Option<usize>,
+    /// When the window was first seen; `close` waits `CLOSE_SETTLE` after this.
+    appeared: Option<Instant>,
     armed: bool,
 }
 
@@ -160,8 +178,12 @@ impl Launched {
         unsafe { WaitForSingleObject(self.handle, timeout_ms) == WAIT_OBJECT_0 }
     }
 
-    /// Asks the window to close and waits up to 10 s for the process to exit.
+    /// Waits (if needed) until the window has been open for `CLOSE_SETTLE`, asks it to close and
+    /// waits up to 10 s for the process to exit.
     fn close(mut self) -> Result<()> {
+        if let Some(appeared) = self.appeared {
+            std::thread::sleep(CLOSE_SETTLE.saturating_sub(appeared.elapsed()));
+        }
         self.post_close().context("PostMessageW WM_CLOSE")?;
         if !self.wait_exited(10_000) {
             bail!("pid {} did not exit after WM_CLOSE", self.pid);
@@ -222,7 +244,17 @@ fn launch(path: &PathBuf, args: Option<&str>) -> Result<Launched> {
         }
         bail!("could not read launched process id");
     }
-    Ok(Launched { pid, handle, hwnd: None, armed: true })
+    Ok(Launched { pid, handle, hwnd: None, appeared: None, armed: true })
+}
+
+/// winit (Slint's backend) creates a small visible, unowned message window ("Winit Thread Event
+/// Target", 16x16) about 0.5 s before the real window exists. It is not the app's window: timing
+/// it would under-report startup and probing/closing it would not exercise the UI.
+fn is_helper_window(hwnd: HWND) -> bool {
+    let mut buf = [0u16; 64];
+    // SAFETY: `buf` is a valid writable buffer; the call only fills it.
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    len > 0 && String::from_utf16_lossy(&buf[..len as usize]) == "Winit Thread Event Target"
 }
 
 struct Search {
@@ -240,6 +272,7 @@ unsafe extern "system" fn find_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
         if pid == search.pid
             && IsWindowVisible(hwnd).as_bool()
             && !GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid())
+            && !is_helper_window(hwnd)
         {
             search.found = Some(hwnd);
             return false.into();

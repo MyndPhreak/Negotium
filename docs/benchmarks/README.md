@@ -74,10 +74,8 @@ If interrupted with Ctrl+C during sampling, close Task Manager before re-running
 Run both from an elevated terminal (close both apps first):
 
     cargo build --release -p negotium -p negotium-bench
-    targetelease
-egotium-bench.exe taskmgr  --runs 5 --sample-secs 60 --out docs/benchmarks/taskmgr.json
-    targetelease
-egotium-bench.exe negotium --runs 5 --sample-secs 60 --out docs/benchmarks/negotium.json
+    target\release\negotium-bench.exe taskmgr --runs 5 --sample-secs 60 --out docs\benchmarks\taskmgr.json
+    target\release\negotium-bench.exe negotium --runs 5 --sample-secs 60 --out docs\benchmarks\negotium.json
 
 | Metric | Task Manager | Negotium | Target (spec §8) |
 |---|---|---|---|
@@ -86,7 +84,7 @@ egotium-bench.exe negotium --runs 5 --sample-secs 60 --out docs/benchmarks/negot
 | CPU while visible, mean / max (% of total) | pending | pending | ≤ 0.5 % of one core |
 | Private working set, max | pending | pending | ≤ 60 MB |
 | UI responsiveness (WM_NULL) median / p95 / max | pending | pending | — |
-| Render time per frame, max / frames > 16 ms | n/a | pending | none > 16 ms |
+| Render time per frame, max / frames > 16 ms (excludes first paint; whole app lifetime) | n/a | pending | none > 16 ms |
 
 ## Manual check: frozen windows
 
