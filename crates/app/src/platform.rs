@@ -5,6 +5,7 @@ use crate::{MainWindow, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::ComponentHandle;
 use std::ffi::c_void;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WAIT_ABANDONED,
@@ -115,14 +116,17 @@ pub enum ShellEvent {
     Activate,
 }
 
+// Cached: the subclass compares every message the main window receives against these.
 pub fn taskbar_created_message() -> u32 {
+    static MSG: OnceLock<u32> = OnceLock::new();
     // SAFETY: registers (or looks up) a well-known message name.
-    unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }
+    *MSG.get_or_init(|| unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) })
 }
 
 pub fn activate_message() -> u32 {
+    static MSG: OnceLock<u32> = OnceLock::new();
     // SAFETY: as above.
-    unsafe { RegisterWindowMessageW(w!("Negotium.Activate")) }
+    *MSG.get_or_init(|| unsafe { RegisterWindowMessageW(w!("Negotium.Activate")) })
 }
 
 /// Window property marking the main window, so a second launch can find it even while it is
@@ -156,9 +160,11 @@ pub fn install_window_hooks(hwnd: HWND, on_event: impl Fn(ShellEvent) + 'static)
 
 /// Marks `hwnd` as this instance's main window for [`find_main_window`] in a later launch.
 pub fn mark_main_window(hwnd: HWND) {
+    // Only presence matters: any non-null value marks the window.
+    let marker = HANDLE(std::ptr::dangling_mut::<c_void>());
     // SAFETY: sets a property on a window of this thread (removed again on WM_NCDESTROY).
     unsafe {
-        let _ = SetPropW(hwnd, MAIN_WINDOW_PROP, Some(HANDLE(1 as *mut c_void)));
+        let _ = SetPropW(hwnd, MAIN_WINDOW_PROP, Some(marker));
     }
 }
 
