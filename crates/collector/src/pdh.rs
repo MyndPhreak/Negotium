@@ -145,9 +145,9 @@ fn read_array(counter: PDH_HCOUNTER) -> Result<Vec<(String, f64)>, u32> {
         .iter()
         .filter(|it| it.FmtValue.CStatus <= PDH_CSTATUS_NEW_DATA)
         .map(|it| {
-            // SAFETY: szName is a NUL-terminated string inside `buf`; doubleValue is the
-            // active union member because we requested PDH_FMT_DOUBLE.
+            // SAFETY: szName is a NUL-terminated string inside `buf`.
             let name = unsafe { it.szName.to_string() }.unwrap_or_default();
+            // SAFETY: doubleValue is the active union member because we requested PDH_FMT_DOUBLE.
             let value = unsafe { it.FmtValue.Anonymous.doubleValue };
             (name, if value.is_finite() { value } else { 0.0 })
         })
