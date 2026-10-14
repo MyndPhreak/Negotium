@@ -1,7 +1,7 @@
 //! The supervised worker: one thread owns Collector -> Model -> Ranker -> History and emits
 //! Frames. A panic anywhere in a tick rebuilds the pipeline after a backoff (spec section 7).
 use crate::controls::Controls;
-use crate::view::{Frame, IdMap, build_frame};
+use crate::view::{Frame, FrameOptions, IdMap, build_frame};
 use negotium_collector::Collector;
 use negotium_history::{DEFAULT_CAPACITY, History};
 use negotium_model::{Model, Ranker};
@@ -119,7 +119,9 @@ impl Source for LiveSource {
         }
         let metric = controls.metric();
         let order = self.ranker.order(&rows, metric, snap.taken_at_ms, controls.frozen());
-        Some(build_frame(&mut self.ids, &snap, &rows, &order, &self.history, metric, self.elevated))
+        let (expanded, all_children) = controls.child_rows();
+        let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children };
+        Some(build_frame(&mut self.ids, &snap, &rows, &order, &self.history, &opts))
     }
 }
 

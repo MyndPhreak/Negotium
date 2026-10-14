@@ -1,5 +1,6 @@
 //! State shared between the UI thread (writes) and the worker (reads).
 use negotium_model::Metric;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -9,6 +10,9 @@ pub struct Controls {
     frozen: AtomicBool,
     visible: AtomicBool,
     stop: AtomicBool,
+    /// Expanded app row ids and whether a search is active: the worker builds child rows only
+    /// for those (spec section 8: no per-process formatting for rows nobody can see).
+    child_rows: Mutex<(HashSet<i32>, bool)>,
     /// Latched wake flag: a poke that lands while the worker is busy (not waiting) is
     /// remembered, so the next `wait` returns immediately instead of losing the wakeup.
     woken: Mutex<bool>,
@@ -22,6 +26,7 @@ impl Default for Controls {
             frozen: AtomicBool::new(false),
             visible: AtomicBool::new(true),
             stop: AtomicBool::new(false),
+            child_rows: Mutex::new((HashSet::new(), false)),
             woken: Mutex::new(false),
             cv: Condvar::new(),
         }
@@ -51,6 +56,22 @@ impl Controls {
     }
     pub fn interval(&self) -> Duration {
         if self.visible() { Duration::from_secs(1) } else { Duration::from_secs(2) }
+    }
+    /// Shares which apps need child rows. Wakes the worker when more are needed (an expand, or a
+    /// search starting), so they show without waiting for the next tick.
+    pub fn set_child_rows(&self, expanded: &HashSet<i32>, searching: bool) {
+        let more = {
+            let mut cur = self.child_rows.lock().unwrap_or_else(|e| e.into_inner());
+            let more = (searching && !cur.1) || expanded.iter().any(|id| !cur.0.contains(id));
+            *cur = (expanded.clone(), searching);
+            more
+        };
+        if more {
+            self.poke();
+        }
+    }
+    pub fn child_rows(&self) -> (HashSet<i32>, bool) {
+        self.child_rows.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -105,6 +126,19 @@ mod tests {
         let (woke, elapsed) = t.join().unwrap();
         assert!(woke && elapsed < Duration::from_secs(2));
         assert_eq!(c.metric(), Metric::Memory);
+    }
+
+    #[test]
+    fn child_rows_are_shared_and_newly_needed_children_wake_the_worker() {
+        let c = Controls::default();
+        c.set_child_rows(&HashSet::from([7]), false);
+        assert!(c.wait(Duration::from_millis(20)), "an expand asks for a frame with its children now");
+        assert_eq!(c.child_rows(), (HashSet::from([7]), false));
+        c.set_child_rows(&HashSet::new(), false);
+        assert!(!c.wait(Duration::from_millis(20)), "collapsing needs nothing new");
+        c.set_child_rows(&HashSet::new(), true);
+        assert!(c.wait(Duration::from_millis(20)), "starting a search needs every app's children");
+        assert_eq!(c.child_rows(), (HashSet::new(), true));
     }
 
     #[test]

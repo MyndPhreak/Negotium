@@ -145,11 +145,29 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
     out
 }
 
+/// Expands a never-actionable group row (the Windows group) the first time it reports a hung
+/// member, so that member's own row, with its Force close, is in view. A collapse by the user
+/// stands until that hang clears. Returns true if `expanded` changed.
+fn auto_expand_hung_groups(rows: &[RowView], expanded: &mut HashSet<i32>, auto: &mut HashSet<i32>) -> bool {
+    let mut changed = false;
+    for r in rows.iter().filter(|r| r.depth == 0 && !r.actionable) {
+        if r.hung.is_empty() {
+            auto.remove(&r.id);
+        } else if auto.insert(r.id) {
+            changed |= expanded.insert(r.id);
+        }
+    }
+    auto.retain(|id| rows.iter().any(|r| r.id == *id));
+    changed
+}
+
 pub struct Bridge {
     meters: Rc<VecModel<MeterData>>,
     tiles: Rc<VecModel<TileData>>,
     rows: Rc<VecModel<RowData>>,
     expanded: HashSet<i32>,
+    /// Groups expanded automatically for their current hang (see `auto_expand_hung_groups`).
+    auto_expanded: HashSet<i32>,
     search: String,
     last: Frame,
     layout: RowLayout,
@@ -167,6 +185,7 @@ impl Bridge {
             tiles: Rc::new(VecModel::default()),
             rows: Rc::new(VecModel::default()),
             expanded: HashSet::new(),
+            auto_expanded: HashSet::new(),
             search: String::new(),
             last: Frame::default(),
             layout: RowLayout::default(),
@@ -192,9 +211,17 @@ impl Bridge {
         ui.set_top_caption(frame.caption.clone().into());
         ui.set_show_admin_banner(frame.admin_banner && !self.banner_dismissed);
         self.last = frame;
+        if auto_expand_hung_groups(&self.last.rows, &mut self.expanded, &mut self.auto_expanded) {
+            self.publish_child_rows();
+        }
         let fresh = self.fresh();
         self.layout.on_frame(&self.last.rows, fresh);
         self.push_rows();
+    }
+
+    /// Tells the worker which apps need child rows (expanded ones; all of them while searching).
+    fn publish_child_rows(&self) {
+        self.controls.set_child_rows(&self.expanded, !self.search.trim().is_empty());
     }
 
     fn fresh(&self) -> Vec<RowView> {
@@ -212,6 +239,7 @@ impl Bridge {
 
     pub fn set_search(&mut self, text: &str) {
         self.search = text.to_string();
+        self.publish_child_rows();
         let fresh = self.fresh();
         self.layout.rebase(fresh);
         self.push_rows();
@@ -222,6 +250,7 @@ impl Bridge {
         if expanding {
             self.expanded.insert(id);
         }
+        self.publish_child_rows();
         let fresh = self.fresh();
         if expanding {
             self.layout.expand(id, &self.last.rows, fresh);
@@ -235,6 +264,7 @@ impl Bridge {
     pub fn open_tile(&mut self, id: i32) {
         self.search.clear(); // the box itself is emptied by main.slint in the same click
         self.expanded.insert(id);
+        self.publish_child_rows();
         let fresh = self.fresh();
         self.layout.rebase(fresh);
         self.push_rows();
@@ -375,6 +405,24 @@ mod tests {
         let collapsed = vec![app(1, "1%"), app(2, "1%"), app(9, "1%")];
         layout.collapse(2, &later, collapsed);
         assert_eq!(ids(layout.rows()), [1, 2]);
+    }
+
+    #[test]
+    fn a_hung_windows_group_expands_once_and_a_collapse_sticks_until_the_hang_clears() {
+        let group = |hung: &str| RowView { id: 1, parent: -1, depth: 0, name: "Windows".into(), hung: hung.into(), ..Default::default() };
+        let (mut expanded, mut auto) = (HashSet::new(), HashSet::new());
+        assert!(!auto_expand_hung_groups(&[group(""), app(2, "1%")], &mut expanded, &mut auto));
+        assert!(auto_expand_hung_groups(&[group("Not responding · 9s")], &mut expanded, &mut auto));
+        assert!(expanded.contains(&1));
+        expanded.remove(&1); // the user collapses it
+        assert!(!auto_expand_hung_groups(&[group("Not responding · 10s")], &mut expanded, &mut auto));
+        assert!(!expanded.contains(&1), "still the same hang: the user's collapse stands");
+        auto_expand_hung_groups(&[group("")], &mut expanded, &mut auto);
+        assert!(auto_expand_hung_groups(&[group("Not responding · 1s")], &mut expanded, &mut auto), "a new hang expands again");
+        // Ordinary (actionable) apps are never expanded automatically: their row has Force close.
+        let mut hung_app = app(5, "1%");
+        hung_app.hung = "Not responding · 3s".into();
+        assert!(!auto_expand_hung_groups(&[hung_app], &mut expanded, &mut auto));
     }
 
     #[test]

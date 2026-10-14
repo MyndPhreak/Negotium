@@ -173,9 +173,21 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     ]
 }
 
+/// What the UI currently needs in a frame besides the snapshot itself.
+#[derive(Clone, Debug)]
+pub struct FrameOptions {
+    pub metric: Metric,
+    pub elevated: bool,
+    /// App row ids the user expanded: only these get child rows (and child targets).
+    pub expanded: HashSet<i32>,
+    /// Build every app's child rows (a search can match any process).
+    pub all_children: bool,
+}
+
 pub fn build_frame(
-    ids: &mut IdMap, snap: &Snapshot, rows: &[AppRow], order: &[usize], history: &History, metric: Metric, elevated: bool,
+    ids: &mut IdMap, snap: &Snapshot, rows: &[AppRow], order: &[usize], history: &History, opts: &FrameOptions,
 ) -> Frame {
+    let (metric, elevated) = (opts.metric, opts.elevated);
     let mut seen = HashSet::new();
     let hung_pids: HashSet<u32> = snap.windows.iter().filter(|w| w.hung).map(|w| w.pid).collect();
     let image_of: HashMap<(u32, i64), &str> = snap
@@ -221,7 +233,13 @@ pub fn build_frame(
             actionable: r.key != AppKey::Windows,
             exited: false,
         });
-        if r.processes.len() > 1 {
+        // Child rows only where the UI can show them: expanded apps, everything while searching, and
+        // a Windows group with a hung member (the group row itself is never actionable, so the hung
+        // process's own row is the only way to force-close it).
+        let children = opts.all_children
+            || opts.expanded.contains(&id)
+            || (r.key == AppKey::Windows && r.hung_for_ms.is_some());
+        if r.processes.len() > 1 && children {
             for p in &r.processes {
                 let pid_key = (p.pid, p.create_time);
                 let cid = ids.id(RowKey::Proc(p.pid, p.create_time), &mut seen);
@@ -293,6 +311,10 @@ mod tests {
             hung_for_ms: hung, processes: procs,
         }
     }
+    /// Every app's child rows built (as while searching), so tests see the whole tree.
+    fn opts(metric: Metric, elevated: bool) -> FrameOptions {
+        FrameOptions { metric, elevated, expanded: HashSet::new(), all_children: true }
+    }
     fn snap(cpu: Option<f32>) -> Snapshot {
         Snapshot {
             taken_at_ms: 60_000,
@@ -316,7 +338,7 @@ mod tests {
             app(3, "Editor", 5.0, vec![proc(3, 0, 5.0, "code.exe")], Some(14_400)),
         ];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(37.6)), &rows, &[1, 0], &History::new(10), Metric::Cpu, true);
+        let f = build_frame(&mut ids, &snap(Some(37.6)), &rows, &[1, 0], &History::new(10), &opts(Metric::Cpu, true));
         assert_eq!(f.meters.len(), 5);
         assert_eq!(f.meters[0].value, "38%");
         assert_eq!(f.meters[1].sub, "8.0 / 16.0 GB");
@@ -341,7 +363,7 @@ mod tests {
         win.kind = AppKind::Windows;
         let rows = vec![win, app(9, "Editor", 5.0, vec![proc(9, 0, 5.0, "code.exe")], None)];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), Metric::Cpu, true);
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &opts(Metric::Cpu, true));
         let windows = f.rows.iter().find(|r| r.name == "Windows" && r.depth == 0).unwrap();
         assert!(!windows.actionable);
         assert!(f.targets[&windows.id].group);
@@ -366,7 +388,7 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.windows = vec![negotium_snapshot::WindowSample { pid: 6, hung: true, title: "Search".into() }];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[win], &[0], &History::new(10), Metric::Cpu, true);
+        let f = build_frame(&mut ids, &s, &[win], &[0], &History::new(10), &opts(Metric::Cpu, true));
         let group = f.rows.iter().find(|r| r.depth == 0).unwrap();
         assert_eq!(group.hung, "Not responding · 9s", "the group still shows the roll-up");
         assert!(!group.actionable, "R7: the group itself is never actionable");
@@ -379,10 +401,46 @@ mod tests {
     }
 
     #[test]
+    fn child_rows_are_built_only_for_expanded_apps_unless_searching() {
+        let rows = vec![
+            app(1, "Chrome", 30.0, vec![proc(1, 0, 20.0, "chrome.exe"), proc(2, 1, 10.0, "chrome.exe")], None),
+            app(3, "Code", 5.0, vec![proc(3, 0, 5.0, "code.exe"), proc(4, 3, 0.0, "helper.exe")], None),
+        ];
+        let mut ids = IdMap::new();
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &collapsed);
+        assert!(f.rows.iter().all(|r| r.depth == 0), "no child rows for collapsed apps");
+        assert_eq!(f.targets.len(), 2, "and no child targets");
+        let code = f.rows.iter().find(|r| r.name == "Code").unwrap().id;
+        let one = FrameOptions { expanded: HashSet::from([code]), ..collapsed.clone() };
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &one);
+        let children: Vec<_> = f.rows.iter().filter(|r| r.depth == 1).collect();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|r| r.parent == code && f.targets.contains_key(&r.id)));
+        let searching = FrameOptions { all_children: true, ..collapsed };
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &searching);
+        assert_eq!(f.rows.iter().filter(|r| r.depth == 1).count(), 4, "a search can match any process");
+    }
+
+    #[test]
+    fn a_hung_windows_group_builds_its_children_while_collapsed() {
+        let mut hung_child = proc(6, 4, 0.0, "SearchHost.exe");
+        hung_child.hung_for_ms = Some(9_000);
+        let mut win = app(4, "Windows", 1.0, vec![proc(5, 4, 1.0, "StartMenuExperienceHost.exe"), hung_child], Some(9_000));
+        win.key = AppKey::Windows;
+        win.kind = AppKind::Windows;
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(10), &collapsed);
+        let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").expect("built so it can be shown and force-closed");
+        assert_eq!(child.hung, "Not responding · 9s");
+    }
+
+    #[test]
     fn degenerate_inputs_do_not_divide_by_zero() {
         let rows = vec![app(1, "Idle", 0.0, vec![proc(1, 0, 0.0, "idle.exe")], None)];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(None), &rows, &[0], &History::new(10), Metric::Gpu, false);
+        let f = build_frame(&mut ids, &snap(None), &rows, &[0], &History::new(10), &opts(Metric::Gpu, false));
         assert!(f.tiles.is_empty());
         assert!(f.rows.iter().all(|r| r.bar == 0.0));
         assert!(!f.meters[0].available, "CPU meter shows Unavailable when cpu_pct is None");
@@ -394,7 +452,7 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.totals.disks = Some(vec![]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), Metric::Cpu, true);
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
         assert!(!f.meters[2].available);
     }
 
@@ -402,8 +460,8 @@ mod tests {
     fn ids_are_stable_across_frames() {
         let rows = vec![app(1, "Chrome", 30.0, vec![proc(1, 0, 30.0, "chrome.exe")], None)];
         let mut ids = IdMap::new();
-        let a = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(10), Metric::Cpu, true);
-        let b = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(10), Metric::Cpu, true);
+        let a = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(10), &opts(Metric::Cpu, true));
+        let b = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(10), &opts(Metric::Cpu, true));
         assert_eq!(a.rows[0].id, b.rows[0].id);
     }
 
