@@ -196,6 +196,14 @@ unsafe extern "system" fn subclass_proc(
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
+/// Removes the mark set by [`mark_main_window`] (the instance is exiting).
+pub fn unmark_main_window(hwnd: HWND) {
+    // SAFETY: removes a property from a window of this thread; harmless if absent.
+    unsafe {
+        let _ = RemovePropW(hwnd, MAIN_WINDOW_PROP);
+    }
+}
+
 /// The main window of a running instance (this process's included), visible or not.
 pub fn find_main_window() -> Option<HWND> {
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -341,12 +349,14 @@ mod tests {
         let hwnd = hidden_window();
         mark_main_window(hwnd);
         let found = find_main_window();
+        unmark_main_window(hwnd);
+        let after = find_main_window();
         // SAFETY: our own test window.
         unsafe {
-            let _ = RemovePropW(hwnd, MAIN_WINDOW_PROP);
             let _ = DestroyWindow(hwnd);
         }
         assert_eq!(found, Some(hwnd));
+        assert_ne!(after, Some(hwnd), "an exiting instance is no longer found");
     }
 
     #[test]

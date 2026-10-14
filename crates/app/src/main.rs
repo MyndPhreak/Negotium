@@ -45,9 +45,19 @@ fn main() -> Result<(), slint::PlatformError> {
     // exits; a restart (as admin) waits for the old instance to finish quitting.
     let restarted = std::env::args().any(|a| a == "--restarted");
     let wait = if restarted { Duration::from_secs(10) } else { Duration::ZERO };
-    let Some(_instance) = platform::claim_instance(platform::INSTANCE_MUTEX, wait) else {
-        platform::activate_existing_instance(Duration::from_secs(5));
-        return Ok(());
+    let _instance = match platform::claim_instance(platform::INSTANCE_MUTEX, wait) {
+        Some(lock) => lock,
+        None => {
+            if platform::activate_existing_instance(Duration::from_secs(5)) {
+                return Ok(());
+            }
+            // The holder has no window: it is shutting down (or never got one). Take over once it
+            // has gone, so a launch during an exit doesn't end with nothing running.
+            match platform::claim_instance(platform::INSTANCE_MUTEX, Duration::from_secs(5)) {
+                Some(lock) => lock,
+                None => return Ok(()),
+            }
+        }
     };
     // Before the worker starts, so the collector and every action see the privilege.
     let elevated = negotium_actions::is_elevated();
@@ -304,6 +314,11 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     let result = slint::run_event_loop_until_quit();
+    // Shutting down: stop a new launch from handing its activation to this dying instance; it
+    // then waits for the lock and starts fresh.
+    if let Some(hwnd) = platform::main_hwnd(&ui) {
+        platform::unmark_main_window(hwnd);
+    }
     if let Some(path) = frame_stats_path {
         let _ = std::fs::write(path, frame_stats.borrow().summary_json());
     }
