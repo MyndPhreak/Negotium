@@ -56,6 +56,8 @@ The measurement needs an elevated terminal (Task Manager auto-elevates and UIPI 
 cargo run -p negotium-bench --release -- taskmgr --runs 5 --sample-secs 60 --out docs/benchmarks/2026-10-14-taskmgr-baseline.json
 ```
 
+If interrupted with Ctrl+C during sampling, close Task Manager before re-running.
+
 | Metric | Task Manager | Negotium target (spec §8) |
 |---|---|---|
 | Launch → first window, median of 5 | pending (run elevated) | ≤ 250 ms |

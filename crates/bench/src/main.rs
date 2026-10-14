@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
-use windows::Win32::System::Threading::GetProcessId;
+use windows::Win32::Foundation::{CloseHandle, ERROR_TIMEOUT, GetLastError, HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::{GetProcessId, OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SMTO_NORMAL,
@@ -59,26 +59,28 @@ fn main() -> Result<()> {
     let exe_name = path.file_name().context("target has no file name")?.to_string_lossy().to_lowercase();
 
     let mut startup_ms = Vec::new();
-    let mut last: Option<(u32, HWND)> = None;
+    let mut last: Option<Launched> = None;
     for run in 0..runs {
-        if let Some((pid, hwnd)) = last.take() {
-            close(pid, hwnd)?;
+        if let Some(prev) = last.take() {
+            prev.close()?;
         }
-        if running_pid(&exe_name).is_some() {
+        if running_pid(&exe_name)?.is_some() {
             bail!("{exe_name} is already running; close it first (Task Manager is single-instance)");
         }
         let t0 = Instant::now();
-        let pid = launch(&path)?;
-        let hwnd = wait_for_window(pid)?;
+        // An early return below drops `target`, which cleans the launched process up.
+        let mut target = launch(&path)?;
+        let hwnd = wait_for_window(target.pid)?;
+        target.hwnd = Some(hwnd.0 as usize);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("run {}: first window after {ms:.0} ms", run + 1);
         startup_ms.push(ms);
-        last = Some((pid, hwnd));
+        last = Some(target);
     }
-    let (pid, hwnd) = last.context("--runs must be at least 1")?;
-    println!("sampling pid {pid} for {sample_secs} s …");
-    let (cpu, ws, resp, timeouts) = sample(pid, hwnd, Duration::from_secs(sample_secs))?;
-    close(pid, hwnd)?;
+    let target = last.context("--runs must be at least 1")?;
+    println!("sampling pid {} for {sample_secs} s …", target.pid);
+    let (cpu, ws, resp, timeouts) = sample(&target, Duration::from_secs(sample_secs))?;
+    target.close()?;
 
     let report = Report {
         target: path.display().to_string(),
@@ -98,11 +100,79 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn running_pid(exe_name: &str) -> Option<u32> {
-    ProcessReader::new().read().ok()?.into_iter().find(|p| p.name.to_lowercase() == exe_name).map(|p| p.pid)
+fn read_processes(reader: &mut ProcessReader) -> Result<Vec<negotium_collector::RawProcess>> {
+    reader.read().map_err(|status| anyhow::anyhow!("could not read the process list: NTSTATUS {status:#010x}"))
 }
 
-fn launch(path: &PathBuf) -> Result<u32> {
+fn running_pid(exe_name: &str) -> Result<Option<u32>> {
+    let list = read_processes(&mut ProcessReader::new())?;
+    Ok(list.into_iter().find(|p| p.name.to_lowercase() == exe_name).map(|p| p.pid))
+}
+
+/// A launched target process. If dropped while still armed (any early return or error after
+/// launch), it closes the target, falling back to terminating it, so no process is left behind.
+struct Launched {
+    pid: u32,
+    hwnd: Option<usize>,
+    armed: bool,
+}
+
+impl Launched {
+    fn hwnd(&self) -> Option<HWND> {
+        self.hwnd.map(|bits| HWND(bits as *mut c_void))
+    }
+
+    fn post_close(&self) -> windows::core::Result<()> {
+        let hwnd = self.hwnd().ok_or_else(windows::core::Error::empty)?;
+        // SAFETY: asks the window to close; no pointers involved.
+        unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+    }
+
+    /// Asks the window to close and waits up to 10 s for the process to exit.
+    fn close(mut self) -> Result<()> {
+        self.post_close().context("PostMessageW WM_CLOSE")?;
+        if !wait_exit(self.pid, Duration::from_secs(10))? {
+            bail!("pid {} did not exit after WM_CLOSE", self.pid);
+        }
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for Launched {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.post_close().is_ok() && wait_exit(self.pid, Duration::from_secs(5)).unwrap_or(false) {
+            return;
+        }
+        // SAFETY: plain handle query/terminate/close on a process id; the handle is closed exactly once.
+        unsafe {
+            if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, self.pid) {
+                let _ = TerminateProcess(h, 1);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+}
+
+/// Returns whether `pid` exited within `timeout`; a process-list read failure is an error.
+fn wait_exit(pid: u32, timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    let mut reader = ProcessReader::new();
+    loop {
+        if !read_processes(&mut reader)?.iter().any(|p| p.pid == pid) {
+            return Ok(true);
+        }
+        if Instant::now() > deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn launch(path: &PathBuf) -> Result<Launched> {
     let file = HSTRING::from(path.as_os_str());
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -122,7 +192,7 @@ fn launch(path: &PathBuf) -> Result<u32> {
     if pid == 0 {
         bail!("could not read launched process id");
     }
-    Ok(pid)
+    Ok(Launched { pid, hwnd: None, armed: true })
 }
 
 struct Search {
@@ -170,11 +240,12 @@ fn wait_for_window(pid: u32) -> Result<HWND> {
     }
 }
 
-fn sample(pid: u32, hwnd: HWND, duration: Duration) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, usize)> {
+fn sample(target: &Launched, duration: Duration) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, usize)> {
+    let pid = target.pid;
+    let hwnd_bits = target.hwnd.context("target window not found")?;
     let stop = Arc::new(AtomicBool::new(false));
-    let hwnd_bits = hwnd.0 as usize;
     let stop_probe = stop.clone();
-    let prober = std::thread::spawn(move || {
+    let prober = std::thread::spawn(move || -> std::result::Result<(Vec<f64>, usize), String> {
         let hwnd = HWND(hwnd_bits as *mut c_void);
         let (mut times, mut timeouts) = (Vec::new(), 0usize);
         while !stop_probe.load(Ordering::Relaxed) {
@@ -184,6 +255,11 @@ fn sample(pid: u32, hwnd: HWND, duration: Duration) -> Result<(Vec<f64>, Vec<f64
                 SendMessageTimeoutW(hwnd, WM_NULL, WPARAM(0), LPARAM(0), SMTO_NORMAL, RESPONSIVENESS_TIMEOUT_MS, None)
             };
             if r.0 == 0 {
+                // SAFETY: reads this thread's last-error value, set by the call above.
+                let err = unsafe { GetLastError() };
+                if err != ERROR_TIMEOUT {
+                    return Err(windows::core::Error::from(err.to_hresult()).to_string());
+                }
                 timeouts += 1;
                 times.push(RESPONSIVENESS_TIMEOUT_MS as f64);
             } else {
@@ -191,7 +267,7 @@ fn sample(pid: u32, hwnd: HWND, duration: Duration) -> Result<(Vec<f64>, Vec<f64
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        (times, timeouts)
+        Ok((times, timeouts))
     });
 
     let cpus = logical_cpus() as f64;
@@ -199,31 +275,27 @@ fn sample(pid: u32, hwnd: HWND, duration: Duration) -> Result<(Vec<f64>, Vec<f64
     let (mut cpu, mut ws) = (Vec::new(), Vec::new());
     let mut prev: Option<(Instant, u64)> = None;
     let end = Instant::now() + duration;
-    while Instant::now() < end {
-        let now = Instant::now();
-        let p = reader.read().ok().and_then(|l| l.into_iter().find(|p| p.pid == pid)).context("target exited during sampling")?;
-        if let Some((t0, c0)) = prev {
-            let capacity = now.duration_since(t0).as_secs_f64() * 10_000_000.0 * cpus;
-            cpu.push((p.cpu_time_100ns.saturating_sub(c0) as f64 / capacity * 100.0).clamp(0.0, 100.0));
+    let sampled: Result<()> = (|| {
+        while Instant::now() < end && !prober.is_finished() {
+            let now = Instant::now();
+            let p = read_processes(&mut reader)?
+                .into_iter()
+                .find(|p| p.pid == pid)
+                .context("target exited during sampling")?;
+            if let Some((t0, c0)) = prev {
+                let capacity = now.duration_since(t0).as_secs_f64() * 10_000_000.0 * cpus;
+                cpu.push((p.cpu_time_100ns.saturating_sub(c0) as f64 / capacity * 100.0).clamp(0.0, 100.0));
+            }
+            ws.push(p.private_working_set as f64 / (1024.0 * 1024.0));
+            prev = Some((now, p.cpu_time_100ns));
+            std::thread::sleep(Duration::from_secs(1));
         }
-        ws.push(p.private_working_set as f64 / (1024.0 * 1024.0));
-        prev = Some((now, p.cpu_time_100ns));
-        std::thread::sleep(Duration::from_secs(1));
-    }
+        Ok(())
+    })();
     stop.store(true, Ordering::Relaxed);
-    let (resp, timeouts) = prober.join().expect("prober thread");
+    let probed = prober.join().expect("prober thread");
+    // A probe failure is the root cause when the target vanished or was unreachable, so report it first.
+    let (resp, timeouts) = probed.map_err(|e| anyhow::anyhow!("responsiveness probe failed: {e}"))?;
+    sampled?;
     Ok((cpu, ws, resp, timeouts))
-}
-
-fn close(pid: u32, hwnd: HWND) -> Result<()> {
-    // SAFETY: asks the window to close; no pointers involved.
-    unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.context("PostMessageW WM_CLOSE")?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while ProcessReader::new().read().map(|l| l.iter().any(|p| p.pid == pid)).unwrap_or(false) {
-        if Instant::now() > deadline {
-            bail!("pid {pid} did not exit after WM_CLOSE");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(())
 }
