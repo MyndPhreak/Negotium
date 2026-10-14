@@ -68,3 +68,15 @@ fn efficiency_mode_toggles_on_then_off() {
     child.kill().ok();
     child.wait().ok();
 }
+
+#[test]
+fn efficiency_toggle_skips_an_exited_first_target_and_still_applies_to_the_rest() {
+    let (mut a, act) = spawn_ping();
+    let (mut b, bct) = spawn_ping();
+    a.kill().unwrap();
+    a.wait().unwrap();
+    assert_eq!(toggle_efficiency_mode(&[(a.id(), act), (b.id(), bct)]), Ok(true));
+    assert_eq!(toggle_efficiency_mode(&[(a.id(), act)]), Err(ActionError::AlreadyExited));
+    b.kill().ok();
+    b.wait().ok();
+}

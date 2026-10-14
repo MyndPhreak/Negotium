@@ -22,7 +22,13 @@ pub fn force_close(pid: u32, create_time: i64) -> Result<(), ActionError> {
         return Ok(());
     }
     // SAFETY: verified handle opened with PROCESS_TERMINATE.
-    unsafe { TerminateProcess(handle.0, 1) }.map_err(|e| ActionError::from_win(&e))
+    match unsafe { TerminateProcess(handle.0, 1) } {
+        Ok(()) => Ok(()),
+        // The process may have exited between the wait timing out and the terminate call.
+        // SAFETY: verified handle opened with SYNCHRONIZE.
+        Err(_) if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0 => Ok(()),
+        Err(e) => Err(ActionError::from_win(&e)),
+    }
 }
 
 fn windows_of(pid: u32) -> Vec<HWND> {

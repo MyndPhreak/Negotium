@@ -7,19 +7,40 @@ use windows::Win32::System::Threading::{
     ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
 };
 
-/// Reads the first target's state and sets every target to the opposite.
-/// Returns the new state (`true` = efficiency mode on).
+/// Reads the state from the first live target and sets every target to the opposite.
+/// Returns the new state (`true` = efficiency mode on). Every target is attempted; the
+/// first error other than `AlreadyExited` is returned afterwards.
 pub fn toggle_efficiency_mode(targets: &[(u32, i64)]) -> Result<bool, ActionError> {
-    let Some(&(pid, ct)) = targets.first() else { return Ok(false) };
-    let enable = !is_on(pid, ct)?;
-    set(pid, ct, enable)?;
-    for &(pid, ct) in &targets[1..] {
-        match set(pid, ct, enable) {
-            Ok(()) | Err(ActionError::AlreadyExited) => {}
-            Err(e) => return Err(e),
+    let mut current = None;
+    let mut first_err = None;
+    for &(pid, ct) in targets {
+        match is_on(pid, ct) {
+            Ok(on) => {
+                current = Some(on);
+                break;
+            }
+            Err(ActionError::AlreadyExited) => {}
+            Err(e) => {
+                first_err = Some(e);
+                break;
+            }
         }
     }
-    Ok(enable)
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    let Some(current) = current else { return Err(ActionError::AlreadyExited) };
+    let enable = !current;
+    let mut first_err = None;
+    for &(pid, ct) in targets {
+        match set(pid, ct, enable) {
+            Ok(()) | Err(ActionError::AlreadyExited) => {}
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    first_err.map_or(Ok(enable), Err)
 }
 
 fn is_on(pid: u32, ct: i64) -> Result<bool, ActionError> {
@@ -38,7 +59,8 @@ fn set(pid: u32, ct: i64, enable: bool) -> Result<(), ActionError> {
     let handle = open_verified(pid, ct, PROCESS_SET_INFORMATION)?;
     let state = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        // Off hands control back to the system (neither bit set) rather than forcing EcoQoS off.
+        ControlMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
         StateMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
     };
     // SAFETY: `state` is a valid PROCESS_POWER_THROTTLING_STATE of the size passed.
