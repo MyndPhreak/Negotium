@@ -148,7 +148,7 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
             value: t.busiest_disk_pct().map(format::pct).unwrap_or_default(),
             sub: String::new(),
             spark: spark_path(&samples.iter().map(|s| s.disk_active_pct).collect::<Vec<_>>(), 100.0),
-            available: t.disks.is_some(),
+            available: t.busiest_disk_pct().is_some(),
         },
         MeterView {
             label: "GPU",
@@ -330,6 +330,15 @@ mod tests {
         assert!(f.rows.iter().all(|r| r.bar == 0.0));
         assert!(!f.meters[0].available, "CPU meter shows Unavailable when cpu_pct is None");
         assert!(!f.meters[3].available, "GPU meter shows Unavailable without GPU counters");
+    }
+
+    #[test]
+    fn empty_disk_list_marks_disk_meter_unavailable() {
+        let mut s = snap(Some(1.0));
+        s.totals.disks = Some(vec![]);
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), Metric::Cpu, true);
+        assert!(!f.meters[2].available);
     }
 
     #[test]
