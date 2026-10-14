@@ -100,3 +100,29 @@ fn details_include_command_line_user_and_priority() {
 fn elevation_query_does_not_panic() {
     let _ = is_elevated();
 }
+
+use negotium_actions::breaks_on_termination;
+
+#[test]
+fn an_ordinary_process_is_not_marked_break_on_termination() {
+    let (mut child, ct) = spawn_ping();
+    let flag = breaks_on_termination(child.id(), ct);
+    child.kill().ok();
+    child.wait().ok();
+    assert_eq!(flag, Some(false));
+}
+
+#[test]
+fn a_critical_system_process_reports_break_on_termination_when_it_can_be_queried() {
+    // Read-only: never terminates anything. Without admin rights the query may be denied (None).
+    let procs = ProcessReader::new().read().unwrap();
+    let wininit = procs.iter().find(|p| p.name.eq_ignore_ascii_case("wininit.exe")).expect("wininit is always running");
+    let flag = breaks_on_termination(wininit.pid, wininit.create_time);
+    assert!(flag != Some(false), "wininit is critical; got {flag:?}");
+}
+
+#[test]
+fn debug_privilege_is_enabled_exactly_when_elevated() {
+    // An unelevated token never holds SeDebugPrivilege, so this only succeeds elevated.
+    assert_eq!(negotium_actions::enable_debug_privilege().is_ok(), is_elevated());
+}

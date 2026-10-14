@@ -84,6 +84,7 @@ pub fn end_summary(name: &str, total: usize, failures: &[ActionError], elevated:
         ActionError::AccessDenied if elevated => "protected by Windows".to_string(),
         ActionError::AccessDenied => "access denied".to_string(),
         ActionError::AlreadyExited => "already exited".to_string(),
+        ActionError::Critical => "Windows marks it as critical".to_string(),
         ActionError::Other(detail) => detail.trim_end_matches('.').to_string(),
     };
     let failed = failures.len();
@@ -222,6 +223,18 @@ mod tests {
         assert_eq!(
             end_summary("X", 2, &[ActionError::Other("busy".into())], true),
             "Ended 1 of 2 processes in X; 1 couldn't be ended: busy."
+        );
+    }
+
+    #[test]
+    fn end_summary_reports_processes_windows_marks_critical() {
+        assert_eq!(
+            end_summary("csrss.exe", 1, &[ActionError::Critical], true),
+            "Windows marks this process as critical \u{2014} ending it would crash the PC."
+        );
+        assert_eq!(
+            end_summary("Svc", 3, &[ActionError::Critical], true),
+            "Ended 2 of 3 processes in Svc; 1 couldn't be ended: Windows marks it as critical."
         );
     }
 

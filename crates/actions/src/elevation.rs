@@ -1,8 +1,11 @@
 use crate::{ActionError, OwnedHandle};
 use std::ffi::c_void;
 use std::mem::size_of;
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, LUID};
+use windows::Win32::Security::{
+    AdjustTokenPrivileges, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_DEBUG_NAME,
+    SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
+};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -30,6 +33,34 @@ pub fn is_elevated() -> bool {
     }
     .is_ok();
     ok && elevation.TokenIsElevated != 0
+}
+
+/// Enables SeDebugPrivilege on this process's token, so an elevated instance can open and act on
+/// other users' and service processes the way Task Manager does. Only an elevated token holds the
+/// privilege; without it this returns an error and nothing changes.
+pub fn enable_debug_privilege() -> Result<(), ActionError> {
+    let mut token = HANDLE::default();
+    // SAFETY: opens our own token; wrapped in OwnedHandle below.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) }
+        .map_err(|e| ActionError::from_win(&e))?;
+    let token = OwnedHandle(token);
+    let mut luid = LUID::default();
+    // SAFETY: SE_DEBUG_NAME is a static wide string; `luid` is writable.
+    unsafe { LookupPrivilegeValueW(None, SE_DEBUG_NAME, &mut luid) }.map_err(|e| ActionError::from_win(&e))?;
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+    };
+    // SAFETY: `privileges` is a fully initialised TOKEN_PRIVILEGES with one entry.
+    unsafe { AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None) }
+        .map_err(|e| ActionError::from_win(&e))?;
+    // AdjustTokenPrivileges succeeds even when the token lacks the privilege; that case is only
+    // visible through the last error.
+    // SAFETY: plain thread-local error read, immediately after the call above.
+    if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
+        return Err(ActionError::Other("the token does not hold SeDebugPrivilege".into()));
+    }
+    Ok(())
 }
 
 /// Relaunches the current executable with the `runas` verb (UAC prompt). On `Ok` the caller

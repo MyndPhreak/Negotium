@@ -10,10 +10,13 @@ mod terminate;
 pub use close::{FORCE_CLOSE_GRACE, force_close};
 pub use details::{Details, process_details};
 pub use efficiency::toggle_efficiency_mode;
-pub use elevation::{is_elevated, restart_as_admin};
+pub use elevation::{enable_debug_privilege, is_elevated, restart_as_admin};
 pub use location::open_file_location;
 pub use terminate::{end_many, end_process};
 
+use std::ffi::c_void;
+use std::mem::size_of;
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBreakOnTermination};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE};
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -23,6 +26,8 @@ use windows::Win32::System::Threading::{
 pub enum ActionError {
     AlreadyExited,
     AccessDenied,
+    /// Windows flags the process BreakOnTermination: ending it bugchecks the machine.
+    Critical,
     Other(String),
 }
 
@@ -33,6 +38,9 @@ impl ActionError {
             ActionError::AccessDenied if elevated => format!("Couldn't change {what}: Windows protects this process."),
             ActionError::AccessDenied => {
                 format!("Couldn't change {what}: access denied. Restart Negotium as admin and try again.")
+            }
+            ActionError::Critical => {
+                "Windows marks this process as critical \u{2014} ending it would crash the PC.".to_string()
             }
             ActionError::Other(detail) => format!("Couldn't change {what}: {detail}."),
         }
@@ -91,6 +99,35 @@ pub(crate) fn open_verified(pid: u32, create_time: i64, access: PROCESS_ACCESS_R
     Ok(handle)
 }
 
+/// Whether Windows marks the process BreakOnTermination (ending it bugchecks the machine).
+/// `None` when the flag can't be read (typically access denied).
+pub(crate) fn handle_breaks_on_termination(handle: &OwnedHandle) -> Option<bool> {
+    let mut flag = 0u32;
+    // SAFETY: valid process handle; `flag` is a writable ULONG of the size passed.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            handle.0,
+            ProcessBreakOnTermination,
+            &mut flag as *mut u32 as *mut c_void,
+            size_of::<u32>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    status.is_ok().then_some(flag != 0)
+}
+
+/// Reads the BreakOnTermination flag of a verified process. Read-only.
+pub fn breaks_on_termination(pid: u32, create_time: i64) -> Option<bool> {
+    let handle = open_verified(pid, create_time, PROCESS_ACCESS_RIGHTS(0)).ok()?;
+    handle_breaks_on_termination(&handle)
+}
+
+/// Refuses to terminate a process Windows marks critical. An unreadable flag proceeds: the
+/// terminate itself then fails if access is lacking.
+pub(crate) fn guard_critical(flag: Option<bool>) -> Result<(), ActionError> {
+    if flag == Some(true) { Err(ActionError::Critical) } else { Ok(()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +136,18 @@ mod tests {
     fn critical_names_match_with_or_without_exe() {
         assert!(is_critical("csrss.exe") && is_critical("LSASS") && is_critical("System"));
         assert!(!is_critical("chrome.exe"));
+    }
+
+    #[test]
+    fn a_break_on_termination_process_is_refused_with_a_plain_message() {
+        assert_eq!(guard_critical(Some(true)), Err(ActionError::Critical));
+        assert_eq!(
+            ActionError::Critical.message("csrss.exe", true),
+            "Windows marks this process as critical \u{2014} ending it would crash the PC."
+        );
+        // Not critical, or the flag couldn't be read: proceed (the terminate fails on its own if denied).
+        assert_eq!(guard_critical(Some(false)), Ok(()));
+        assert_eq!(guard_critical(None), Ok(()));
     }
 
     #[test]

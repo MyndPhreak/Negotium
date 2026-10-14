@@ -1,4 +1,4 @@
-use crate::{ActionError, open_verified};
+use crate::{ActionError, guard_critical, handle_breaks_on_termination, open_verified};
 use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::Threading::{PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject};
@@ -11,6 +11,8 @@ pub const FORCE_CLOSE_GRACE: Duration = Duration::from_secs(3);
 /// `FORCE_CLOSE_GRACE`, then terminates whatever is left.
 pub fn force_close(pid: u32, create_time: i64) -> Result<(), ActionError> {
     let handle = open_verified(pid, create_time, PROCESS_TERMINATE | PROCESS_SYNCHRONIZE)?;
+    // Refused up front: a process Windows marks critical is neither asked to close nor ended.
+    guard_critical(handle_breaks_on_termination(&handle))?;
     for hwnd in windows_of(pid) {
         // SAFETY: asks the window to close; PostMessage never blocks on a hung window.
         unsafe {

@@ -8,6 +8,13 @@ use slint::ComponentHandle;
 use std::sync::Arc;
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Before the worker starts, so the collector and every action see the privilege.
+    let elevated = negotium_actions::is_elevated();
+    if elevated && let Err(e) = negotium_actions::enable_debug_privilege() {
+        // Not fatal: actions on other users' processes then report access denied.
+        negotium::log::Log::new(negotium::log::Log::default_path())
+            .warn(&format!("could not enable SeDebugPrivilege: {e:?}"));
+    }
     let ui = MainWindow::new()?;
     if let Some((r, g, b)) = negotium::platform::read_accent() {
         ui.global::<negotium::Theme>().set_accent(slint::Color::from_rgb_u8(r, g, b));
@@ -127,7 +134,6 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     // Row actions. The UI thread only plans; every job runs on its own thread.
-    let elevated = negotium_actions::is_elevated();
     let pending: std::rc::Rc<std::cell::RefCell<Option<negotium::dispatch::Job>>> = Default::default();
     let start_job = {
         let weak = weak.clone();
