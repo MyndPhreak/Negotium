@@ -2,24 +2,63 @@
 
 use negotium::bridge::Bridge;
 use negotium::controls::Controls;
+use negotium::platform::{self, ShellEvent};
 use negotium::{MainWindow, NegotiumTray, worker};
 use negotium_model::Metric;
 use slint::ComponentHandle;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+
+fn warn(msg: &str) {
+    negotium::log::Log::new(negotium::log::Log::default_path()).warn(msg);
+}
+
+/// Shows the main window from the tray or a second launch: un-hides, restores, focuses.
+fn show_main(controls: &Controls, weak: &slint::Weak<MainWindow>) {
+    controls.set_visible(true);
+    if let Some(ui) = weak.upgrade() {
+        platform::bring_to_front(&ui);
+    }
+}
+
+fn make_tray(controls: &Arc<Controls>, weak: &slint::Weak<MainWindow>) -> Result<NegotiumTray, slint::PlatformError> {
+    let tray = NegotiumTray::new()?;
+    {
+        let (controls, weak) = (controls.clone(), weak.clone());
+        tray.on_open(move || show_main(&controls, &weak));
+    }
+    {
+        let controls = controls.clone();
+        tray.on_exit(move || {
+            controls.request_stop();
+            let _ = slint::quit_event_loop();
+        });
+    }
+    tray.show()?;
+    Ok(tray)
+}
 
 fn main() -> Result<(), slint::PlatformError> {
+    // One instance per session. A second launch shows the running one (even from the tray) and
+    // exits; a restart (as admin) waits for the old instance to finish quitting.
+    let restarted = std::env::args().any(|a| a == "--restarted");
+    let wait = if restarted { Duration::from_secs(10) } else { Duration::ZERO };
+    let Some(_instance) = platform::claim_instance(platform::INSTANCE_MUTEX, wait) else {
+        platform::activate_existing_instance(Duration::from_secs(5));
+        return Ok(());
+    };
     // Before the worker starts, so the collector and every action see the privilege.
     let elevated = negotium_actions::is_elevated();
     if elevated && let Err(e) = negotium_actions::enable_debug_privilege() {
         // Not fatal: actions on other users' processes then report access denied.
-        negotium::log::Log::new(negotium::log::Log::default_path())
-            .warn(&format!("could not enable SeDebugPrivilege: {e:?}"));
+        warn(&format!("could not enable SeDebugPrivilege: {e:?}"));
     }
     let ui = MainWindow::new()?;
-    if let Some((r, g, b)) = negotium::platform::read_accent() {
+    if let Some((r, g, b)) = platform::read_accent() {
         ui.global::<negotium::Theme>().set_accent(slint::Color::from_rgb_u8(r, g, b));
     }
-    let tray = NegotiumTray::new()?;
     let controls = Arc::new(Controls::default());
     let bridge = Bridge::install(&ui, controls.clone());
 
@@ -111,23 +150,6 @@ fn main() -> Result<(), slint::PlatformError> {
             _ => {}
         });
     }
-    {
-        let controls = controls.clone();
-        let weak = weak.clone();
-        tray.on_open(move || {
-            controls.set_visible(true);
-            if let Some(ui) = weak.upgrade() {
-                let _ = ui.show();
-            }
-        });
-    }
-    {
-        let controls = controls.clone();
-        tray.on_exit(move || {
-            controls.request_stop();
-            let _ = slint::quit_event_loop();
-        });
-    }
 
     // Row actions. The UI thread only plans; every job runs on its own thread.
     let pending: std::rc::Rc<std::cell::RefCell<Option<negotium::dispatch::Job>>> = Default::default();
@@ -207,7 +229,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let weak = weak.clone();
         ui.on_restart_admin(move || {
-            if negotium_actions::restart_as_admin("").is_ok() {
+            if negotium_actions::restart_as_admin("--restarted").is_ok() {
                 let _ = slint::quit_event_loop();
             } else if let Some(ui) = weak.upgrade() {
                 ui.set_toast("Restart as admin was cancelled.".into());
@@ -216,24 +238,48 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     ui.show()?;
-    // The native HWND is created lazily once the event loop runs (and the GL renderer can take a
-    // while to bring the window up), so poll until it exists, apply the chrome once, then stop.
-    let chrome_timer = std::rc::Rc::new(slint::Timer::default());
+    // The native HWND is created lazily once the event loop runs, so poll until it exists; then,
+    // once: apply the chrome, hook the window (tray re-creation, activation by a second launch),
+    // mark it for that second launch, and only now create the tray, after the window exists.
+    let tray: Rc<RefCell<Option<NegotiumTray>>> = Default::default();
+    let chrome_timer = Rc::new(slint::Timer::default());
     {
         let weak = weak.clone();
-        let handle = std::rc::Rc::downgrade(&chrome_timer);
-        chrome_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+        let controls = controls.clone();
+        let handle = Rc::downgrade(&chrome_timer);
+        chrome_timer.start(slint::TimerMode::Repeated, Duration::from_millis(50), move || {
             let Some(ui) = weak.upgrade() else { return };
-            if !negotium::platform::has_window_handle(&ui) {
-                return;
+            let Some(hwnd) = platform::main_hwnd(&ui) else { return };
+            platform::apply_window_chrome(&ui);
+            let hooked = {
+                let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
+                platform::install_window_hooks(hwnd, move |event| {
+                    // The hook runs inside the window procedure: act from the event loop instead.
+                    let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
+                    slint::Timer::single_shot(Duration::ZERO, move || match event {
+                        // Explorer restarted (perhaps ended from this very list): add the icon again.
+                        ShellEvent::TaskbarCreated => {
+                            drop(tray.borrow_mut().take());
+                            *tray.borrow_mut() = make_tray(&controls, &weak)
+                                .map_err(|e| warn(&format!("tray icon could not be re-created: {e}")))
+                                .ok();
+                        }
+                        ShellEvent::Activate => show_main(&controls, &weak),
+                    });
+                })
+            };
+            if !hooked {
+                warn("main window subclass failed: the tray icon won't survive an Explorer restart");
             }
-            negotium::platform::apply_window_chrome(&ui);
+            platform::mark_main_window(hwnd);
+            *tray.borrow_mut() = make_tray(&controls, &weak)
+                .map_err(|e| warn(&format!("tray icon could not be created: {e}")))
+                .ok();
             if let Some(t) = handle.upgrade() {
                 t.stop();
             }
         });
     }
-    tray.show()?;
     let result = slint::run_event_loop_until_quit();
     if let Some(path) = frame_stats_path {
         let _ = std::fs::write(path, frame_stats.borrow().summary_json());

@@ -3,6 +3,8 @@ export component NegotiumTray inherits SystemTrayIcon {
     tooltip: "Negotium";
     callback open();
     callback exit();
+    // Left-click on the icon opens the window too.
+    clicked => { root.open(); }
     Menu {
         MenuItem { title: "Open"; activated => { root.open(); } }
         MenuItem { title: "Exit"; activated => { root.exit(); } }
