@@ -27,6 +27,7 @@ const RESPONSIVENESS_TIMEOUT_MS: u32 = 1000;
 struct Report {
     target: String,
     logical_cpus: u32,
+    warmup_secs: u64,
     startup_ms: Vec<f64>,
     startup: Summary,
     cpu_pct: Summary,
@@ -37,12 +38,13 @@ struct Report {
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let target = args.next().context("usage: negotium-bench <taskmgr|PATH> [--runs N] [--sample-secs S] [--out FILE]")?;
-    let (mut runs, mut sample_secs, mut out) = (5u32, 60u64, None::<String>);
+    let target = args.next().context("usage: negotium-bench <taskmgr|PATH> [--runs N] [--sample-secs S] [--warmup-secs S] [--out FILE]")?;
+    let (mut runs, mut sample_secs, mut warmup_secs, mut out) = (5u32, 60u64, 5u64, None::<String>);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--runs" => runs = args.next().context("--runs N")?.parse()?,
             "--sample-secs" => sample_secs = args.next().context("--sample-secs S")?.parse()?,
+            "--warmup-secs" => warmup_secs = args.next().context("--warmup-secs S")?.parse()?,
             "--out" => out = Some(args.next().context("--out FILE")?),
             other => bail!("unknown argument {other}"),
         }
@@ -78,13 +80,15 @@ fn main() -> Result<()> {
         last = Some(target);
     }
     let target = last.context("--runs must be at least 1")?;
-    println!("sampling pid {} for {sample_secs} s …", target.pid);
-    let (cpu, ws, resp, timeouts) = sample(&target, Duration::from_secs(sample_secs))?;
+    println!("warming up pid {} for {warmup_secs} s, then sampling for {sample_secs} s …", target.pid);
+    let (cpu, ws, resp, timeouts) =
+        sample(&target, Duration::from_secs(warmup_secs), Duration::from_secs(sample_secs))?;
     target.close()?;
 
     let report = Report {
         target: path.display().to_string(),
         logical_cpus: logical_cpus(),
+        warmup_secs,
         startup: summary(&startup_ms),
         startup_ms,
         cpu_pct: summary(&cpu),
@@ -245,9 +249,12 @@ fn wait_for_window(pid: u32) -> Result<HWND> {
     }
 }
 
-fn sample(target: &Launched, duration: Duration) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, usize)> {
+/// Waits `warmup` (excluded from the samples, so the launch burst does not skew them), then
+/// samples for `duration`.
+fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, usize)> {
     let pid = target.pid;
     let hwnd_bits = target.hwnd.context("target window not found")?;
+    std::thread::sleep(warmup);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_probe = stop.clone();
     let prober = std::thread::spawn(move || -> std::result::Result<(Vec<f64>, usize), String> {

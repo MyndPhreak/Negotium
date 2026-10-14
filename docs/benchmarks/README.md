@@ -56,11 +56,14 @@ The measurement needs an elevated terminal (Task Manager auto-elevates and UIPI 
 cargo run -p negotium-bench --release -- taskmgr --runs 5 --sample-secs 60 --out docs/benchmarks/2026-10-14-taskmgr-baseline.json
 ```
 
+The first 5 s after the window appears (`--warmup-secs`, default 5) are excluded from the CPU, working-set and responsiveness samples so the launch burst does not skew them; the `--sample-secs` window starts after the warm-up.
+
 If interrupted with Ctrl+C during sampling, close Task Manager before re-running.
 
 | Metric | Task Manager | Negotium target (spec §8) |
 |---|---|---|
-| Launch → first window, median of 5 | pending (run elevated) | ≤ 250 ms |
+| Launch → first window (run 1 is cold, runs 2–5 warm; median of 5) | pending (run elevated) | ≤ 250 ms |
+| Launch → first window, cold (`startup_ms[0]`) | pending (run elevated) | ≤ 250 ms |
 | CPU while visible, mean / max | pending (run elevated) | ≤ 0.5 % of one core (= 0.0156 % of total on 32 logical processors) |
 | Private working set, max | pending (run elevated) | ≤ 60 MB |
 | UI responsiveness (WM_NULL), median / p95 / max | pending (run elevated) | no frame > 16 ms (Plan 2 measures frames) |
