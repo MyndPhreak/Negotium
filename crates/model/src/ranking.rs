@@ -1,6 +1,7 @@
-//! Stable ordering for the app list: re-sorts at most every RESORT_INTERVAL_MS,
-//! never while frozen (pointer over the list), immediately on metric change, and
-//! immediately (when not frozen) if the set of hung apps changes. Hung apps lead.
+//! Stable ordering for the app list. Re-sorts at most every RESORT_INTERVAL_MS; never
+//! while frozen (pointer over the list) except on a metric change, which is an explicit
+//! user action; immediately on metric change; immediately when not frozen if the set of
+//! hung apps changes. Hung apps lead.
 use crate::{AppKey, AppRow};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -132,6 +133,15 @@ mod tests {
         rows[1].private_bytes = 999;
         r.order(&rows, Metric::Cpu, 0, false);
         assert_eq!(names(&rows, &r.order(&rows, Metric::Memory, 10, false)), ["b", "a"]);
+    }
+
+    #[test]
+    fn metric_change_resorts_even_while_frozen() {
+        let mut r = Ranker::new();
+        let mut rows = vec![row(1, "a", 50.0, false), row(2, "b", 10.0, false)];
+        rows[1].private_bytes = 999;
+        assert_eq!(names(&rows, &r.order(&rows, Metric::Cpu, 0, false)), ["a", "b"]);
+        assert_eq!(names(&rows, &r.order(&rows, Metric::Memory, 10, true)), ["b", "a"]);
     }
 
     #[test]
