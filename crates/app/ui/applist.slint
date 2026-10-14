@@ -104,6 +104,12 @@ export component AppList inherits VerticalLayout {
                     // (the Buttons take only Space and Return) bubble up here.
                     row-keys := FocusScope {
                         enabled: false;
+                        // Any key pressed while focus is inside this row (re)asserts the freeze, so a
+                        // missed focus edge can't leave Space acting on an unfrozen list.
+                        capture-key-pressed(e) => {
+                            root.row-focus(r.id, true);
+                            return reject;
+                        }
                         key-pressed(e) => {
                             if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
                                 open-menu(8px, 32px);

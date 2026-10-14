@@ -131,7 +131,11 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let b = bridge.clone();
-        ui.on_row_key_focus(move |id, focused| b.borrow_mut().set_key_focus(id, focused));
+        ui.on_row_key_focus(move |id, focused| negotium::bridge::row_focus(&b, id, focused));
+    }
+    {
+        let b = bridge.clone();
+        ui.on_clear_key_focus(move || b.borrow_mut().clear_key_focus());
     }
     {
         let b = bridge.clone();
@@ -195,8 +199,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         if let Some(details) = text.strip_prefix("details:") {
-                            ui.set_details_text(details.into());
-                            ui.set_details_visible(true);
+                            ui.invoke_show_details(details.into());
                         } else if !text.is_empty() {
                             ui.set_toast(text.into());
                         }
@@ -222,8 +225,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 negotium::dispatch::Plan::Confirm(text, job) => {
                     *pending.borrow_mut() = Some(job);
                     if let Some(ui) = weak.upgrade() {
-                        ui.set_confirm_text(text.into());
-                        ui.set_confirm_visible(true);
+                        ui.invoke_show_confirm(text.into());
                     }
                 }
                 negotium::dispatch::Plan::Nothing => {}

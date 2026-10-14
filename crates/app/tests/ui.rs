@@ -389,3 +389,101 @@ fn keyboard_menu_on_a_focused_row_acts_on_that_row_not_on_a_stale_capture() {
     key(&ui, Key::Return);
     assert_eq!(*actions.borrow(), [("end-task".to_string(), 7)]);
 }
+
+// ---- Fix round 3 (R11) ----
+
+/// A shown window driven by a real Bridge, wired the way main.rs wires it.
+type FocusLog = Rc<RefCell<Vec<(i32, bool)>>>;
+
+fn wired(rows: Vec<RowView>) -> (MainWindow, Arc<Controls>, FocusLog) {
+    let (ui, controls, bridge) = bridged();
+    bridge.borrow_mut().apply(&ui, frame(rows));
+    let log: FocusLog = Default::default();
+    let (b, l) = (bridge.clone(), log.clone());
+    ui.on_row_key_focus(move |id, focused| {
+        l.borrow_mut().push((id, focused));
+        negotium::bridge::row_focus(&b, id, focused);
+    });
+    let b = bridge.clone();
+    ui.on_list_hover(move |h| b.borrow_mut().set_hover(h));
+    let b = bridge.clone();
+    ui.on_clear_key_focus(move || b.borrow_mut().clear_key_focus());
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.show().unwrap();
+    (ui, controls, log)
+}
+
+fn tab_until(ui: &MainWindow, done: impl Fn() -> bool) -> bool {
+    for _ in 0..40 {
+        slint::platform::update_timers_and_animations();
+        if done() {
+            return true;
+        }
+        key(ui, slint::platform::Key::Tab);
+    }
+    slint::platform::update_timers_and_animations();
+    done()
+}
+
+#[test]
+fn a_modal_over_a_focused_force_close_does_not_leave_the_list_frozen() {
+    let (ui, controls, log) = wired(vec![row_view(7, "Editor", HUNG), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || log.borrow().last() == Some(&(7, true))), "Tab onto Editor's Force close");
+    assert!(controls.frozen(), "keyboard focus on it freezes the list");
+    // Space on a critical row (or Shift+F10 -> Details) opens a modal over the focused button.
+    ui.invoke_show_confirm("End a critical process?".into());
+    slint::platform::update_timers_and_animations();
+    assert_eq!(log.borrow().last(), Some(&(7, false)), "the button really loses focus (no stale focus ring)");
+    ui.set_confirm_visible(false);
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen(), "closing the modal must not leave the list frozen");
+    let before = log.borrow().len();
+    assert!(
+        tab_until(&ui, || log.borrow()[before..].first() == Some(&(7, true))),
+        "tabbing back onto the button reports focus again: {:?}",
+        log.borrow()
+    );
+    assert!(controls.frozen(), "and freezes the list again");
+}
+
+#[test]
+fn the_menu_key_opens_the_focused_rows_menu_with_that_row_captured() {
+    use slint::platform::Key;
+    let ui = shown_window();
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let a = actions.clone();
+    ui.on_row_action(move |name, id| a.borrow_mut().push((name.to_string(), id)));
+    let focus = Rc::new(RefCell::new(Vec::new()));
+    let f = focus.clone();
+    ui.on_row_key_focus(move |id, has| f.borrow_mut().push((id, has)));
+    assert!(tab_until(&ui, || focus.borrow().last() == Some(&(7, true))), "Force close on Editor focused");
+    actions.borrow_mut().clear();
+    key(&ui, Key::Menu);
+    assert_eq!(ui.get_menu_target(), 7);
+    key(&ui, Key::DownArrow);
+    key(&ui, Key::Return);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 7)]);
+}
+
+#[test]
+fn any_modal_drops_the_keyboard_freeze_even_without_a_focus_out() {
+    // A modal opened without parking focus first: the disabled button never sees its focus-out.
+    let (ui, controls, log) = wired(vec![row_view(7, "Editor", HUNG), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || log.borrow().last() == Some(&(7, true))));
+    assert!(controls.frozen());
+    ui.set_details_visible(true);
+    slint::platform::update_timers_and_animations();
+    ui.set_details_visible(false);
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen(), "modal-open clears the keyboard focus");
+}
+
+#[test]
+fn a_key_pressed_inside_a_row_reasserts_a_missed_keyboard_freeze() {
+    let (ui, controls, log) = wired(vec![row_view(7, "Editor", HUNG), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || log.borrow().last() == Some(&(7, true))));
+    ui.invoke_clear_key_focus(); // a focus edge that never arrived
+    assert!(!controls.frozen());
+    key(&ui, slint::platform::Key::Shift); // e.g. the start of Shift+F10, or Space
+    assert!(controls.frozen(), "the capture phase re-freezes before the key acts");
+}

@@ -308,6 +308,13 @@ impl Bridge {
         })
     }
 
+    /// A modal opened: its controls are disabled, and a disabled Button never sees the focus-out,
+    /// so forget the keyboard focus here.
+    pub fn clear_key_focus(&mut self) {
+        self.key_focus = None;
+        self.update_frozen();
+    }
+
     pub fn set_menu_open(&mut self, open: bool) {
         self.menu_open = open;
         self.update_frozen();
@@ -348,6 +355,11 @@ impl Bridge {
 
 thread_local! {
     static CURRENT: RefCell<Option<Rc<RefCell<Bridge>>>> = const { RefCell::new(None) };
+}
+
+/// Keyboard focus entered or left a control in row `id` (the UI's `row-key-focus`).
+pub fn row_focus(bridge: &Rc<RefCell<Bridge>>, id: i32, focused: bool) {
+    bridge.borrow_mut().set_key_focus(id, focused);
 }
 
 pub fn set_current(b: Rc<RefCell<Bridge>>) {

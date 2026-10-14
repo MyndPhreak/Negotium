@@ -24,10 +24,10 @@ export component MainWindow inherits Window {
     in property <bool> show-admin-banner;
     in-out property <string> search-text;
     in property <string> toast;
-    in property <string> confirm-text;
-    in property <bool> confirm-visible;
-    in property <string> details-text;
-    in property <bool> details-visible;
+    in-out property <string> confirm-text;
+    in-out property <bool> confirm-visible;
+    in-out property <string> details-text;
+    in-out property <bool> details-visible;
     out property <bool> modal-open: confirm-visible || details-visible;
     out property <int> menu-target: list.menu-target;
 
@@ -38,6 +38,7 @@ export component MainWindow inherits Window {
     callback list-hover(bool);
     callback menu-open(bool);
     callback row-key-focus(int, bool);
+    callback clear-key-focus();
     callback search-changed(string);
     callback restart-admin();
     callback dismiss-banner();
@@ -47,7 +48,34 @@ export component MainWindow inherits Window {
 
     // has-hover only re-evaluates on the next pointer event, so release the list freeze explicitly
     // when a modal opens and re-evaluate it when the modal closes.
-    changed modal-open => { root.list-hover(!root.modal-open && list.hovered); }
+    // A modal disables every control beneath it; a disabled Button ignores its focus-out, so the
+    // keyboard focus (and its list freeze) is dropped explicitly as well.
+    changed modal-open => {
+        root.list-hover(!root.modal-open && list.hovered);
+        if (root.modal-open) {
+            root.clear-key-focus();
+        }
+    }
+
+    // Open a modal only through these: focus is parked first, while the controls beneath are
+    // still enabled, so a focused row button gets a real focus-out (no stale focus ring, and
+    // tabbing back onto it reports focus again).
+    public function show-confirm(text: string) {
+        parking.focus();
+        root.confirm-text = text;
+        root.confirm-visible = true;
+    }
+    public function show-details(text: string) {
+        parking.focus();
+        root.details-text = text;
+        root.details-visible = true;
+    }
+    parking := FocusScope {
+        width: 0px;
+        height: 0px;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+    }
 
     VerticalLayout {
         padding: 12px;
