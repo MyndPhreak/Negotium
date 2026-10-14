@@ -5,6 +5,8 @@ export struct RowData {
     id: int, depth: int, name: string, count: string,
     cpu: string, mem: string, disk: string, gpu: string, net: string,
     bar: float, hung: string, expandable: bool, expanded: bool, actionable: bool,
+    // The app or process went away while the list was frozen: shown in place, dimmed, inert.
+    exited: bool,
 }
 
 component Cell inherits Text {
@@ -30,9 +32,14 @@ export component AppList inherits VerticalLayout {
     in property <bool> interactive: true;
     in-out property <string> search-text;
     out property <bool> hovered: area.has-hover;
+    // The row a context menu was opened on. Captured when it opens; every menu item acts on it,
+    // never on whatever row data sits at that index by the time an item is chosen.
+    out property <int> menu-target: -1;
     callback toggle(int);
     callback action(string, int);
     callback hover(bool);
+    // True when a row's context menu opens, false once it has closed: the list stays frozen meanwhile.
+    callback menu-open(bool);
     callback search(string);
     spacing: 6px;
 
@@ -62,20 +69,36 @@ export component AppList inherits VerticalLayout {
                 height: 32px;
                 background: r.hung != "" ? Theme.danger-bg : (row-touch.has-hover ? Theme.card : transparent);
                 border-radius: 4px;
+                opacity: r.exited ? 0.5 : 1.0;
                 accessible-role: list-item;
-                accessible-label: r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
-                row-touch := TouchArea {
-                    enabled: root.interactive;
-                    double-clicked => { if (r.expandable) { root.toggle(r.id); } }
-                    ContextMenuArea {
-                        enabled: root.interactive && r.actionable;
-                        Menu {
-                            MenuItem { title: "End task"; enabled: r.actionable; activated => { root.action("end-task", r.id); } }
-                            MenuItem { title: "End process tree"; enabled: r.actionable; activated => { root.action("end-tree", r.id); } }
-                            MenuItem { title: "Efficiency mode"; enabled: r.actionable; activated => { root.action("efficiency", r.id); } }
-                            MenuSeparator { }
-                            MenuItem { title: "Open file location"; enabled: r.actionable; activated => { root.action("open-location", r.id); } }
-                            MenuItem { title: "Details"; enabled: r.actionable; activated => { root.action("details", r.id); } }
+                accessible-label: r.exited ? r.name + ", exited"
+                    : r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
+                menu := ContextMenuArea {
+                    enabled: root.interactive && r.actionable;
+                    Menu {
+                        MenuItem { title: "End task"; enabled: r.actionable; activated => { root.action("end-task", root.menu-target); } }
+                        MenuItem { title: "End process tree"; enabled: r.actionable; activated => { root.action("end-tree", root.menu-target); } }
+                        MenuItem { title: "Efficiency mode"; enabled: r.actionable; activated => { root.action("efficiency", root.menu-target); } }
+                        MenuSeparator { }
+                        MenuItem { title: "Open file location"; enabled: r.actionable; activated => { root.action("open-location", root.menu-target); } }
+                        MenuItem { title: "Details"; enabled: r.actionable; activated => { root.action("details", root.menu-target); } }
+                    }
+                    // Inside the ContextMenuArea so a right press reaches this TouchArea first: it
+                    // captures the target and opens the menu itself.
+                    row-touch := TouchArea {
+                        enabled: root.interactive;
+                        double-clicked => { if (r.expandable) { root.toggle(r.id); } }
+                        pointer-event(e) => {
+                            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down && r.actionable && root.interactive) {
+                                root.menu-target = r.id;
+                                root.menu-open(true);
+                                // The native Windows menu (muda, TrackPopupMenu) is modal: show() returns
+                                // only once it has closed, so the list stays frozen exactly while it is open.
+                                // Slint's popup fallback (no native menus) returns at once; there the
+                                // captured menu-target alone keeps the action on the right row.
+                                menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                root.menu-open(false);
+                            }
                         }
                         HorizontalLayout {
                             padding-left: 8px + r.depth * 20px;
@@ -111,6 +134,7 @@ export component AppList inherits VerticalLayout {
                                 spacing: 6px;
                                 Text { text: r.name; color: Theme.text; font-size: 12px; vertical-alignment: center; overflow: elide; }
                                 Text { text: r.count; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                if r.exited : Text { text: "Exited"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
                                 if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11px; vertical-alignment: center; }
                                 if r.hung != "" && r.actionable : Button {
                                     text: "Force close";

@@ -15,15 +15,15 @@ fn window() -> MainWindow {
     ui.set_rows(ModelRc::new(VecModel::from(vec![RowData {
         id: 7, depth: 0, name: "Editor".into(), count: "".into(), cpu: "1.0%".into(), mem: "1.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.5, hung: "Not responding · 9s".into(),
-        expandable: false, expanded: false, actionable: true,
+        expandable: false, expanded: false, actionable: true, exited: false,
     }, RowData {
         id: 9, depth: 0, name: "Browser".into(), count: "(3)".into(), cpu: "2.0%".into(), mem: "2.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.2, hung: "".into(),
-        expandable: true, expanded: false, actionable: true,
+        expandable: true, expanded: false, actionable: true, exited: false,
     }, RowData {
         id: 11, depth: 0, name: "Windows".into(), count: "(90)".into(), cpu: "3.0%".into(), mem: "3.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.1, hung: "".into(),
-        expandable: true, expanded: false, actionable: false,
+        expandable: true, expanded: false, actionable: false, exited: false,
     }])));
     ui
 }
@@ -199,4 +199,71 @@ fn clicking_a_tile_clears_the_search_box() {
     let tile = ElementHandle::find_by_accessible_label(&ui, "Chrome tile").next().expect("tile");
     tile.invoke_accessible_default_action();
     assert_eq!(ui.get_search_text(), "");
+}
+
+fn press(ui: &MainWindow, x: f32, y: f32, button: slint::platform::PointerEventButton) {
+    let position = LogicalPosition::new(x, y);
+    ui.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+    ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+}
+
+fn key(ui: &MainWindow, k: slint::platform::Key) {
+    let text: slint::SharedString = k.into();
+    ui.window().dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    ui.window().dispatch_event(WindowEvent::KeyReleased { text });
+}
+
+#[test]
+fn context_menu_acts_on_the_row_it_was_opened_on_even_if_rows_move_underneath() {
+    use slint::Model;
+    let ui = shown_window();
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let a = actions.clone();
+    ui.on_row_action(move |name, id| a.borrow_mut().push((name.to_string(), id)));
+    let menu = Rc::new(RefCell::new(Vec::new()));
+    let m = menu.clone();
+    ui.on_menu_open(move |open| m.borrow_mut().push(open));
+
+    // Right-click the Browser row (id 9, second row).
+    let row = El::find_by_accessible_label(&ui, BROWSER_ROW).next().expect("browser row");
+    let (rx, ry) = centre(&row);
+    move_pointer(&ui, rx, ry);
+    press(&ui, rx, ry, slint::platform::PointerEventButton::Right);
+    assert_eq!(ui.get_menu_target(), 9, "the menu captures the row it opened on");
+    // The freeze starts before the menu shows. (Under this popup fallback show() returns at once and
+    // the freeze ends; the native Windows menu is modal and holds it until the menu closes.)
+    assert_eq!(menu.borrow().first(), Some(&true), "the list is frozen before the menu shows: {:?}", menu.borrow());
+
+    // While the menu is open a frame rewrites the rows by index: Editor now sits where Browser was.
+    let rows = ui.get_rows();
+    let (editor, browser) = (rows.row_data(0).unwrap(), rows.row_data(1).unwrap());
+    rows.set_row_data(0, browser);
+    rows.set_row_data(1, editor);
+
+    // Choose "End task" (the first item) from the keyboard.
+    key(&ui, slint::platform::Key::DownArrow);
+    key(&ui, slint::platform::Key::Return);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 9)], "acts on the captured row, not the one now at that index");
+}
+
+#[test]
+fn an_exited_row_is_marked_and_offers_no_actions() {
+    use slint::Model;
+    let ui = window();
+    let rows = ui.get_rows();
+    let mut browser = rows.row_data(1).unwrap();
+    browser.exited = true;
+    browser.actionable = false;
+    rows.set_row_data(1, browser);
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.show().unwrap();
+    let row = El::find_by_accessible_label(&ui, "Browser, exited").next().expect("marked exited");
+    let (x, y) = centre(&row);
+    move_pointer(&ui, x, y);
+    assert!(El::find_by_accessible_label(&ui, "End task Browser").next().is_none());
+    let menu = Rc::new(RefCell::new(Vec::new()));
+    let m = menu.clone();
+    ui.on_menu_open(move |open| m.borrow_mut().push(open));
+    press(&ui, x, y, slint::platform::PointerEventButton::Right);
+    assert!(menu.borrow().is_empty(), "no context menu on an exited row");
 }

@@ -29,12 +29,14 @@ export component MainWindow inherits Window {
     in property <string> details-text;
     in property <bool> details-visible;
     out property <bool> modal-open: confirm-visible || details-visible;
+    out property <int> menu-target: list.menu-target;
 
     callback select-metric(int);
     callback open-tile(int);
     callback toggle-row(int);
     callback row-action(string, int);
     callback list-hover(bool);
+    callback menu-open(bool);
     callback search-changed(string);
     callback restart-admin();
     callback dismiss-banner();
@@ -76,6 +78,7 @@ export component MainWindow inherits Window {
             toggle(id) => { root.toggle-row(id); }
             action(name, id) => { root.row-action(name, id); }
             hover(h) => { root.list-hover(h); }
+            menu-open(open) => { root.menu-open(open); }
             search(text) => { root.search-changed(text); }
         }
         if root.toast != "" : Toast {

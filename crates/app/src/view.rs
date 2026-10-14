@@ -22,6 +22,8 @@ pub struct RowView {
     pub bar: f32, pub hung: String, pub expandable: bool,
     /// False for the "Windows" group row: it is never a target of any action.
     pub actionable: bool,
+    /// Gone since the list froze: held in place (so no other row shifts under the pointer), inert.
+    pub exited: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -217,6 +219,7 @@ pub fn build_frame(
             bar: frac(r.value(metric)), hung: r.hung_for_ms.map(format::hung).unwrap_or_default(),
             expandable: r.processes.len() > 1,
             actionable: r.key != AppKey::Windows,
+            exited: false,
         });
         if r.processes.len() > 1 {
             for p in &r.processes {
@@ -236,6 +239,7 @@ pub fn build_frame(
                     // Its own hung text, so Force close shows on (and targets) this process even
                     // when its app row is the never-actionable Windows group.
                     bar: 0.0, hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true,
+                    exited: false,
                 });
             }
         }

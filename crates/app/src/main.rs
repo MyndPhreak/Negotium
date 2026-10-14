@@ -46,39 +46,34 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    // The list freezes (rows keep their index) while the pointer is over it or a row menu is open.
     {
-        let controls = controls.clone();
-        ui.on_list_hover(move |h| controls.set_frozen(h));
+        let b = bridge.clone();
+        ui.on_list_hover(move |h| b.borrow_mut().set_hover(h));
     }
     {
         let b = bridge.clone();
-        ui.on_search_changed(move |text| {
-            b.borrow_mut().search = text.to_string();
-            b.borrow().refresh_rows();
-        });
-    }
-    {
-        let b = bridge.clone();
-        ui.on_toggle_row(move |id| {
-            {
-                let mut b = b.borrow_mut();
-                if !b.expanded.remove(&id) {
-                    b.expanded.insert(id);
-                }
+        ui.on_menu_open(move |open| {
+            if open {
+                b.borrow_mut().set_menu_open(true);
+            } else {
+                // Unfreezing can drop rows; do it after the row's own pointer handler has returned.
+                let b = b.clone();
+                slint::Timer::single_shot(std::time::Duration::ZERO, move || b.borrow_mut().set_menu_open(false));
             }
-            b.borrow().refresh_rows();
         });
     }
     {
         let b = bridge.clone();
-        ui.on_open_tile(move |id| {
-            {
-                let mut b = b.borrow_mut();
-                b.search.clear(); // the box itself is emptied by main.slint in the same click
-                b.expanded.insert(id);
-            }
-            b.borrow().refresh_rows();
-        });
+        ui.on_search_changed(move |text| b.borrow_mut().set_search(&text));
+    }
+    {
+        let b = bridge.clone();
+        ui.on_toggle_row(move |id| b.borrow_mut().toggle(id));
+    }
+    {
+        let b = bridge.clone();
+        ui.on_open_tile(move |id| b.borrow_mut().open_tile(id));
     }
     {
         let b = bridge.clone();
@@ -90,6 +85,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let exit_on_close = std::env::args().any(|a| a == "--exit-on-close");
     {
         let controls = controls.clone();
+        let b = bridge.clone();
         ui.window().on_close_requested(move || {
             if exit_on_close {
                 controls.request_stop();
@@ -98,7 +94,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             controls.set_visible(false);
             // A hidden window cannot report pointer-leave, so release the hover freeze here.
-            controls.set_frozen(false);
+            b.borrow_mut().set_hover(false);
             slint::CloseRequestResponse::HideWindow
         });
     }

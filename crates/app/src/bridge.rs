@@ -1,11 +1,11 @@
 //! UI-thread glue: applies worker Frames to Slint models in place and keeps
 //! expand/search state local so they react instantly. No Windows calls here.
 use crate::controls::Controls;
-use crate::view::{Frame, Target, visible_rows};
+use crate::view::{Frame, RowView, Target, visible_rows};
 use crate::{MainWindow, MeterData, RowData, TileData};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -41,13 +41,120 @@ pub fn sync_model<T: Clone + PartialEq, S: RowStore<T>>(store: &S, items: Vec<T>
     }
 }
 
+/// Which rows the list shows, in which order. Unfrozen it simply follows the latest frame. While
+/// frozen (pointer over the list, or a row's context menu open) every index keeps its row: rows
+/// that went away stay in place, marked exited and inert, and new rows wait until the list
+/// unfreezes, so a click can never land on a different app than the one under the pointer.
+/// Values of the rows it keeps go on updating.
+#[derive(Default)]
+pub struct RowLayout {
+    shown: Vec<RowView>,
+    /// Apps the user expanded while frozen: their children are let in once, with the first frame
+    /// that has them (they are only built after the expand reaches the worker).
+    admit: HashSet<i32>,
+    frozen: bool,
+}
+
+impl RowLayout {
+    pub fn rows(&self) -> &[RowView] {
+        &self.shown
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.frozen
+    }
+
+    /// A new frame: `all` is every row it built, `fresh` the rows the list would show unfrozen.
+    pub fn on_frame(&mut self, all: &[RowView], fresh: Vec<RowView>) {
+        if !self.frozen {
+            self.shown = fresh;
+            return;
+        }
+        self.shown = hold(&self.shown, all, &fresh, &self.admit);
+        self.admit.retain(|p| !fresh.iter().any(|r| r.parent == *p));
+    }
+
+    pub fn set_frozen(&mut self, frozen: bool, all: &[RowView], fresh: Vec<RowView>) {
+        if frozen == self.frozen {
+            return;
+        }
+        self.frozen = frozen;
+        if frozen {
+            self.on_frame(all, fresh);
+        } else {
+            self.admit.clear();
+            self.shown = fresh;
+        }
+    }
+
+    /// The user changed the search: rows move as the direct result of their typing.
+    pub fn rebase(&mut self, fresh: Vec<RowView>) {
+        self.admit.clear();
+        self.shown = fresh;
+    }
+
+    /// The user expanded app `id`: its children appear right below it (now, or with the first
+    /// frame that has them); nothing else moves.
+    pub fn expand(&mut self, id: i32, all: &[RowView], fresh: Vec<RowView>) {
+        if !self.frozen {
+            self.shown = fresh;
+            return;
+        }
+        self.admit.insert(id);
+        self.on_frame(all, fresh);
+    }
+
+    /// The user collapsed app `id`: just its children go.
+    pub fn collapse(&mut self, id: i32, all: &[RowView], fresh: Vec<RowView>) {
+        if !self.frozen {
+            self.shown = fresh;
+            return;
+        }
+        self.admit.remove(&id);
+        self.shown.retain(|r| r.parent != id);
+        self.on_frame(all, fresh);
+    }
+}
+
+/// Keeps `prev`'s ids at their indices, refreshing each from `all`; ids missing from `all` become
+/// exited placeholders. New children of admitted apps go at the end of their app's block.
+fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i32>) -> Vec<RowView> {
+    let live: HashMap<i32, &RowView> = all.iter().map(|r| (r.id, r)).collect();
+    let prev_ids: HashSet<i32> = prev.iter().map(|r| r.id).collect();
+    let mut out = Vec::with_capacity(prev.len());
+    for (i, p) in prev.iter().enumerate() {
+        out.push(match live.get(&p.id) {
+            Some(r) => (*r).clone(),
+            None => RowView {
+                id: p.id,
+                parent: p.parent,
+                depth: p.depth,
+                name: p.name.clone(),
+                search_text: p.search_text.clone(),
+                exited: true,
+                actionable: false,
+                ..Default::default()
+            },
+        });
+        let owner = if p.depth == 0 { p.id } else { p.parent };
+        let block_ends = prev.get(i + 1).is_none_or(|n| n.depth == 0);
+        if block_ends && admit.contains(&owner) {
+            out.extend(fresh.iter().filter(|r| r.parent == owner && !prev_ids.contains(&r.id)).cloned());
+        }
+    }
+    out
+}
+
 pub struct Bridge {
     meters: Rc<VecModel<MeterData>>,
     tiles: Rc<VecModel<TileData>>,
     rows: Rc<VecModel<RowData>>,
-    pub expanded: HashSet<i32>,
-    pub search: String,
+    expanded: HashSet<i32>,
+    search: String,
     last: Frame,
+    layout: RowLayout,
+    hover: bool,
+    menu_open: bool,
     banner_dismissed: bool,
     pub controls: Arc<Controls>,
     ui: slint::Weak<MainWindow>,
@@ -62,6 +169,9 @@ impl Bridge {
             expanded: HashSet::new(),
             search: String::new(),
             last: Frame::default(),
+            layout: RowLayout::default(),
+            hover: false,
+            menu_open: false,
             banner_dismissed: false,
             controls,
             ui: ui.as_weak(),
@@ -82,16 +192,72 @@ impl Bridge {
         ui.set_top_caption(frame.caption.clone().into());
         ui.set_show_admin_banner(frame.admin_banner && !self.banner_dismissed);
         self.last = frame;
-        self.refresh_rows();
+        let fresh = self.fresh();
+        self.layout.on_frame(&self.last.rows, fresh);
+        self.push_rows();
     }
 
-    pub fn refresh_rows(&self) {
-        let visible = visible_rows(&self.last.rows, &self.expanded, &self.search);
-        sync_model(&*self.rows, visible.into_iter().map(|r| RowData {
-            id: r.id, depth: r.depth, name: r.name.into(), count: r.count.into(), cpu: r.cpu.into(), mem: r.mem.into(),
-            disk: r.disk.into(), gpu: r.gpu.into(), net: r.net.into(), bar: r.bar, hung: r.hung.into(),
-            expandable: r.expandable, expanded: self.expanded.contains(&r.id), actionable: r.actionable,
+    fn fresh(&self) -> Vec<RowView> {
+        visible_rows(&self.last.rows, &self.expanded, &self.search)
+    }
+
+    fn push_rows(&self) {
+        sync_model(&*self.rows, self.layout.rows().iter().map(|r| RowData {
+            id: r.id, depth: r.depth, name: r.name.clone().into(), count: r.count.clone().into(), cpu: r.cpu.clone().into(),
+            mem: r.mem.clone().into(), disk: r.disk.clone().into(), gpu: r.gpu.clone().into(), net: r.net.clone().into(),
+            bar: r.bar, hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.expanded.contains(&r.id),
+            actionable: r.actionable, exited: r.exited,
         }).collect());
+    }
+
+    pub fn set_search(&mut self, text: &str) {
+        self.search = text.to_string();
+        let fresh = self.fresh();
+        self.layout.rebase(fresh);
+        self.push_rows();
+    }
+
+    pub fn toggle(&mut self, id: i32) {
+        let expanding = !self.expanded.remove(&id);
+        if expanding {
+            self.expanded.insert(id);
+        }
+        let fresh = self.fresh();
+        if expanding {
+            self.layout.expand(id, &self.last.rows, fresh);
+        } else {
+            self.layout.collapse(id, &self.last.rows, fresh);
+        }
+        self.push_rows();
+    }
+
+    /// A top-strip tile: clears the search and expands that app.
+    pub fn open_tile(&mut self, id: i32) {
+        self.search.clear(); // the box itself is emptied by main.slint in the same click
+        self.expanded.insert(id);
+        let fresh = self.fresh();
+        self.layout.rebase(fresh);
+        self.push_rows();
+    }
+
+    pub fn set_hover(&mut self, hover: bool) {
+        self.hover = hover;
+        self.update_frozen();
+    }
+
+    pub fn set_menu_open(&mut self, open: bool) {
+        self.menu_open = open;
+        self.update_frozen();
+    }
+
+    fn update_frozen(&mut self) {
+        let frozen = self.hover || self.menu_open;
+        self.controls.set_frozen(frozen);
+        if frozen != self.layout.frozen() {
+            let fresh = self.fresh();
+            self.layout.set_frozen(frozen, &self.last.rows, fresh);
+            self.push_rows();
+        }
     }
 
     pub fn dismiss_banner(&mut self) {
@@ -101,6 +267,7 @@ impl Bridge {
         }
     }
 
+    /// The action target for a row id; `None` once that row's app or process has exited.
     pub fn target(&self, id: i32) -> Option<Target> {
         self.last.targets.get(&id).cloned()
     }
@@ -156,6 +323,58 @@ mod tests {
         store.ops.borrow_mut().clear();
         sync_model(&store, vec![1, 9, 3, 5, 6]);
         assert_eq!(*store.ops.borrow(), ["push", "push"]);
+    }
+
+    fn app(id: i32, cpu: &str) -> RowView {
+        RowView { id, parent: -1, depth: 0, name: format!("app{id}"), cpu: cpu.into(), actionable: true, ..Default::default() }
+    }
+    fn child(id: i32, parent: i32) -> RowView {
+        RowView { id, parent, depth: 1, name: format!("proc{id}"), cpu: "0.0%".into(), actionable: true, ..Default::default() }
+    }
+    fn ids(rows: &[RowView]) -> Vec<i32> {
+        rows.iter().map(|r| r.id).collect()
+    }
+
+    #[test]
+    fn frozen_rows_keep_their_index_while_apps_exit_and_appear() {
+        let mut layout = RowLayout::default();
+        // X, Y (expanded: Y1, Y2), Z.
+        let first = vec![app(1, "5.0%"), app(2, "4.0%"), child(3, 2), child(4, 2), app(5, "1.0%")];
+        layout.on_frame(&first, first.clone());
+        layout.set_frozen(true, &first, first.clone());
+        // Next frame: X exited, Y gained a child (Y3), a new app W appeared, Z's values changed.
+        let second = vec![app(2, "4.0%"), child(3, 2), child(4, 2), child(6, 2), app(5, "9.0%"), app(7, "8.0%")];
+        layout.on_frame(&second, second.clone());
+        let shown = layout.rows();
+        assert_eq!(ids(shown), [1, 2, 3, 4, 5], "every index keeps its id; new rows wait");
+        assert!(shown[0].exited && !shown[0].actionable, "the exited app stays in place, inert");
+        assert!(shown[1..].iter().all(|r| r.actionable && !r.exited));
+        assert_eq!(shown[4].cpu, "9.0%", "surviving rows keep updating");
+        // Pointer leaves: the list catches up at once.
+        layout.set_frozen(false, &second, second.clone());
+        assert_eq!(ids(layout.rows()), [2, 3, 4, 6, 5, 7]);
+    }
+
+    #[test]
+    fn expanding_while_frozen_admits_only_that_apps_children() {
+        let mut layout = RowLayout::default();
+        let rows = vec![app(1, "1%"), app(2, "1%")];
+        layout.on_frame(&rows, rows.clone());
+        layout.set_frozen(true, &rows, rows.clone());
+        // The user expands app 2; its children arrive with the next frame, as does a new app 9.
+        layout.expand(2, &rows, rows.clone());
+        let next = vec![app(1, "1%"), app(2, "1%"), child(3, 2), child(4, 2), app(9, "1%")];
+        let visible = next.clone();
+        layout.on_frame(&next, visible);
+        assert_eq!(ids(layout.rows()), [1, 2, 3, 4], "the expanded app's children appear; the new app waits");
+        // A later child of the same app is a new row like any other: deferred.
+        let later = vec![app(1, "1%"), app(2, "1%"), child(3, 2), child(4, 2), child(5, 2), app(9, "1%")];
+        layout.on_frame(&later, later.clone());
+        assert_eq!(ids(layout.rows()), [1, 2, 3, 4]);
+        // Collapsing removes just those children, in place.
+        let collapsed = vec![app(1, "1%"), app(2, "1%"), app(9, "1%")];
+        layout.collapse(2, &later, collapsed);
+        assert_eq!(ids(layout.rows()), [1, 2]);
     }
 
     #[test]
