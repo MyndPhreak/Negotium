@@ -26,11 +26,25 @@ pub struct History {
     capacity: usize,
     ids: HashMap<AppKey, u32>,
     names: Vec<String>,
+    /// id -> key; `None` when the slot is free.
+    keys: Vec<Option<AppKey>>,
+    /// id -> number of top-list entries in retained samples that reference it.
+    refs: Vec<u32>,
+    /// Released ids available for reuse.
+    free: Vec<u32>,
 }
 
 impl History {
     pub fn new(capacity: usize) -> Self {
-        Self { samples: VecDeque::with_capacity(capacity), capacity: capacity.max(1), ids: HashMap::new(), names: Vec::new() }
+        Self {
+            samples: VecDeque::with_capacity(capacity),
+            capacity: capacity.max(1),
+            ids: HashMap::new(),
+            names: Vec::new(),
+            keys: Vec::new(),
+            refs: Vec::new(),
+            free: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, t_ms: u64, totals: &SystemTotals, rows: &[AppRow]) {
@@ -42,7 +56,9 @@ impl History {
                 .collect();
         }
         if self.samples.len() == self.capacity {
-            self.samples.pop_front();
+            if let Some(old) = self.samples.pop_front() {
+                self.release(&old);
+            }
         }
         self.samples.push_back(HistorySample {
             t_ms,
@@ -58,13 +74,45 @@ impl History {
 
     fn intern(&mut self, row: &AppRow) -> u32 {
         if let Some(&id) = self.ids.get(&row.key) {
-            self.names[id as usize] = row.name.clone();
+            let i = id as usize;
+            if self.names[i] != row.name {
+                self.names[i] = row.name.clone();
+            }
+            self.refs[i] += 1;
             return id;
         }
-        let id = self.names.len() as u32;
+        let id = match self.free.pop() {
+            Some(id) => id,
+            None => {
+                self.names.push(String::new());
+                self.keys.push(None);
+                self.refs.push(0);
+                (self.names.len() - 1) as u32
+            }
+        };
+        let i = id as usize;
+        self.names[i] = row.name.clone();
+        self.keys[i] = Some(row.key.clone());
+        self.refs[i] = 1;
         self.ids.insert(row.key.clone(), id);
-        self.names.push(row.name.clone());
         id
+    }
+
+    /// Drops the references held by an evicted sample; ids no longer referenced are freed.
+    fn release(&mut self, sample: &HistorySample) {
+        for list in &sample.top {
+            for &(id, _) in list {
+                let i = id as usize;
+                self.refs[i] -= 1;
+                if self.refs[i] == 0 {
+                    if let Some(key) = self.keys[i].take() {
+                        self.ids.remove(&key);
+                    }
+                    self.names[i].clear();
+                    self.free.push(id);
+                }
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -100,7 +148,8 @@ impl History {
             })
             .sum();
         let names: usize = self.names.iter().map(|n| n.capacity() + size_of::<String>() + size_of::<AppKey>() + 8).sum();
-        samples + names
+        let slots = self.keys.len() * (size_of::<Option<AppKey>>() + size_of::<u32>());
+        samples + names + slots
     }
 }
 
@@ -160,5 +209,16 @@ mod tests {
         }
         assert_eq!(h.len(), DEFAULT_CAPACITY);
         assert!(h.approx_bytes() <= 2_500_000, "{} bytes", h.approx_bytes());
+    }
+
+    #[test]
+    fn name_table_stays_bounded_under_key_churn() {
+        let mut h = History::new(5);
+        for t in 0..1000u64 {
+            h.push(t * 1000, &totals(1.0, 1), &[row(t as u32 + 1, &format!("p{t}"), 10.0)]);
+        }
+        assert!(h.ids.len() <= 5, "{} live ids", h.ids.len());
+        assert!(h.names.len() <= 6, "{} name slots", h.names.len());
+        assert_eq!(h.top_at(999_000, Metric::Cpu), vec![("p999".to_string(), 10.0)]);
     }
 }
