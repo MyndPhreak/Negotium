@@ -34,9 +34,15 @@ pub struct AppRow {
     pub hung_for_ms: Option<u64>,
 }
 
-#[derive(Default)]
 pub struct Model {
     rates: RateTracker,
+    system_root: String,
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self::with_system_root(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string()))
+    }
 }
 
 impl Model {
@@ -44,9 +50,14 @@ impl Model {
         Self::default()
     }
 
+    /// For tests and callers that know the Windows directory.
+    pub fn with_system_root(system_root: impl Into<String>) -> Self {
+        Self { rates: RateTracker::new(), system_root: system_root.into() }
+    }
+
     pub fn update(&mut self, snap: &Snapshot) -> Vec<AppRow> {
         let rates = self.rates.update(snap);
-        let groups = group(&snap.processes, &snap.windows);
+        let groups = group(&snap.processes, &snap.windows, &self.system_root);
         let gpu = snap.totals.gpu_pct_by_pid.as_ref();
 
         let mut rows: BTreeMap<AppKey, AppRow> = BTreeMap::new();
@@ -102,7 +113,7 @@ mod tests {
 
     #[test]
     fn rows_sum_their_processes() {
-        let mut m = Model::new();
+        let mut m = Model::with_system_root(r"C:\Windows");
         let mut gpu = BTreeMap::new();
         gpu.insert(2, 30.0);
         gpu.insert(3, 50.0);
