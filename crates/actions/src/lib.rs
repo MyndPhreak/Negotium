@@ -1,7 +1,13 @@
 //! Process actions. Every call verifies identity by (pid, create_time) before acting,
 //! so a PID reused since the last tick is never touched. Call off the UI thread.
+mod close;
+mod efficiency;
+mod location;
 mod terminate;
 
+pub use close::{FORCE_CLOSE_GRACE, force_close};
+pub use efficiency::toggle_efficiency_mode;
+pub use location::open_file_location;
 pub use terminate::{end_many, end_process};
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE};

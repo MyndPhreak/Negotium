@@ -48,3 +48,23 @@ fn end_many_treats_already_exited_as_success() {
     assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
     a.wait().unwrap();
 }
+
+use negotium_actions::{force_close, toggle_efficiency_mode};
+
+#[test]
+fn force_close_terminates_a_windowless_process_after_the_grace_period() {
+    let (mut child, ct) = spawn_ping();
+    let started = std::time::Instant::now();
+    assert_eq!(force_close(child.id(), ct), Ok(()));
+    assert!(child.wait().unwrap().code().is_some());
+    assert!(started.elapsed() >= Duration::from_millis(2900), "should wait the 3 s grace first");
+}
+
+#[test]
+fn efficiency_mode_toggles_on_then_off() {
+    let (mut child, ct) = spawn_ping();
+    assert_eq!(toggle_efficiency_mode(&[(child.id(), ct)]), Ok(true));
+    assert_eq!(toggle_efficiency_mode(&[(child.id(), ct)]), Ok(false));
+    child.kill().ok();
+    child.wait().ok();
+}
