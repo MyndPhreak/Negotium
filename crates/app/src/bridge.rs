@@ -173,6 +173,8 @@ pub struct Bridge {
     layout: RowLayout,
     hover: bool,
     menu_open: bool,
+    /// The row whose control (Force close, End task) has keyboard focus.
+    key_focus: Option<i32>,
     banner_dismissed: bool,
     pub controls: Arc<Controls>,
     ui: slint::Weak<MainWindow>,
@@ -191,6 +193,7 @@ impl Bridge {
             layout: RowLayout::default(),
             hover: false,
             menu_open: false,
+            key_focus: None,
             banner_dismissed: false,
             controls,
             ui: ui.as_weak(),
@@ -216,8 +219,11 @@ impl Bridge {
         }
         let fresh = self.fresh();
         self.layout.on_frame(&self.last.rows, fresh);
+        // The frame may have removed the keyboard-focused control (its row recovered or exited).
+        self.update_frozen();
         self.push_rows();
     }
+
 
     /// Tells the worker which apps need child rows (expanded ones; all of them while searching).
     fn publish_child_rows(&self) {
@@ -275,13 +281,37 @@ impl Bridge {
         self.update_frozen();
     }
 
+    /// Keyboard focus entered or left a control in row `id`. Mirrors the hover freeze, so Space on
+    /// a focused Force close can't land on another app that moved into that index.
+    pub fn set_key_focus(&mut self, id: i32, focused: bool) {
+        if focused {
+            self.key_focus = Some(id);
+        } else if self.key_focus == Some(id) {
+            self.key_focus = None;
+        }
+        self.update_frozen();
+    }
+
+    /// Whether the focused control still exists. Force close shows on every hung actionable row;
+    /// End task only on the hovered one. A control destroyed while focused sends no focus-out,
+    /// so this check is what releases the freeze then.
+    fn key_focus_holds(&self) -> bool {
+        let Some(id) = self.key_focus else { return false };
+        self.layout.rows().iter().any(|r| {
+            r.id == id && r.actionable && !r.exited && (!r.hung.is_empty() || (self.hover && r.depth == 0))
+        })
+    }
+
     pub fn set_menu_open(&mut self, open: bool) {
         self.menu_open = open;
         self.update_frozen();
     }
 
     fn update_frozen(&mut self) {
-        let frozen = self.hover || self.menu_open;
+        if !self.key_focus_holds() {
+            self.key_focus = None;
+        }
+        let frozen = self.hover || self.menu_open || self.key_focus.is_some();
         self.controls.set_frozen(frozen);
         if frozen != self.layout.frozen() {
             let fresh = self.fresh();

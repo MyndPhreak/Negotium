@@ -121,6 +121,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let b = bridge.clone();
+        ui.on_row_key_focus(move |id, focused| b.borrow_mut().set_key_focus(id, focused));
+    }
+    {
+        let b = bridge.clone();
         ui.on_search_changed(move |text| b.borrow_mut().set_search(&text));
     }
     {

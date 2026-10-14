@@ -267,3 +267,102 @@ fn an_exited_row_is_marked_and_offers_no_actions() {
     press(&ui, x, y, slint::platform::PointerEventButton::Right);
     assert!(menu.borrow().is_empty(), "no context menu on an exited row");
 }
+
+// ---- Fix round 2 (R10) ----
+
+use negotium::bridge::Bridge;
+use negotium::controls::Controls;
+use negotium::view::{Frame, RowView};
+use std::sync::Arc;
+
+fn row_view(id: i32, name: &str, hung: &str) -> RowView {
+    RowView { id, parent: -1, depth: 0, name: name.into(), hung: hung.into(), cpu: "1.0%".into(), actionable: true, ..Default::default() }
+}
+
+fn frame(rows: Vec<RowView>) -> Frame {
+    Frame { rows, ..Default::default() }
+}
+
+fn shown_ids(ui: &MainWindow) -> Vec<i32> {
+    use slint::Model;
+    ui.get_rows().iter().map(|r| r.id).collect()
+}
+
+fn bridged() -> (MainWindow, Arc<Controls>, Rc<RefCell<Bridge>>) {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let controls = Arc::new(Controls::default());
+    let bridge = Bridge::install(&ui, controls.clone());
+    (ui, controls, bridge)
+}
+
+const HUNG: &str = "Not responding · 9s";
+
+#[test]
+fn keyboard_focus_in_a_row_freezes_the_list_like_hover() {
+    let (ui, controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, frame(vec![row_view(1, "Editor", HUNG), row_view(2, "Browser", "")]));
+    b.set_key_focus(1, true); // Editor's Force close has keyboard focus
+    assert!(controls.frozen(), "keyboard focus inside a row freezes the list");
+    // Another hung app appears and ranks first: Editor's row must not move under the focus.
+    b.apply(&ui, frame(vec![row_view(3, "Game", HUNG), row_view(1, "Editor", HUNG), row_view(2, "Browser", "")]));
+    assert_eq!(shown_ids(&ui), [1, 2]);
+    b.set_key_focus(1, false);
+    assert!(!controls.frozen());
+    assert_eq!(shown_ids(&ui), [3, 1, 2], "focus left: the list catches up");
+}
+
+#[test]
+fn keyboard_freeze_ends_when_the_focused_button_goes_away() {
+    let (ui, controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, frame(vec![row_view(1, "Editor", HUNG), row_view(2, "Browser", "")]));
+    b.set_key_focus(1, true);
+    assert!(controls.frozen());
+    // Editor recovers: its Force close (the focused element) is destroyed without a focus-out.
+    b.apply(&ui, frame(vec![row_view(2, "Browser", ""), row_view(1, "Editor", "")]));
+    assert!(!controls.frozen(), "a vanished focus target must not hold the list frozen");
+    assert_eq!(shown_ids(&ui), [2, 1]);
+}
+
+#[test]
+fn keyboard_menu_on_a_focused_row_acts_on_that_row_not_on_a_stale_capture() {
+    use slint::platform::Key;
+    let ui = shown_window();
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let a = actions.clone();
+    ui.on_row_action(move |name, id| a.borrow_mut().push((name.to_string(), id)));
+    let focus = Rc::new(RefCell::new(Vec::new()));
+    let f = focus.clone();
+    ui.on_row_key_focus(move |id, has| f.borrow_mut().push((id, has)));
+
+    // A stale capture: Browser's (id 9) menu was opened earlier and dismissed.
+    let browser = El::find_by_accessible_label(&ui, BROWSER_ROW).next().expect("browser row");
+    let (bx, by) = centre(&browser);
+    press(&ui, bx, by, slint::platform::PointerEventButton::Right);
+    key(&ui, Key::Escape);
+    assert_eq!(ui.get_menu_target(), 9);
+    move_pointer(&ui, 5.0, 5.0);
+
+    // Tab to Editor's (id 7) always-visible Force close.
+    for _ in 0..40 {
+        if focus.borrow().last() == Some(&(7, true)) {
+            break;
+        }
+        key(&ui, Key::Tab);
+        slint::platform::update_timers_and_animations(); // runs `changed has-focus`
+    }
+    assert_eq!(focus.borrow().last(), Some(&(7, true)), "Force close on Editor has keyboard focus: {:?}", focus.borrow());
+    actions.borrow_mut().clear();
+
+    // Shift+F10 opens the row's menu from the keyboard; choose End task.
+    let shift: slint::SharedString = Key::Shift.into();
+    ui.window().dispatch_event(WindowEvent::KeyPressed { text: shift.clone() });
+    key(&ui, Key::F10);
+    ui.window().dispatch_event(WindowEvent::KeyReleased { text: shift });
+    assert_eq!(ui.get_menu_target(), 7, "opening from the keyboard captures the focused row");
+    key(&ui, Key::DownArrow);
+    key(&ui, Key::Return);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 7)]);
+}

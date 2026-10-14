@@ -37,6 +37,7 @@ export component MainWindow inherits Window {
     callback row-action(string, int);
     callback list-hover(bool);
     callback menu-open(bool);
+    callback row-key-focus(int, bool);
     callback search-changed(string);
     callback restart-admin();
     callback dismiss-banner();
@@ -79,6 +80,7 @@ export component MainWindow inherits Window {
             action(name, id) => { root.row-action(name, id); }
             hover(h) => { root.list-hover(h); }
             menu-open(open) => { root.menu-open(open); }
+            row-focus(id, focused) => { root.row-key-focus(id, focused); }
             search(text) => { root.search-changed(text); }
         }
         if root.toast != "" : Toast {
