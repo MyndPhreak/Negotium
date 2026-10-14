@@ -13,17 +13,34 @@ Measured with about 680 processes running and a normal desktop workload (system 
 
 Target (spec §8): median ≤ 5 ms. **Not met: median is about 19 ms.**
 
-Per-source median cost, measured by timing each source on its own (release build, 40 ticks, 300 ms apart):
+### Breakdown by source
 
-| Source | Median |
-| --- | --- |
-| Process list (single `NtQuerySystemInformation` call plus parse) | about 15-17 ms |
-| PDH counters (CPU, disks, network, GPU) | about 5.2-5.6 ms |
-| Window scan | about 0.8-1.4 ms |
-| Identity cache (steady state) | about 0.05-0.2 ms |
-| Memory totals | about 0.003 ms |
+Command (release build, defaults: 60 iterations, 1000 ms apart, same cadence as the headline run; overridable with `--ticks N --interval-ms MS`):
 
-The process list dominates. It is one kernel call whose cost scales with the process and thread count of this machine, not Rust-side work, so the target is a machine-dependent follow-up and is left unchanged. The first tick is slower (identity cache fill, PDH warm-up).
+```
+cargo run -p negotium-collector --example tick_breakdown --release
+```
+
+Source: `crates/collector/examples/tick_breakdown.rs`. Each iteration times, in this order, one raw `NtQuerySystemInformation(5, ...)` call into a reused buffer (`nt_call`), `ProcessReader::read()` (`process_read`, call plus parse), `IdentityCache::get` for every process from that read on a persistent cache (`identity`), `PdhSources::read()` (`pdh`), `scan_windows()` (`windows`), `memory_totals()` (`memory`), and a whole `Collector::tick()` on a separate collector (`tick`). One run, 674 processes, times in ms:
+
+| Column | First | Median | p95 | Max |
+| --- | --- | --- | --- | --- |
+| nt_call | 15.075 | 14.958 | 22.242 | 31.640 |
+| process_read | 25.901 | 14.488 | 19.799 | 28.830 |
+| identity | 11.337 | 0.127 | 0.630 | 11.337 |
+| pdh | 4.744 | 6.109 | 7.590 | 26.880 |
+| windows | 1.347 | 1.233 | 2.127 | 3.213 |
+| memory | 0.003 | 0.003 | 0.004 | 0.005 |
+| tick | 41.285 | 22.346 | 30.550 | 41.285 |
+
+What the numbers support:
+
+- The raw `NtQuerySystemInformation` call alone costs about 15 ms median, which is essentially all of `process_read` (14.5 ms median). Parse time derived as `process_read - nt_call` is -0.47 ms at the median, i.e. indistinguishable from zero within run-to-run noise. The two columns are separate calls, so this is a derived estimate, not a direct measurement; it says parsing is small relative to the call, not that it is exactly zero.
+- PDH is the second-largest source at about 6 ms median; the window scan is about 1.2 ms; steady-state identity lookups are about 0.13 ms; memory totals are negligible.
+- The first-iteration `process_read` (25.9 ms) and `identity` (11.3 ms) are slower: the first `process_read` is the reader's first call, and the first `identity` fills the cache with an `OpenProcess` query per process. The first-tick `Collector::tick()` (41.3 ms) includes both.
+- The sum of the medians of `process_read`, `identity`, `pdh` and `windows` (about 22 ms) matches the `tick` median (22.3 ms) in this run. This run's `tick` median (22.3 ms) is higher than the headline probe runs (18.7 and 19.1 ms); absolute values vary between runs (the two probe runs also differ from each other by 0.4 ms). The ordering (process list, then PDH, then everything else) is the same.
+
+The target stays unchanged; the process-list kernel call is the dominant cost on this machine and is the first place to look for savings.
 
 ## CPU accuracy
 
