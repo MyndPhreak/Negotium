@@ -1,0 +1,10 @@
+[package]
+name = "negotium-model"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+negotium-snapshot.workspace = true
+serde.workspace = true
