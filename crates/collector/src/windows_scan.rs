@@ -2,7 +2,7 @@
 use negotium_snapshot::WindowSample;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GetWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, InternalGetWindowText,
     IsHungAppWindow, IsWindowVisible,
 };
 use windows::core::BOOL;
@@ -21,6 +21,8 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // SAFETY: lparam is the `&mut Vec<WindowSample>` passed by scan_windows.
     let out = unsafe { &mut *(lparam.0 as *mut Vec<WindowSample>) };
     // SAFETY: all calls below only read window state for a handle supplied by EnumWindows.
+    // None of them sends a window message (IsHungAppWindow and InternalGetWindowText read
+    // cached state), so none can block on a hung window, even one in this process.
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() {
             return true.into();
@@ -39,17 +41,16 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
+/// Reads the window's stored title without sending any window message.
+///
 /// # Safety
-/// `hwnd` must be a window handle from EnumWindows. GetWindowText does not send
-/// messages to other processes, so it cannot block on a hung window.
+/// `hwnd` must be a window handle from EnumWindows. `InternalGetWindowText` copies the
+/// text cached in the window structure, so unlike `GetWindowText` it never sends
+/// `WM_GETTEXT`, not even for windows owned by the calling process. It therefore cannot
+/// block on a hung window.
 unsafe fn window_title(hwnd: HWND) -> String {
-    // SAFETY: caller guarantees `hwnd` came from EnumWindows.
-    let len = unsafe { GetWindowTextLengthW(hwnd) };
-    if len <= 0 {
-        return String::new();
-    }
-    let mut buf = vec![0u16; len as usize + 1];
-    // SAFETY: `buf` is a valid writable buffer of the length passed implicitly by the slice.
-    let copied = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    let mut buf = [0u16; 512];
+    // SAFETY: `buf` is a valid writable buffer; its length is passed with the slice.
+    let copied = unsafe { InternalGetWindowText(hwnd, &mut buf) };
     String::from_utf16_lossy(&buf[..copied.max(0) as usize])
 }

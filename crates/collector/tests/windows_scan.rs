@@ -37,7 +37,14 @@ fn detects_a_window_that_stops_pumping_messages() {
     let deadline = Instant::now() + Duration::from_secs(11);
     let mut seen_responsive = false;
     loop {
-        let found = scan_windows().into_iter().find(|w| w.title == title);
+        let started = Instant::now();
+        let windows = scan_windows();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "scan_windows() must never block on a hung window; one call took {elapsed:?}"
+        );
+        let found = windows.into_iter().find(|w| w.title == title);
         if let Some(w) = found {
             assert_eq!(w.pid, std::process::id());
             if !w.hung {
