@@ -80,13 +80,13 @@ Each unit lives in its own crate in a Cargo workspace so boundaries are enforced
 - **Tick:** default 1 s; user choices 0.5 / 1 / 2 / 5 s. When the window is hidden (tray), tick is 2 s and only totals + top-N are kept.
 - **Per tick:**
   - One `NtQuerySystemInformation(SystemProcessInformation)` call for all processes: CPU times, working set, private bytes, handle/thread counts, I/O counters, parent PID, create time. No per-process `OpenProcess` on the hot path.
-  - CPU total and per-core from the **"Processor Information"** counter set (same source as Task Manager), consumed through the documented PerfLib V2 consumer API (`PerfOpenQueryHandle` / `PerfAddCounters` / `PerfQueryCounterData`).
+  - CPU total and per-core from the **"Processor Information"** counter set (`% Processor Utility`, same source as Task Manager), read through PDH (`PdhAddEnglishCounterW`, which reads the same counter sets). Switching to the PerfLib V2 consumer API directly is an optimization to make only if the benchmark shows PDH cost matters.
   - Memory totals from `GlobalMemoryStatusEx` and performance information; memory composition (standby/modified/free) from `NtQuerySystemInformation(SystemMemoryListInformation)` where permitted.
-  - Disk: per-physical-disk active time / throughput / response time from the PerfLib V2 disk counter sets; per-process disk rate from I/O counter deltas.
+  - Disk: per-physical-disk active time / throughput / response time from the `PhysicalDisk` counter set via PDH; per-process disk rate from read + write transfer deltas.
   - GPU: per-engine and per-process utilization from the `GPU Engine` / `GPU Process Memory` counter sets; adapter temperature from `D3DKMTQueryAdapterInfo` (adapter perf data).
-  - Network adapters: `GetIfTable2` deltas.
+  - Network adapters: total throughput from the `Network Interface` counter set via PDH; per-adapter details (link speed, addresses) from `GetIfTable2` / `GetAdaptersAddresses` on the Performance page.
   - Per-app network: behind a `NetworkAttribution` trait. **v1 implementation: SRUM real-time stats** (what Task Manager uses). Because it is undocumented, it is isolated and feature-detected; if unavailable the per-app Network column shows "—" and the system Network meter still works.
-- **Expensive, cached-per-process data** (executable path, icon, publisher, command line, window titles) is fetched once per new PID on a low-priority worker and cached by (PID, create time).
+- **Expensive, cached-per-process data** (executable path, icon, publisher, command line, window titles) is fetched once per new PID and cached by (PID, create time). Plan 1 fetches image path and package family inline on first sight; moving lookups to a low-priority worker is done only if the tick-time measurement shows first-sight lookups hurting the ≤ 5 ms median.
 - **Hung detection:** each tick, enumerate top-level visible windows (`EnumWindows`) and test `IsHungAppWindow`; record first-seen-hung time per window owner.
 
 ### 4.3 Model
@@ -173,7 +173,7 @@ Closing the window hides it to the tray; the collector continues at 2 s. Reopeni
 | Collector tick (median) | ≤ 5 ms |
 | UI frames during refresh/scroll | none > 16 ms |
 
-`bench` measures both apps identically: process launch → first visible window (`WinEventHook` on `EVENT_OBJECT_SHOW`); CPU and working set sampled over 60 s; frame pacing from the app's own frame timer for Negotium and from DWM frame statistics for both.
+`bench` measures both apps identically, from an elevated terminal: process launch → first visible window (polled every 5 ms); CPU and private working set sampled each second over 60 s; UI-thread responsiveness as the round-trip time of `WM_NULL` sent every 100 ms (a stalled UI thread shows as long or timed-out round-trips). Frame pacing for Negotium comes from its own frame timer (Plan 2).
 
 ## 9. Testing
 
