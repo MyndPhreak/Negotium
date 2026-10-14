@@ -80,3 +80,23 @@ fn efficiency_toggle_skips_an_exited_first_target_and_still_applies_to_the_rest(
     b.kill().ok();
     b.wait().ok();
 }
+
+use negotium_actions::{is_elevated, process_details};
+
+#[test]
+fn details_include_command_line_user_and_priority() {
+    let (mut child, ct) = spawn_ping();
+    let d = process_details(child.id(), ct).unwrap();
+    child.kill().ok();
+    child.wait().ok();
+    assert_eq!(d.pid, child.id());
+    assert!(d.command_line.as_deref().unwrap_or("").contains("127.0.0.1"), "{d:?}");
+    assert!(d.user.as_deref().unwrap_or("").contains('\\'), "DOMAIN\\user expected: {d:?}");
+    assert_eq!(d.priority.as_deref(), Some("Normal"));
+    assert!(d.image_path.as_deref().unwrap_or("").to_lowercase().ends_with("ping.exe"));
+}
+
+#[test]
+fn elevation_query_does_not_panic() {
+    let _ = is_elevated();
+}
