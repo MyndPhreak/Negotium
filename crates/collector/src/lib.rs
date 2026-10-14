@@ -12,3 +12,7 @@ pub use windows_scan::scan_windows;
 
 pub use memory::{logical_cpus, memory_totals};
 pub use pdh::{PdhReadings, PdhSources};
+
+mod collector;
+
+pub use collector::Collector;
