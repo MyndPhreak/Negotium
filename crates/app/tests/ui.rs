@@ -16,6 +16,10 @@ fn window() -> MainWindow {
         id: 7, depth: 0, name: "Editor".into(), count: "".into(), cpu: "1.0%".into(), mem: "1.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.5, hung: "Not responding · 9s".into(),
         expandable: false, expanded: false,
+    }, RowData {
+        id: 9, depth: 0, name: "Browser".into(), count: "(3)".into(), cpu: "2.0%".into(), mem: "2.0 MB".into(),
+        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.2, hung: "".into(),
+        expandable: true, expanded: false,
     }])));
     ui
 }
@@ -40,4 +44,36 @@ fn hung_rows_offer_force_close() {
     let button = ElementHandle::find_by_accessible_label(&ui, "Force close Editor").next().expect("force close button");
     button.invoke_accessible_default_action();
     assert_eq!(*action.borrow(), Some(("force-close".to_string(), 7)));
+}
+
+#[test]
+fn selected_meter_reports_checked() {
+    let ui = window();
+    ui.set_selected_metric(1);
+    let memory = ElementHandle::find_by_accessible_label(&ui, "Memory meter").next().expect("memory meter");
+    let cpu = ElementHandle::find_by_accessible_label(&ui, "CPU meter").next().expect("cpu meter");
+    assert_eq!(memory.accessible_checkable(), Some(true));
+    assert_eq!(memory.accessible_checked(), Some(true));
+    assert_eq!(cpu.accessible_checked(), Some(false));
+}
+
+#[test]
+fn expand_chevron_toggles_its_row() {
+    let ui = window();
+    let toggled = Rc::new(RefCell::new(None));
+    let t = toggled.clone();
+    ui.on_toggle_row(move |id| *t.borrow_mut() = Some(id));
+    let chevron = ElementHandle::find_by_accessible_label(&ui, "Expand Browser").next().expect("expand chevron");
+    chevron.invoke_accessible_default_action();
+    assert_eq!(*toggled.borrow(), Some(9));
+}
+
+#[test]
+fn open_modal_disables_controls_beneath() {
+    let ui = window();
+    let button = ElementHandle::find_by_accessible_label(&ui, "Force close Editor").next().expect("force close button");
+    assert_eq!(button.accessible_enabled(), Some(true));
+    ui.set_confirm_visible(true);
+    assert!(ui.get_modal_open());
+    assert_eq!(button.accessible_enabled(), Some(false));
 }

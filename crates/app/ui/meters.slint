@@ -5,16 +5,32 @@ export struct MeterData { label: string, value: string, sub: string, spark: stri
 component Meter inherits Rectangle {
     in property <MeterData> data;
     in property <bool> selected;
+    in property <bool> interactive: true;
     callback activated();
     min-width: 96px;
     border-radius: Theme.radius;
     background: selected ? Theme.accent.with-alpha(0.18) : Theme.card;
-    border-width: 1px;
-    border-color: selected ? Theme.accent : Theme.card-border;
+    border-width: fs.has-focus ? 2px : 1px;
+    border-color: fs.has-focus ? Theme.text : (selected ? Theme.accent : Theme.card-border);
     accessible-role: button;
     accessible-label: data.label + " meter";
+    accessible-checkable: true;
+    accessible-checked: root.selected;
     accessible-action-default => { root.activated(); }
-    TouchArea { clicked => { root.activated(); } }
+    fs := FocusScope {
+        enabled: root.interactive;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == Key.Return) {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    TouchArea {
+        enabled: root.interactive;
+        clicked => { fs.focus(); root.activated(); }
+    }
     VerticalLayout {
         padding: 10px;
         spacing: 2px;
@@ -35,11 +51,13 @@ component Meter inherits Rectangle {
 export component MetersRow inherits HorizontalLayout {
     in property <[MeterData]> meters;
     in property <int> selected;
+    in property <bool> interactive: true;
     callback select(int);
     spacing: 8px;
     for m[i] in meters : Meter {
         data: m;
         selected: i == root.selected;
+        interactive: root.interactive;
         activated => { root.select(i); }
     }
 }

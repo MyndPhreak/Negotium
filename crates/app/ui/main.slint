@@ -11,7 +11,7 @@ export component MainWindow inherits Window {
     icon: @image-url("../assets/negotium.svg");
     preferred-width: 1000px;
     preferred-height: 720px;
-    min-width: 560px;
+    min-width: 760px;
     min-height: 440px;
     default-font-family: "Segoe UI Variable Text";
     background: Theme.window-bg;
@@ -27,6 +27,7 @@ export component MainWindow inherits Window {
     in property <bool> confirm-visible;
     in property <string> details-text;
     in property <bool> details-visible;
+    out property <bool> modal-open: confirm-visible || details-visible;
 
     callback select-metric(int);
     callback open-tile(int);
@@ -44,23 +45,27 @@ export component MainWindow inherits Window {
         padding: 12px;
         spacing: 10px;
         if root.show-admin-banner : Banner {
+            interactive: !root.modal-open;
             restart => { root.restart-admin(); }
             dismiss => { root.dismiss-banner(); }
         }
         MetersRow {
             meters: root.meters;
             selected: root.selected-metric;
+            interactive: !root.modal-open;
             select(i) => { root.select-metric(i); }
         }
         TopStrip {
             tiles: root.tiles;
             caption: root.top-caption;
+            interactive: !root.modal-open;
             open(id) => { root.open-tile(id); }
         }
         AppList {
             vertical-stretch: 1;
             rows: root.rows;
             metric: root.selected-metric;
+            interactive: !root.modal-open;
             toggle(id) => { root.toggle-row(id); }
             action(name, id) => { root.row-action(name, id); }
             hover(h) => { root.list-hover(h); }
@@ -68,6 +73,7 @@ export component MainWindow inherits Window {
         }
         if root.toast != "" : Toast {
             text: root.toast;
+            interactive: !root.modal-open;
             dismiss => { root.dismiss-toast(); }
         }
     }
@@ -75,6 +81,7 @@ export component MainWindow inherits Window {
         title: "End a critical system process?";
         body: root.confirm-text;
         confirm-label: "End process";
+        cancel-primary: true;
         done(ok) => { root.confirm(ok); }
     }
     if root.details-visible : Modal {

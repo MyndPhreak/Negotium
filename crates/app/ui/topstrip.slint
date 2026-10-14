@@ -5,6 +5,7 @@ export struct TileData { id: int, name: string, value: string, weight: float, hu
 export component TopStrip inherits VerticalLayout {
     in property <[TileData]> tiles;
     in property <string> caption;
+    in property <bool> interactive: true;
     callback open(int);
     spacing: 4px;
     Text { text: caption; color: Theme.muted; font-size: 11px; }
@@ -16,10 +17,25 @@ export component TopStrip inherits VerticalLayout {
             min-width: 28px;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);
+            border-width: fs.has-focus ? 2px : 0px;
+            border-color: Theme.text;
             accessible-role: button;
             accessible-label: t.name + " tile";
             accessible-action-default => { root.open(t.id); }
-            TouchArea { clicked => { root.open(t.id); } }
+            fs := FocusScope {
+                enabled: root.interactive;
+                key-pressed(event) => {
+                    if (event.text == " " || event.text == Key.Return) {
+                        root.open(t.id);
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+            TouchArea {
+                enabled: root.interactive;
+                clicked => { fs.focus(); root.open(t.id); }
+            }
             VerticalLayout {
                 padding: 6px;
                 Text { text: (t.hung ? "⚠ " : "") + t.name; color: Theme.text; font-size: 12px; overflow: elide; }

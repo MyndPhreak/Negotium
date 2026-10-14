@@ -2,32 +2,35 @@ import { Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 export component Banner inherits Rectangle {
+    in property <bool> interactive: true;
     callback restart();
     callback dismiss();
-    height: 40px;
+    min-height: 40px;
     border-radius: Theme.radius;
     background: Theme.accent.with-alpha(0.15);
     HorizontalLayout {
         padding: 8px;
         spacing: 8px;
-        Text { text: "Some processes need admin rights to show details or be ended."; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
-        Button { text: "Restart as admin"; clicked => { root.restart(); } }
-        Button { text: "Dismiss"; clicked => { root.dismiss(); } }
+        Text { text: "Some processes need admin rights to show details or be ended."; color: Theme.text; vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1; }
+        Button { text: "Restart as admin"; enabled: root.interactive; clicked => { root.restart(); } }
+        Button { text: "Dismiss"; enabled: root.interactive; clicked => { root.dismiss(); } }
     }
 }
 
 export component Toast inherits Rectangle {
     in property <string> text;
+    in property <bool> interactive: true;
     callback dismiss();
-    height: 36px;
+    min-height: 36px;
     border-radius: Theme.radius;
     background: Theme.card;
     border-width: 1px;
     border-color: Theme.card-border;
     HorizontalLayout {
         padding: 8px;
-        Text { text: root.text; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
-        Button { text: "OK"; clicked => { root.dismiss(); } }
+        spacing: 8px;
+        Text { text: root.text; color: Theme.text; vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1; }
+        Button { text: "OK"; enabled: root.interactive; clicked => { root.dismiss(); } }
     }
 }
 
@@ -36,9 +39,25 @@ export component Modal inherits Rectangle {
     in property <string> body;
     in property <string> confirm-label;
     in property <bool> show-cancel: true;
+    // When true the safe choice (Cancel) is the primary button and the Return default.
+    in property <bool> cancel-primary: false;
     callback done(bool);
     background: #00000066;
     TouchArea { }
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.done(false);
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.done(!root.cancel-primary);
+                return accept;
+            }
+            return reject;
+        }
+    }
     Rectangle {
         width: min(parent.width - 48px, 520px);
         height: layout.preferred-height;
@@ -52,8 +71,8 @@ export component Modal inherits Rectangle {
             HorizontalLayout {
                 alignment: end;
                 spacing: 8px;
-                if root.show-cancel : Button { text: "Cancel"; clicked => { root.done(false); } }
-                Button { text: root.confirm-label; primary: true; clicked => { root.done(true); } }
+                if root.show-cancel : Button { text: "Cancel"; primary: root.cancel-primary; clicked => { root.done(false); } }
+                Button { text: root.confirm-label; primary: !root.cancel-primary; clicked => { root.done(true); } }
             }
         }
     }

@@ -27,6 +27,7 @@ component HeaderCell inherits Text {
 export component AppList inherits VerticalLayout {
     in property <[RowData]> rows;
     in property <int> metric;
+    in property <bool> interactive: true;
     callback toggle(int);
     callback action(string, int);
     callback hover(bool);
@@ -35,6 +36,8 @@ export component AppList inherits VerticalLayout {
 
     LineEdit {
         placeholder-text: "Search apps and processes";
+        accessible-label: "Search apps and processes";
+        enabled: root.interactive;
         edited(text) => { root.search(text); }
     }
     HorizontalLayout {
@@ -49,67 +52,82 @@ export component AppList inherits VerticalLayout {
         HeaderCell { text: "Network"; }
     }
     area := TouchArea {
+        enabled: root.interactive;
         changed has-hover => { root.hover(self.has-hover); }
         ListView {
             for r in root.rows : Rectangle {
                 height: 32px;
                 background: r.hung != "" ? Theme.danger-bg : (row-touch.has-hover ? Theme.card : transparent);
                 border-radius: 4px;
+                accessible-role: list-item;
+                accessible-label: r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
                 row-touch := TouchArea {
+                    enabled: root.interactive;
                     double-clicked => { if (r.expandable) { root.toggle(r.id); } }
-                }
-                ContextMenuArea {
-                    Menu {
-                        MenuItem { title: "End task"; activated => { root.action("end-task", r.id); } }
-                        MenuItem { title: "End process tree"; activated => { root.action("end-tree", r.id); } }
-                        MenuItem { title: "Efficiency mode"; activated => { root.action("efficiency", r.id); } }
-                        MenuSeparator { }
-                        MenuItem { title: "Open file location"; activated => { root.action("open-location", r.id); } }
-                        MenuItem { title: "Details"; activated => { root.action("details", r.id); } }
-                    }
-                    HorizontalLayout {
-                        padding-left: 8px + r.depth * 20px;
-                        padding-right: 8px;
-                        spacing: 8px;
-                        Text {
-                            width: 14px;
-                            text: r.expandable ? (r.expanded ? "▾" : "▸") : "";
-                            color: Theme.muted;
-                            vertical-alignment: center;
-                            TouchArea { clicked => { if (r.expandable) { root.toggle(r.id); } } }
+                    ContextMenuArea {
+                        enabled: root.interactive;
+                        Menu {
+                            MenuItem { title: "End task"; activated => { root.action("end-task", r.id); } }
+                            MenuItem { title: "End process tree"; activated => { root.action("end-tree", r.id); } }
+                            MenuItem { title: "Efficiency mode"; activated => { root.action("efficiency", r.id); } }
+                            MenuSeparator { }
+                            MenuItem { title: "Open file location"; activated => { root.action("open-location", r.id); } }
+                            MenuItem { title: "Details"; activated => { root.action("details", r.id); } }
                         }
                         HorizontalLayout {
-                            horizontal-stretch: 1;
-                            spacing: 6px;
-                            Text { text: r.name; color: Theme.text; font-size: 12px; vertical-alignment: center; overflow: elide; }
-                            Text { text: r.count; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
-                            if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11px; vertical-alignment: center; }
-                            if r.hung != "" : Button {
-                                text: "Force close";
-                                accessible-label: "Force close " + r.name;
-                                clicked => { root.action("force-close", r.id); }
+                            padding-left: 8px + r.depth * 20px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            if r.expandable : Text {
+                                width: 14px;
+                                text: r.expanded ? "▾" : "▸";
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                                accessible-role: button;
+                                accessible-label: (r.expanded ? "Collapse " : "Expand ") + r.name;
+                                accessible-action-default => { root.toggle(r.id); }
+                                TouchArea {
+                                    enabled: root.interactive;
+                                    clicked => { root.toggle(r.id); }
+                                }
                             }
-                            if r.hung == "" && row-touch.has-hover && r.depth == 0 : Button {
-                                text: "End task";
-                                accessible-label: "End task " + r.name;
-                                clicked => { root.action("end-task", r.id); }
+                            if !r.expandable : Rectangle { width: 14px; }
+                            HorizontalLayout {
+                                horizontal-stretch: 1;
+                                alignment: start;
+                                spacing: 6px;
+                                Text { text: r.name; color: Theme.text; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                                Text { text: r.count; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11px; vertical-alignment: center; }
+                                if r.hung != "" : Button {
+                                    text: "Force close";
+                                    enabled: root.interactive;
+                                    accessible-label: "Force close " + r.name;
+                                    clicked => { root.action("force-close", r.id); }
+                                }
+                                if r.hung == "" && row-touch.has-hover && r.depth == 0 : Button {
+                                    text: "End task";
+                                    enabled: root.interactive;
+                                    accessible-label: "End task " + r.name;
+                                    clicked => { root.action("end-task", r.id); }
+                                }
                             }
-                        }
-                        Rectangle {
-                            width: 60px;
                             Rectangle {
-                                x: 0;
-                                width: parent.width * r.bar;
-                                height: 6px;
-                                border-radius: 3px;
-                                background: Theme.accent;
+                                width: 60px;
+                                Rectangle {
+                                    x: 0;
+                                    width: parent.width * r.bar;
+                                    height: 6px;
+                                    border-radius: 3px;
+                                    background: Theme.accent;
+                                }
                             }
+                            Cell { text: r.cpu; strong: root.metric == 0; }
+                            Cell { text: r.mem; strong: root.metric == 1; }
+                            Cell { text: r.disk; strong: root.metric == 2; }
+                            Cell { text: r.gpu; strong: root.metric == 3; }
+                            Cell { text: r.net; strong: root.metric == 4; }
                         }
-                        Cell { text: r.cpu; strong: root.metric == 0; }
-                        Cell { text: r.mem; strong: root.metric == 1; }
-                        Cell { text: r.disk; strong: root.metric == 2; }
-                        Cell { text: r.gpu; strong: root.metric == 3; }
-                        Cell { text: r.net; strong: root.metric == 4; }
                     }
                 }
             }
