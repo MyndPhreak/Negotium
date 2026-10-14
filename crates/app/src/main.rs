@@ -71,16 +71,24 @@ fn main() -> Result<(), slint::PlatformError> {
     let controls = Arc::new(Controls::default());
     let bridge = Bridge::install(&ui, controls.clone());
 
-    // Worker -> UI thread. The sink must never panic, so the Result is ignored.
+    // Worker -> UI thread through a latest-frame slot: one wakeup is posted only when the slot was
+    // empty, and the UI takes the newest frame. The sink must never panic, so the Result is ignored.
     let weak = ui.as_weak();
     let sink_ui = weak.clone();
+    let latest: Arc<worker::Latest<negotium::view::Frame>> = Default::default();
     let _worker = worker::spawn(controls.clone(), move |frame| {
-        let weak = sink_ui.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = weak.upgrade() {
+        if !latest.put(frame) {
+            return;
+        }
+        let (weak, slot) = (sink_ui.clone(), latest.clone());
+        let posted = slint::invoke_from_event_loop(move || {
+            if let (Some(ui), Some(frame)) = (weak.upgrade(), slot.take()) {
                 negotium::bridge::with_bridge(|b| b.apply(&ui, frame));
             }
         });
+        if posted.is_err() {
+            latest.take(); // no event loop (shutting down): keep the next put posting
+        }
     });
     negotium::bridge::set_current(bridge.clone());
 

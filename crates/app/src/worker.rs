@@ -6,7 +6,7 @@ use negotium_collector::Collector;
 use negotium_history::{DEFAULT_CAPACITY, History};
 use negotium_model::{Model, Ranker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub trait Source {
@@ -123,6 +123,28 @@ impl Source for LiveSource {
     }
 }
 
+/// A single-value mailbox between the worker and the UI thread. The worker overwrites it each
+/// tick; only a put into an empty slot asks for a wakeup, so frames never pile up behind a
+/// stalled UI thread: it takes just the newest when it gets to it.
+pub struct Latest<T>(Mutex<Option<T>>);
+
+impl<T> Default for Latest<T> {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
+impl<T> Latest<T> {
+    /// Stores `value`, replacing any unread one. True if the slot was empty (post a wakeup).
+    pub fn put(&self, value: T) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).replace(value).is_none()
+    }
+
+    pub fn take(&self) -> Option<T> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
 pub fn spawn(
     controls: Arc<Controls>,
     sink: impl FnMut(Frame) + Send + 'static,
@@ -149,6 +171,17 @@ mod tests {
             }
             Some(Frame::default())
         }
+    }
+
+    #[test]
+    fn latest_slot_keeps_only_the_newest_and_wakes_once() {
+        let slot = Latest::default();
+        assert!(slot.put(1), "first value into an empty slot needs a wakeup");
+        assert!(!slot.put(2), "the UI hasn't taken the first yet: no second wakeup");
+        assert!(!slot.put(3));
+        assert_eq!(slot.take(), Some(3), "the UI gets only the newest");
+        assert_eq!(slot.take(), None);
+        assert!(slot.put(4), "after a take the next value wakes the UI again");
     }
 
     #[test]
