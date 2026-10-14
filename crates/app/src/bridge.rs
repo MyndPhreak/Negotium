@@ -90,7 +90,7 @@ impl Bridge {
         sync_model(&*self.rows, visible.into_iter().map(|r| RowData {
             id: r.id, depth: r.depth, name: r.name.into(), count: r.count.into(), cpu: r.cpu.into(), mem: r.mem.into(),
             disk: r.disk.into(), gpu: r.gpu.into(), net: r.net.into(), bar: r.bar, hung: r.hung.into(),
-            expandable: r.expandable, expanded: self.expanded.contains(&r.id),
+            expandable: r.expandable, expanded: self.expanded.contains(&r.id), actionable: r.actionable,
         }).collect());
     }
 

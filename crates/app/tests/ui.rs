@@ -15,11 +15,15 @@ fn window() -> MainWindow {
     ui.set_rows(ModelRc::new(VecModel::from(vec![RowData {
         id: 7, depth: 0, name: "Editor".into(), count: "".into(), cpu: "1.0%".into(), mem: "1.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.5, hung: "Not responding · 9s".into(),
-        expandable: false, expanded: false,
+        expandable: false, expanded: false, actionable: true,
     }, RowData {
         id: 9, depth: 0, name: "Browser".into(), count: "(3)".into(), cpu: "2.0%".into(), mem: "2.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.2, hung: "".into(),
-        expandable: true, expanded: false,
+        expandable: true, expanded: false, actionable: true,
+    }, RowData {
+        id: 11, depth: 0, name: "Windows".into(), count: "(90)".into(), cpu: "3.0%".into(), mem: "3.0 MB".into(),
+        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.1, hung: "".into(),
+        expandable: true, expanded: false, actionable: false,
     }])));
     ui
 }
@@ -120,6 +124,27 @@ fn end_task_button_shows_on_row_hover_and_survives_pointer_moving_onto_it() {
     let (bx2, by2) = centre(&button);
     move_pointer(&ui, bx2, by2);
     assert!(El::find_by_accessible_label(&ui, "End task Browser").next().is_some(), "button stays with pointer on it");
+}
+
+#[test]
+fn rows_that_are_not_actionable_offer_no_end_task() {
+    use slint::Model;
+    let ui = window();
+    // The test layout only leaves room for two rows: keep just the Windows group and Browser.
+    let all = ui.get_rows();
+    let keep: Vec<RowData> = [2, 1].iter().map(|&i| all.row_data(i).unwrap()).collect();
+    ui.set_rows(ModelRc::new(VecModel::from(keep)));
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.show().unwrap();
+    let windows = El::find_by_accessible_label(&ui, "Windows, CPU 3.0%, memory 3.0 MB").next().expect("windows row");
+    let (wx, wy) = centre(&windows);
+    move_pointer(&ui, wx, wy);
+    assert!(El::find_by_accessible_label(&ui, "End task Windows").next().is_none(), "no End task on the Windows group");
+    // The control stays available on an ordinary row.
+    let browser = El::find_by_accessible_label(&ui, BROWSER_ROW).next().expect("browser row");
+    let (bx, by) = centre(&browser);
+    move_pointer(&ui, bx, by);
+    assert!(El::find_by_accessible_label(&ui, "End task Browser").next().is_some());
 }
 
 #[test]

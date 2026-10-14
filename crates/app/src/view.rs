@@ -20,6 +20,8 @@ pub struct RowView {
     pub id: i32, pub parent: i32, pub depth: i32, pub name: String, pub search_text: String, pub count: String,
     pub cpu: String, pub mem: String, pub disk: String, pub gpu: String, pub net: String,
     pub bar: f32, pub hung: String, pub expandable: bool,
+    /// False for the "Windows" group row: it is never a target of any action.
+    pub actionable: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +32,8 @@ pub struct Target {
     pub hung_pid: Option<(u32, i64)>,
     pub image_path: Option<String>,
     pub critical: bool,
+    /// The "Windows" group (every session-0 / system process): no action may target it.
+    pub group: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -198,6 +202,7 @@ pub fn build_frame(
             hung_pid,
             image_path: root.or(procs.first().copied()).and_then(|k| image_of.get(&k).map(|s| s.to_string())),
             critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
+            group: r.key == AppKey::Windows,
         });
         let search_text = std::iter::once(r.name.to_lowercase())
             .chain(r.processes.iter().map(|p| p.name.to_lowercase()))
@@ -211,6 +216,7 @@ pub fn build_frame(
             net: r.net_bps.map(format::bit_rate).unwrap_or_else(|| "—".into()),
             bar: frac(r.value(metric)), hung: r.hung_for_ms.map(format::hung).unwrap_or_default(),
             expandable: r.processes.len() > 1,
+            actionable: r.key != AppKey::Windows,
         });
         if r.processes.len() > 1 {
             for p in &r.processes {
@@ -221,12 +227,13 @@ pub fn build_frame(
                     hung_pid: hung_pids.contains(&p.pid).then_some(pid_key),
                     image_path: image_of.get(&pid_key).map(|s| s.to_string()),
                     critical: negotium_actions::is_critical(&p.name),
+                    group: false,
                 });
                 out_rows.push(RowView {
                     id: cid, parent: id, depth: 1, name: p.name.clone(), search_text: p.name.to_lowercase(), count: String::new(),
                     cpu: format::pct1(p.cpu_pct), mem: format::bytes(p.private_bytes as f64), disk: format::byte_rate(p.disk_bps),
                     gpu: p.gpu_pct.map(format::pct1).unwrap_or_else(|| "—".into()), net: "—".into(),
-                    bar: 0.0, hung: String::new(), expandable: false,
+                    bar: 0.0, hung: String::new(), expandable: false, actionable: true,
                 });
             }
         }
@@ -319,6 +326,28 @@ mod tests {
         assert!(chrome.expandable);
         assert!((chrome.bar - 1.0).abs() < 1e-6);
         assert!(!f.admin_banner);
+    }
+
+    #[test]
+    fn windows_group_row_is_not_actionable_and_is_marked_as_a_group() {
+        let mut win = app(4, "Windows", 1.0, vec![proc(4, 0, 1.0, "System"), proc(5, 4, 0.0, "svchost.exe")], None);
+        win.key = AppKey::Windows;
+        win.kind = AppKind::Windows;
+        let rows = vec![win, app(9, "Editor", 5.0, vec![proc(9, 0, 5.0, "code.exe")], None)];
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), Metric::Cpu, true);
+        let windows = f.rows.iter().find(|r| r.name == "Windows" && r.depth == 0).unwrap();
+        assert!(!windows.actionable);
+        assert!(f.targets[&windows.id].group);
+        let children: Vec<_> = f.rows.iter().filter(|r| r.parent == windows.id).collect();
+        assert_eq!(children.len(), 2);
+        for child in children {
+            assert!(child.actionable, "individual system processes stay actionable (critical ones are confirmed)");
+            assert!(!f.targets[&child.id].group);
+        }
+        let editor = f.rows.iter().find(|r| r.name == "Editor").unwrap();
+        assert!(editor.actionable);
+        assert!(!f.targets[&editor.id].group);
     }
 
     #[test]

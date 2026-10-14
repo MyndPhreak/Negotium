@@ -4,7 +4,7 @@ import { Theme } from "theme.slint";
 export struct RowData {
     id: int, depth: int, name: string, count: string,
     cpu: string, mem: string, disk: string, gpu: string, net: string,
-    bar: float, hung: string, expandable: bool, expanded: bool,
+    bar: float, hung: string, expandable: bool, expanded: bool, actionable: bool,
 }
 
 component Cell inherits Text {
@@ -68,14 +68,14 @@ export component AppList inherits VerticalLayout {
                     enabled: root.interactive;
                     double-clicked => { if (r.expandable) { root.toggle(r.id); } }
                     ContextMenuArea {
-                        enabled: root.interactive;
+                        enabled: root.interactive && r.actionable;
                         Menu {
-                            MenuItem { title: "End task"; activated => { root.action("end-task", r.id); } }
-                            MenuItem { title: "End process tree"; activated => { root.action("end-tree", r.id); } }
-                            MenuItem { title: "Efficiency mode"; activated => { root.action("efficiency", r.id); } }
+                            MenuItem { title: "End task"; enabled: r.actionable; activated => { root.action("end-task", r.id); } }
+                            MenuItem { title: "End process tree"; enabled: r.actionable; activated => { root.action("end-tree", r.id); } }
+                            MenuItem { title: "Efficiency mode"; enabled: r.actionable; activated => { root.action("efficiency", r.id); } }
                             MenuSeparator { }
-                            MenuItem { title: "Open file location"; activated => { root.action("open-location", r.id); } }
-                            MenuItem { title: "Details"; activated => { root.action("details", r.id); } }
+                            MenuItem { title: "Open file location"; enabled: r.actionable; activated => { root.action("open-location", r.id); } }
+                            MenuItem { title: "Details"; enabled: r.actionable; activated => { root.action("details", r.id); } }
                         }
                         HorizontalLayout {
                             padding-left: 8px + r.depth * 20px;
@@ -112,13 +112,13 @@ export component AppList inherits VerticalLayout {
                                 Text { text: r.name; color: Theme.text; font-size: 12px; vertical-alignment: center; overflow: elide; }
                                 Text { text: r.count; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
                                 if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11px; vertical-alignment: center; }
-                                if r.hung != "" : Button {
+                                if r.hung != "" && r.actionable : Button {
                                     text: "Force close";
                                     enabled: root.interactive;
                                     accessible-label: "Force close " + r.name;
                                     clicked => { root.action("force-close", r.id); }
                                 }
-                                if r.hung == "" && row-touch.has-hover && r.depth == 0 : Button {
+                                if r.hung == "" && r.actionable && row-touch.has-hover && r.depth == 0 : Button {
                                     text: "End task";
                                     enabled: root.interactive;
                                     accessible-label: "End task " + r.name;
