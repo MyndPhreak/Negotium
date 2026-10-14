@@ -34,3 +34,18 @@ fn inaccessible_pids_yield_empty_identity() {
     assert_eq!(cache.get(4, 0).image_path, None);
     assert_eq!(cache.get(u32::MAX - 3, 1).image_path, None);
 }
+
+#[test]
+fn reads_file_description_of_a_system_binary() {
+    let mut child = std::process::Command::new(r"C:\Windows\System32\PING.EXE")
+        .args(["-n", "5", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let ct = ProcessReader::new().read().unwrap().into_iter().find(|p| p.pid == child.id()).unwrap().create_time;
+    let id = IdentityCache::new().get(child.id(), ct).clone();
+    child.kill().ok();
+    child.wait().ok();
+    assert_eq!(id.description.as_deref(), Some("TCP/IP Ping Command"));
+}

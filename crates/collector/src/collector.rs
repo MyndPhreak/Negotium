@@ -56,6 +56,7 @@ impl Collector {
                     handles: p.handles,
                     image_path: id.image_path,
                     package_family: id.package_family,
+                    description: id.description,
                 }
             })
             .collect();

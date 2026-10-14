@@ -109,15 +109,20 @@ fn is_shell_host(p: &ProcessSample) -> bool {
 }
 
 pub fn display_name(key: &AppKey, processes: &[ProcessSample]) -> String {
+    let described = |p: &ProcessSample| p.description.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(str::to_string);
     let process_name = |pid: u32, create_time: i64| {
         processes
             .iter()
             .find(|p| p.pid == pid && p.create_time == create_time)
-            .map(|p| strip_exe(&p.name))
+            .map(|p| described(p).unwrap_or_else(|| strip_exe(&p.name)))
             .unwrap_or_else(|| format!("<pid {pid}>"))
     };
     match key {
-        AppKey::Package(pfn) => pfn.split('_').next().unwrap_or(pfn).to_string(),
+        AppKey::Package(pfn) => processes
+            .iter()
+            .filter(|p| p.package_family.as_deref() == Some(pfn.as_str()))
+            .find_map(described)
+            .unwrap_or_else(|| pfn.split('_').next().unwrap_or(pfn).to_string()),
         AppKey::Window { pid, create_time } | AppKey::Background { pid, create_time } => {
             process_name(*pid, *create_time)
         }
@@ -139,7 +144,7 @@ mod tests {
         ProcessSample {
             pid, parent_pid: parent, create_time: create, name: name.into(), session_id: session,
             cpu_time_100ns: 0, private_working_set: 0, disk_io_bytes: 0, threads: 1, handles: 0,
-            image_path: None, package_family: None,
+            image_path: None, package_family: None, description: None,
         }
     }
     fn win(pid: u32) -> WindowSample {
@@ -234,5 +239,16 @@ mod tests {
         let g = group(&[svc, tool], &[], SYS);
         assert_eq!(g[&(90, 3)], AppKey::Windows);
         assert_eq!(g[&(91, 3)], AppKey::Background { pid: 91, create_time: 3 });
+    }
+
+    #[test]
+    fn display_name_prefers_root_description() {
+        let mut chrome = p(20, 1, 10, "chrome.exe", 1);
+        chrome.description = Some("Google Chrome".into());
+        let mut blank = p(21, 1, 11, "tool.exe", 1);
+        blank.description = Some("   ".into());
+        let procs = vec![chrome, blank];
+        assert_eq!(display_name(&AppKey::Window { pid: 20, create_time: 10 }, &procs), "Google Chrome");
+        assert_eq!(display_name(&AppKey::Background { pid: 21, create_time: 11 }, &procs), "tool");
     }
 }

@@ -20,6 +20,9 @@ pub struct ProcessSample {
     pub handles: u32,
     pub image_path: Option<String>,
     pub package_family: Option<String>,
+    /// FileDescription from the executable's version resource (e.g. "Google Chrome").
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,7 +90,7 @@ mod tests {
             processes: vec![ProcessSample {
                 pid: 42, parent_pid: 4, create_time: 7, name: "a.exe".into(), session_id: 1,
                 cpu_time_100ns: 10, private_working_set: 20, disk_io_bytes: 30, threads: 2,
-                handles: 3, image_path: Some(r"C:\a.exe".into()), package_family: None,
+                handles: 3, image_path: Some(r"C:\a.exe".into()), package_family: None, description: None,
             }],
             windows: vec![WindowSample { pid: 42, hung: false, title: "A".into() }],
             totals: SystemTotals { logical_cpus: 8, cpu_pct: Some(12.5), ..Default::default() },
