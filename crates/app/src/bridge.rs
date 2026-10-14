@@ -175,6 +175,8 @@ pub struct Bridge {
     menu_open: bool,
     /// The row whose control (Force close, End task) has keyboard focus.
     key_focus: Option<i32>,
+    /// Bumped by every focus change; a deferred focus-out applies only if nothing came after it.
+    focus_generation: u64,
     banner_dismissed: bool,
     pub controls: Arc<Controls>,
     ui: slint::Weak<MainWindow>,
@@ -194,6 +196,7 @@ impl Bridge {
             hover: false,
             menu_open: false,
             key_focus: None,
+            focus_generation: 0,
             banner_dismissed: false,
             controls,
             ui: ui.as_weak(),
@@ -309,8 +312,9 @@ impl Bridge {
     }
 
     /// A modal opened: its controls are disabled, and a disabled Button never sees the focus-out,
-    /// so forget the keyboard focus here.
+    /// so forget the keyboard focus here (and drop any pending release).
     pub fn clear_key_focus(&mut self) {
+        self.focus_generation += 1;
         self.key_focus = None;
         self.update_frozen();
     }
@@ -357,9 +361,27 @@ thread_local! {
     static CURRENT: RefCell<Option<Rc<RefCell<Bridge>>>> = const { RefCell::new(None) };
 }
 
-/// Keyboard focus entered or left a control in row `id` (the UI's `row-key-focus`).
+/// Keyboard focus entered or left a control in row `id` (the UI's `row-key-focus`). A focus-out
+/// is applied on the next turn of the event loop, and dropped if a focus-in came meanwhile:
+/// Tabbing from one row to the next delivers the old row's focus-out first, and releasing the
+/// freeze in between would let a pending re-sort move rows under the newly focused control.
 pub fn row_focus(bridge: &Rc<RefCell<Bridge>>, id: i32, focused: bool) {
-    bridge.borrow_mut().set_key_focus(id, focused);
+    let generation = {
+        let mut b = bridge.borrow_mut();
+        b.focus_generation += 1;
+        if focused {
+            b.set_key_focus(id, true);
+            return;
+        }
+        b.focus_generation
+    };
+    let b = bridge.clone();
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        let mut b = b.borrow_mut();
+        if b.focus_generation == generation {
+            b.set_key_focus(id, false);
+        }
+    });
 }
 
 pub fn set_current(b: Rc<RefCell<Bridge>>) {

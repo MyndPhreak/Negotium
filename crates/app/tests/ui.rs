@@ -447,6 +447,29 @@ fn a_modal_over_a_focused_force_close_does_not_leave_the_list_frozen() {
 }
 
 #[test]
+fn moving_keyboard_focus_between_rows_never_unfreezes_the_list() {
+    let (ui, controls, bridge) = bridged();
+    bridge.borrow_mut().apply(&ui, frame(vec![row_view(1, "Editor", HUNG), row_view(2, "Game", HUNG)]));
+    negotium::bridge::row_focus(&bridge, 1, true);
+    assert!(controls.frozen());
+    // A new hung app would rank first; it waits while the list is frozen.
+    bridge.borrow_mut().apply(&ui, frame(vec![row_view(3, "Tool", HUNG), row_view(1, "Editor", HUNG), row_view(2, "Game", HUNG)]));
+    // Tab from Editor's Force close to Game's: focus-out arrives before focus-in.
+    negotium::bridge::row_focus(&bridge, 1, false);
+    assert!(controls.frozen(), "the focus-out alone must not release the list");
+    assert_eq!(shown_ids(&ui), [1, 2]);
+    negotium::bridge::row_focus(&bridge, 2, true);
+    slint::platform::update_timers_and_animations();
+    assert!(controls.frozen());
+    assert_eq!(shown_ids(&ui), [1, 2], "rows never moved under the focus");
+    // Focus leaves the list for good: released on the next turn of the event loop.
+    negotium::bridge::row_focus(&bridge, 2, false);
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen());
+    assert_eq!(shown_ids(&ui), [3, 1, 2]);
+}
+
+#[test]
 fn the_menu_key_opens_the_focused_rows_menu_with_that_row_captured() {
     use slint::platform::Key;
     let ui = shown_window();
