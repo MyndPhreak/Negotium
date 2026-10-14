@@ -86,6 +86,25 @@ Run both from an elevated terminal (close both apps first):
 | UI responsiveness (WM_NULL) median / p95 / max | pending | pending | — |
 | Render time per frame, max / frames > 16 ms (excludes first paint; whole app lifetime) | n/a | pending | none > 16 ms |
 
+Negotium renders with Slint's software renderer by default (see "Renderer" below). That renderer has no rendering notifier, so a default run has no frame stats: the stats file reports 0 frames, the bench prints the stats as they are, and the app logs "frame stats unavailable". The bench still reports UI responsiveness through WM_NULL. To fill the render-time row, run the Negotium bench with the FemtoVG (OpenGL) renderer selected:
+
+    set SLINT_BACKEND=winit-femtovg
+    target\release\negotium-bench.exe negotium --runs 5 --sample-secs 60 --out docs\benchmarks\negotium-femtovg.json
+
+## Renderer: launch → window, FemtoVG vs software
+
+During development the default winit + FemtoVG (OpenGL) renderer sometimes took from 30 s to more than 5 minutes to show the window, leaving processes behind; it reproduced on the baseline build. A/B measurement: release build, time from launch until the main window is visible (winit's "Winit Thread Event Target" helper window ignored), 90 s cap per launch, every negotium.exe stopped before each launch, configurations interleaved. Times in ms.
+
+| Build | Renderer | Launches | Median |
+|---|---|---|---|
+| baseline (bf903db) | `SLINT_BACKEND=winit-femtovg` | 843, 530, 484, 562, 514, 547 | 539 |
+| baseline (bf903db) | `SLINT_BACKEND=winit-software` | 78, 124, 78, 110, 79, 109 | 94 |
+| software pinned | `SLINT_BACKEND=winit-femtovg` | 1009, 576, 701, 649, 529, 529 | 613 |
+| software pinned | `SLINT_BACKEND=winit-software` | 154, 138, 110, 63, 62, 80 | 95 |
+| software pinned | default (no `SLINT_BACKEND`) | 93, 95, 93, 64, 110, 63 | 93 |
+
+No launch stalled in these runs (the stall is intermittent), and software opened the window faster on every launch (about 500 ms faster at the median). Negotium therefore selects winit + software unless `SLINT_BACKEND` is set; set `SLINT_BACKEND=winit-femtovg` to use the GPU renderer.
+
 ## Manual check: frozen windows
 
 1. `cargo run -p negotium-collector --bin negotium-hang --release`

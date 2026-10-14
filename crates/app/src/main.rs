@@ -55,6 +55,15 @@ fn main() -> Result<(), slint::PlatformError> {
         // Not fatal: actions on other users' processes then report access denied.
         warn(&format!("could not enable SeDebugPrivilege: {e:?}"));
     }
+    // Software rendering unless SLINT_BACKEND says otherwise: with winit + FemtoVG (OpenGL) the
+    // window sometimes took 30 s to 5+ min to appear, and software opens faster on every launch
+    // measured (docs/benchmarks/README.md, "Renderer").
+    if std::env::var_os("SLINT_BACKEND").is_none()
+        && let Err(e) =
+            slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into()).select()
+    {
+        warn(&format!("software renderer unavailable, using Slint's default: {e}"));
+    }
     let ui = MainWindow::new()?;
     if let Some((r, g, b)) = platform::read_accent() {
         ui.global::<negotium::Theme>().set_accent(slint::Color::from_rgb_u8(r, g, b));
@@ -143,12 +152,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let frame_stats: std::rc::Rc<std::cell::RefCell<negotium::framestats::FrameStats>> = Default::default();
     if frame_stats_path.is_some() {
         let stats = frame_stats.clone();
-        // Err means the renderer has no notifier support; the run then reports 0 frames.
-        let _ = ui.window().set_rendering_notifier(move |state, _| match state {
+        // The software renderer has no notifier: log it and carry on; the run then reports 0 frames.
+        if let Err(e) = ui.window().set_rendering_notifier(move |state, _| match state {
             slint::RenderingState::BeforeRendering => stats.borrow_mut().begin(),
             slint::RenderingState::AfterRendering => stats.borrow_mut().end(),
             _ => {}
-        });
+        }) {
+            warn(&format!("frame stats unavailable with this renderer ({e}); use SLINT_BACKEND=winit-femtovg"));
+        }
     }
 
     // Row actions. The UI thread only plans; every job runs on its own thread.
