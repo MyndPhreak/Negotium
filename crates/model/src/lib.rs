@@ -1,8 +1,12 @@
 //! Pure logic over snapshots: no Windows calls, fully unit-testable.
 pub mod grouping;
+pub mod hung;
+pub mod ranking;
 pub mod rates;
 
 pub use grouping::{AppKey, AppKind, SHELL_HOSTS, display_name, group};
+pub use hung::HungTracker;
+pub use ranking::{Metric, RESORT_INTERVAL_MS, Ranker, top_n};
 pub use rates::{ProcRates, RateTracker};
 
 use negotium_snapshot::Snapshot;
@@ -36,6 +40,7 @@ pub struct AppRow {
 
 pub struct Model {
     rates: RateTracker,
+    hung: HungTracker,
     system_root: String,
 }
 
@@ -52,13 +57,14 @@ impl Model {
 
     /// For tests and callers that know the Windows directory.
     pub fn with_system_root(system_root: impl Into<String>) -> Self {
-        Self { rates: RateTracker::new(), system_root: system_root.into() }
+        Self { rates: RateTracker::new(), hung: HungTracker::new(), system_root: system_root.into() }
     }
 
     pub fn update(&mut self, snap: &Snapshot) -> Vec<AppRow> {
         let rates = self.rates.update(snap);
         let groups = group(&snap.processes, &snap.windows, &self.system_root);
         let gpu = snap.totals.gpu_pct_by_pid.as_ref();
+        let hung = self.hung.update(&snap.windows, snap.taken_at_ms);
 
         let mut rows: BTreeMap<AppKey, AppRow> = BTreeMap::new();
         for p in &snap.processes {
@@ -92,6 +98,9 @@ impl Model {
                 disk_bps: r.disk_bps,
                 gpu_pct: proc_gpu,
             });
+            if let Some(&ms) = hung.get(&p.pid) {
+                row.hung_for_ms = Some(row.hung_for_ms.map_or(ms, |cur| cur.max(ms)));
+            }
         }
         rows.into_values().collect()
     }
@@ -134,5 +143,20 @@ mod tests {
         assert_eq!(row.private_bytes, 150);
         assert_eq!(row.gpu_pct, Some(80.0));
         assert_eq!(row.net_bps, None);
+    }
+
+    #[test]
+    fn rows_report_hung_duration() {
+        let mut m = Model::with_system_root(r"C:\Windows");
+        let snap = |t: u64, hung: bool| Snapshot {
+            taken_at_ms: t,
+            processes: vec![p(2, 1, 0, 0)],
+            windows: vec![WindowSample { pid: 2, hung, title: "App".into() }],
+            totals: SystemTotals { logical_cpus: 1, ..Default::default() },
+            source_errors: vec![],
+        };
+        m.update(&snap(0, true));
+        assert_eq!(m.update(&snap(3000, true))[0].hung_for_ms, Some(3000));
+        assert_eq!(m.update(&snap(4000, false))[0].hung_for_ms, None);
     }
 }
