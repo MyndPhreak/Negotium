@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
+    if let Some((r, g, b)) = negotium::platform::read_accent() {
+        ui.global::<negotium::Theme>().set_accent(slint::Color::from_rgb_u8(r, g, b));
+    }
     let tray = NegotiumTray::new()?;
     let controls = Arc::new(Controls::default());
     let bridge = Bridge::install(&ui, controls.clone());
@@ -191,6 +194,23 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     ui.show()?;
+    // The native HWND is created lazily once the event loop runs (and the GL renderer can take a
+    // while to bring the window up), so poll until it exists, apply the chrome once, then stop.
+    let chrome_timer = std::rc::Rc::new(slint::Timer::default());
+    {
+        let weak = weak.clone();
+        let handle = std::rc::Rc::downgrade(&chrome_timer);
+        chrome_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !negotium::platform::has_window_handle(&ui) {
+                return;
+            }
+            negotium::platform::apply_window_chrome(&ui);
+            if let Some(t) = handle.upgrade() {
+                t.stop();
+            }
+        });
+    }
     tray.show()?;
     slint::run_event_loop_until_quit()
 }
