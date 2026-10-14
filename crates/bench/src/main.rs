@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, ERROR_TIMEOUT, GetLastError, HWND, LPARAM, WPARAM};
-use windows::Win32::System::Threading::{GetProcessId, OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+use windows::Win32::Foundation::{CloseHandle, ERROR_TIMEOUT, GetLastError, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
+use windows::Win32::System::Threading::{GetProcessId, TerminateProcess, WaitForSingleObject};
 use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SMTO_NORMAL,
@@ -109,10 +109,13 @@ fn running_pid(exe_name: &str) -> Result<Option<u32>> {
     Ok(list.into_iter().find(|p| p.name.to_lowercase() == exe_name).map(|p| p.pid))
 }
 
-/// A launched target process. If dropped while still armed (any early return or error after
-/// launch), it closes the target, falling back to terminating it, so no process is left behind.
+/// A launched target process. Owns the process handle from `ShellExecuteExW`, so the process
+/// cannot be confused with an unrelated one that reuses its id. If dropped while still armed
+/// (any early return or error after launch), it closes the target, falling back to terminating
+/// it, so no process is left behind. The handle is closed exactly once, in `Drop`.
 struct Launched {
     pid: u32,
+    handle: HANDLE,
     hwnd: Option<usize>,
     armed: bool,
 }
@@ -128,10 +131,16 @@ impl Launched {
         unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }
     }
 
+    /// Waits up to `timeout_ms` for the process to exit; true if it has exited.
+    fn wait_exited(&self, timeout_ms: u32) -> bool {
+        // SAFETY: `handle` is a valid process handle owned by `self` until Drop.
+        unsafe { WaitForSingleObject(self.handle, timeout_ms) == WAIT_OBJECT_0 }
+    }
+
     /// Asks the window to close and waits up to 10 s for the process to exit.
     fn close(mut self) -> Result<()> {
         self.post_close().context("PostMessageW WM_CLOSE")?;
-        if !wait_exit(self.pid, Duration::from_secs(10))? {
+        if !self.wait_exited(10_000) {
             bail!("pid {} did not exit after WM_CLOSE", self.pid);
         }
         self.armed = false;
@@ -141,34 +150,22 @@ impl Launched {
 
 impl Drop for Launched {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if self.post_close().is_ok() && wait_exit(self.pid, Duration::from_secs(5)).unwrap_or(false) {
-            return;
-        }
-        // SAFETY: plain handle query/terminate/close on a process id; the handle is closed exactly once.
-        unsafe {
-            if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, self.pid) {
-                let _ = TerminateProcess(h, 1);
-                let _ = CloseHandle(h);
+        if self.armed && !self.wait_exited(0) {
+            if self.hwnd.is_some() {
+                let _ = self.post_close();
+            }
+            if !self.wait_exited(5_000) {
+                // SAFETY: `handle` is the valid process handle owned by `self`; PROCESS_TERMINATE
+                // access was granted by ShellExecuteExW's process handle.
+                unsafe {
+                    let _ = TerminateProcess(self.handle, 1);
+                }
             }
         }
-    }
-}
-
-/// Returns whether `pid` exited within `timeout`; a process-list read failure is an error.
-fn wait_exit(pid: u32, timeout: Duration) -> Result<bool> {
-    let deadline = Instant::now() + timeout;
-    let mut reader = ProcessReader::new();
-    loop {
-        if !read_processes(&mut reader)?.iter().any(|p| p.pid == pid) {
-            return Ok(true);
+        // SAFETY: `handle` is owned by `self` (SEE_MASK_NOCLOSEPROCESS) and closed exactly once, here.
+        unsafe {
+            let _ = CloseHandle(self.handle);
         }
-        if Instant::now() > deadline {
-            return Ok(false);
-        }
-        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -183,16 +180,24 @@ fn launch(path: &PathBuf) -> Result<Launched> {
     };
     // SAFETY: `info` is fully initialized and `file` outlives the call.
     unsafe { ShellExecuteExW(&mut info) }.context("ShellExecuteExW")?;
-    // SAFETY: hProcess was requested via SEE_MASK_NOCLOSEPROCESS; closed after reading the pid.
-    let pid = unsafe { GetProcessId(info.hProcess) };
-    // SAFETY: hProcess is a valid handle owned by us (SEE_MASK_NOCLOSEPROCESS) and closed exactly once.
-    unsafe {
-        let _ = CloseHandle(info.hProcess);
+    let handle = info.hProcess;
+    if handle.is_invalid() {
+        bail!("ShellExecuteExW returned no process handle");
     }
+    // SAFETY: `handle` is a valid process handle requested via SEE_MASK_NOCLOSEPROCESS.
+    let pid = unsafe { GetProcessId(handle) };
     if pid == 0 {
+        // SAFETY: `handle` is valid and owned by us; terminate the process we cannot identify, then close once.
+        unsafe {
+            let _ = TerminateProcess(handle, 1);
+        }
+        // SAFETY: `handle` is valid, owned by us, and closed exactly once on this path.
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
         bail!("could not read launched process id");
     }
-    Ok(Launched { pid, hwnd: None, armed: true })
+    Ok(Launched { pid, handle, hwnd: None, armed: true })
 }
 
 struct Search {
