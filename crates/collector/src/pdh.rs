@@ -24,12 +24,12 @@ pub struct PdhReadings {
 
 pub struct PdhSources {
     query: PDH_HQUERY,
-    cpu: Option<PDH_HCOUNTER>,
-    disk_idle: Option<PDH_HCOUNTER>,
-    disk_read: Option<PDH_HCOUNTER>,
-    disk_write: Option<PDH_HCOUNTER>,
-    net: Option<PDH_HCOUNTER>,
-    gpu: Option<PDH_HCOUNTER>,
+    cpu: Result<PDH_HCOUNTER, u32>,
+    disk_idle: Result<PDH_HCOUNTER, u32>,
+    disk_read: Result<PDH_HCOUNTER, u32>,
+    disk_write: Result<PDH_HCOUNTER, u32>,
+    net: Result<PDH_HCOUNTER, u32>,
+    gpu: Result<PDH_HCOUNTER, u32>,
 }
 
 impl PdhSources {
@@ -61,8 +61,14 @@ impl PdhSources {
         if status != 0 {
             errors.push(format!("pdh collect: {status:#010x}"));
         }
-        let mut get = |label: &str, c: Option<PDH_HCOUNTER>| -> Option<Vec<(String, f64)>> {
-            let c = c?;
+        let mut get = |label: &str, c: Result<PDH_HCOUNTER, u32>| -> Option<Vec<(String, f64)>> {
+            let c = match c {
+                Ok(c) => c,
+                Err(status) => {
+                    errors.push(format!("pdh {label}: counter unavailable (add failed {status:#010x})"));
+                    return None;
+                }
+            };
             match read_array(c) {
                 Ok(v) => Some(v),
                 Err(e) => {
@@ -107,11 +113,11 @@ impl Drop for PdhSources {
     }
 }
 
-fn add(query: PDH_HQUERY, path: PCWSTR) -> Option<PDH_HCOUNTER> {
+fn add(query: PDH_HQUERY, path: PCWSTR) -> Result<PDH_HCOUNTER, u32> {
     let mut counter = PDH_HCOUNTER::default();
     // SAFETY: valid query; English path is locale-independent.
     let status = unsafe { PdhAddEnglishCounterW(query, path, 0, &mut counter) };
-    (status == 0).then_some(counter)
+    if status == 0 { Ok(counter) } else { Err(status) }
 }
 
 fn read_array(counter: PDH_HCOUNTER) -> Result<Vec<(String, f64)>, u32> {
@@ -268,8 +274,34 @@ mod tests {
         let mut query = PDH_HQUERY::default();
         // SAFETY: opening a real-time query with no data source.
         assert_eq!(unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) }, 0);
-        assert!(add(query, w!("\\No Such Object(*)\\Nope")).is_none());
+        assert!(add(query, w!("\\No Such Object(*)\\Nope")).is_err());
         // SAFETY: closing the query opened above.
         unsafe { PdhCloseQuery(query) };
+    }
+
+    #[test]
+    fn failed_counter_registration_is_reported_by_read() {
+        let mut query = PDH_HQUERY::default();
+        // SAFETY: opening a real-time query with no data source; owned by `sources` below.
+        assert_eq!(unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) }, 0);
+        let failed = Err(0xC0000BB8u32);
+        // Dropping `sources` closes the query.
+        let mut sources = PdhSources {
+            query,
+            cpu: failed,
+            disk_idle: failed,
+            disk_read: failed,
+            disk_write: failed,
+            net: failed,
+            gpu: failed,
+        };
+        let r = sources.read();
+        assert!(r.cpu_pct.is_none() && r.disks.is_none() && r.net_bps.is_none() && r.gpu_pct.is_none());
+        assert!(
+            r.errors.iter().any(|e| e == "pdh cpu: counter unavailable (add failed 0xc0000bb8)"),
+            "errors: {:?}",
+            r.errors
+        );
+        assert_eq!(r.errors.iter().filter(|e| e.contains("counter unavailable")).count(), 6);
     }
 }

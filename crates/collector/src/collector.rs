@@ -78,6 +78,11 @@ impl Collector {
             Err(status) => source_errors.push(format!("pdh open: {status:#010x}")),
         }
 
-        Snapshot { taken_at_ms, processes, windows: scan_windows(), totals, source_errors }
+        let windows = scan_windows().unwrap_or_else(|message| {
+            source_errors.push(message);
+            Vec::new()
+        });
+
+        Snapshot { taken_at_ms, processes, windows, totals, source_errors }
     }
 }

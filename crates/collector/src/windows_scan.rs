@@ -8,13 +8,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 /// Visible, unowned, titled top-level windows.
-pub fn scan_windows() -> Vec<WindowSample> {
+pub fn scan_windows() -> Result<Vec<WindowSample>, String> {
     let mut out: Vec<WindowSample> = Vec::with_capacity(64);
     // SAFETY: `out` outlives the synchronous EnumWindows call that receives its address.
-    unsafe {
-        let _ = EnumWindows(Some(visit), LPARAM(&mut out as *mut Vec<WindowSample> as isize));
-    }
-    out
+    unsafe { EnumWindows(Some(visit), LPARAM(&mut out as *mut Vec<WindowSample> as isize)) }
+        .map_err(|e| format!("windows: EnumWindows failed: {e}"))?;
+    Ok(out)
 }
 
 unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {

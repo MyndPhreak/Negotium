@@ -38,7 +38,7 @@ fn detects_a_window_that_stops_pumping_messages() {
     let mut seen_responsive = false;
     loop {
         let started = Instant::now();
-        let windows = scan_windows();
+        let windows = scan_windows().expect("EnumWindows");
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(1),
