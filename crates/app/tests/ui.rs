@@ -327,6 +327,29 @@ fn keyboard_freeze_ends_when_the_focused_button_goes_away() {
 }
 
 #[test]
+fn a_hung_windows_group_auto_expands_only_while_the_list_is_not_frozen() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    let mut group = row_view(5, "Windows", HUNG);
+    group.actionable = false;
+    group.expandable = true;
+    let child = RowView { id: 6, parent: 5, depth: 1, name: "SearchHost.exe".into(), hung: HUNG.into(), actionable: true, ..Default::default() };
+    let mut b = bridge.borrow_mut();
+    let mut calm = group.clone();
+    calm.hung = String::new();
+    b.apply(&ui, frame(vec![calm]));
+    b.set_hover(true);
+    // A member hangs while the pointer is over the list.
+    b.apply(&ui, frame(vec![group.clone(), child.clone()]));
+    let shown = ui.get_rows().row_data(0).unwrap();
+    assert!(!shown.expanded, "no expand while frozen: its children could not appear anyway");
+    assert_eq!(shown_ids(&ui), [5]);
+    b.set_hover(false);
+    assert!(ui.get_rows().row_data(0).unwrap().expanded, "applied as soon as the list unfreezes");
+    assert_eq!(shown_ids(&ui), [5, 6]);
+}
+
+#[test]
 fn keyboard_menu_on_a_focused_row_acts_on_that_row_not_on_a_stale_capture() {
     use slint::platform::Key;
     let ui = shown_window();

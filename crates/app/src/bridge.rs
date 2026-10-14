@@ -214,8 +214,9 @@ impl Bridge {
         ui.set_top_caption(frame.caption.clone().into());
         ui.set_show_admin_banner(frame.admin_banner && !self.banner_dismissed);
         self.last = frame;
-        if auto_expand_hung_groups(&self.last.rows, &mut self.expanded, &mut self.auto_expanded) {
-            self.publish_child_rows();
+        // While frozen, newly shown children would be deferred anyway: expand on unfreeze instead.
+        if !self.layout.frozen() {
+            self.auto_expand();
         }
         let fresh = self.fresh();
         self.layout.on_frame(&self.last.rows, fresh);
@@ -224,6 +225,11 @@ impl Bridge {
         self.push_rows();
     }
 
+    fn auto_expand(&mut self) {
+        if auto_expand_hung_groups(&self.last.rows, &mut self.expanded, &mut self.auto_expanded) {
+            self.publish_child_rows();
+        }
+    }
 
     /// Tells the worker which apps need child rows (expanded ones; all of them while searching).
     fn publish_child_rows(&self) {
@@ -314,6 +320,9 @@ impl Bridge {
         let frozen = self.hover || self.menu_open || self.key_focus.is_some();
         self.controls.set_frozen(frozen);
         if frozen != self.layout.frozen() {
+            if !frozen {
+                self.auto_expand();
+            }
             let fresh = self.fresh();
             self.layout.set_frozen(frozen, &self.last.rows, fresh);
             self.push_rows();
