@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 negotium-snapshot = { path = "crates/snapshot" }
 negotium-collector = { path = "crates/collector" }
+negotium-actions = { path = "crates/actions" }
 negotium-model = { path = "crates/model" }
 negotium-history = { path = "crates/history" }
 serde = { version = "1.0.229", features = ["derive"] }
