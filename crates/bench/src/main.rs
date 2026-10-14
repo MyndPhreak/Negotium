@@ -1,0 +1,229 @@
+//! Measures an app the way spec §8 defines: launch → first window, CPU %, private
+//! working set, and UI responsiveness (WM_NULL round-trip). Run from an elevated terminal.
+mod stats;
+
+use anyhow::{Context, Result, bail};
+use negotium_collector::{ProcessReader, logical_cpus};
+use serde::Serialize;
+use stats::{Summary, summary};
+use std::ffi::c_void;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::GetProcessId;
+use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SMTO_NORMAL,
+    SW_SHOWNORMAL, SendMessageTimeoutW, WM_CLOSE, WM_NULL,
+};
+use windows::core::{BOOL, HSTRING, PCWSTR};
+
+const WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
+const RESPONSIVENESS_TIMEOUT_MS: u32 = 1000;
+
+#[derive(Serialize)]
+struct Report {
+    target: String,
+    logical_cpus: u32,
+    startup_ms: Vec<f64>,
+    startup: Summary,
+    cpu_pct: Summary,
+    private_working_set_mb: Summary,
+    responsiveness_ms: Summary,
+    responsiveness_timeouts: usize,
+}
+
+fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    let target = args.next().context("usage: negotium-bench <taskmgr|PATH> [--runs N] [--sample-secs S] [--out FILE]")?;
+    let (mut runs, mut sample_secs, mut out) = (5u32, 60u64, None::<String>);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--runs" => runs = args.next().context("--runs N")?.parse()?,
+            "--sample-secs" => sample_secs = args.next().context("--sample-secs S")?.parse()?,
+            "--out" => out = Some(args.next().context("--out FILE")?),
+            other => bail!("unknown argument {other}"),
+        }
+    }
+    // SAFETY: no arguments; reads the current token.
+    if !unsafe { IsUserAnAdmin() }.as_bool() {
+        bail!("run from an elevated terminal: Task Manager auto-elevates and UIPI blocks probing higher-integrity windows");
+    }
+    let path = if target.eq_ignore_ascii_case("taskmgr") {
+        PathBuf::from(r"C:\Windows\System32\Taskmgr.exe")
+    } else {
+        PathBuf::from(&target)
+    };
+    let exe_name = path.file_name().context("target has no file name")?.to_string_lossy().to_lowercase();
+
+    let mut startup_ms = Vec::new();
+    let mut last: Option<(u32, HWND)> = None;
+    for run in 0..runs {
+        if let Some((pid, hwnd)) = last.take() {
+            close(pid, hwnd)?;
+        }
+        if running_pid(&exe_name).is_some() {
+            bail!("{exe_name} is already running; close it first (Task Manager is single-instance)");
+        }
+        let t0 = Instant::now();
+        let pid = launch(&path)?;
+        let hwnd = wait_for_window(pid)?;
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("run {}: first window after {ms:.0} ms", run + 1);
+        startup_ms.push(ms);
+        last = Some((pid, hwnd));
+    }
+    let (pid, hwnd) = last.context("--runs must be at least 1")?;
+    println!("sampling pid {pid} for {sample_secs} s …");
+    let (cpu, ws, resp, timeouts) = sample(pid, hwnd, Duration::from_secs(sample_secs))?;
+    close(pid, hwnd)?;
+
+    let report = Report {
+        target: path.display().to_string(),
+        logical_cpus: logical_cpus(),
+        startup: summary(&startup_ms),
+        startup_ms,
+        cpu_pct: summary(&cpu),
+        private_working_set_mb: summary(&ws),
+        responsiveness_ms: summary(&resp),
+        responsiveness_timeouts: timeouts,
+    };
+    let json = serde_json::to_string_pretty(&report)?;
+    println!("{json}");
+    if let Some(path) = out {
+        std::fs::write(&path, json).with_context(|| format!("write {path}"))?;
+    }
+    Ok(())
+}
+
+fn running_pid(exe_name: &str) -> Option<u32> {
+    ProcessReader::new().read().ok()?.into_iter().find(|p| p.name.to_lowercase() == exe_name).map(|p| p.pid)
+}
+
+fn launch(path: &PathBuf) -> Result<u32> {
+    let file = HSTRING::from(path.as_os_str());
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` is fully initialized and `file` outlives the call.
+    unsafe { ShellExecuteExW(&mut info) }.context("ShellExecuteExW")?;
+    // SAFETY: hProcess was requested via SEE_MASK_NOCLOSEPROCESS; closed after reading the pid.
+    let pid = unsafe { GetProcessId(info.hProcess) };
+    // SAFETY: hProcess is a valid handle owned by us (SEE_MASK_NOCLOSEPROCESS) and closed exactly once.
+    unsafe {
+        let _ = CloseHandle(info.hProcess);
+    }
+    if pid == 0 {
+        bail!("could not read launched process id");
+    }
+    Ok(pid)
+}
+
+struct Search {
+    pid: u32,
+    found: Option<HWND>,
+}
+
+unsafe extern "system" fn find_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam is the `&mut Search` passed by first_window.
+    let search = unsafe { &mut *(lparam.0 as *mut Search) };
+    let mut pid = 0u32;
+    // SAFETY: read-only queries on a handle supplied by EnumWindows.
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == search.pid
+            && IsWindowVisible(hwnd).as_bool()
+            && !GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid())
+        {
+            search.found = Some(hwnd);
+            return false.into();
+        }
+    }
+    true.into()
+}
+
+fn first_window(pid: u32) -> Option<HWND> {
+    let mut search = Search { pid, found: None };
+    // SAFETY: `search` outlives the synchronous enumeration.
+    unsafe {
+        let _ = EnumWindows(Some(find_window), LPARAM(&mut search as *mut Search as isize));
+    }
+    search.found
+}
+
+fn wait_for_window(pid: u32) -> Result<HWND> {
+    let deadline = Instant::now() + WINDOW_TIMEOUT;
+    loop {
+        if let Some(h) = first_window(pid) {
+            return Ok(h);
+        }
+        if Instant::now() > deadline {
+            bail!("no visible window for pid {pid} within {WINDOW_TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn sample(pid: u32, hwnd: HWND, duration: Duration) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, usize)> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let hwnd_bits = hwnd.0 as usize;
+    let stop_probe = stop.clone();
+    let prober = std::thread::spawn(move || {
+        let hwnd = HWND(hwnd_bits as *mut c_void);
+        let (mut times, mut timeouts) = (Vec::new(), 0usize);
+        while !stop_probe.load(Ordering::Relaxed) {
+            let t = Instant::now();
+            // SAFETY: WM_NULL has no side effects; bounded by the timeout.
+            let r = unsafe {
+                SendMessageTimeoutW(hwnd, WM_NULL, WPARAM(0), LPARAM(0), SMTO_NORMAL, RESPONSIVENESS_TIMEOUT_MS, None)
+            };
+            if r.0 == 0 {
+                timeouts += 1;
+                times.push(RESPONSIVENESS_TIMEOUT_MS as f64);
+            } else {
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        (times, timeouts)
+    });
+
+    let cpus = logical_cpus() as f64;
+    let mut reader = ProcessReader::new();
+    let (mut cpu, mut ws) = (Vec::new(), Vec::new());
+    let mut prev: Option<(Instant, u64)> = None;
+    let end = Instant::now() + duration;
+    while Instant::now() < end {
+        let now = Instant::now();
+        let p = reader.read().ok().and_then(|l| l.into_iter().find(|p| p.pid == pid)).context("target exited during sampling")?;
+        if let Some((t0, c0)) = prev {
+            let capacity = now.duration_since(t0).as_secs_f64() * 10_000_000.0 * cpus;
+            cpu.push((p.cpu_time_100ns.saturating_sub(c0) as f64 / capacity * 100.0).clamp(0.0, 100.0));
+        }
+        ws.push(p.private_working_set as f64 / (1024.0 * 1024.0));
+        prev = Some((now, p.cpu_time_100ns));
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    stop.store(true, Ordering::Relaxed);
+    let (resp, timeouts) = prober.join().expect("prober thread");
+    Ok((cpu, ws, resp, timeouts))
+}
+
+fn close(pid: u32, hwnd: HWND) -> Result<()> {
+    // SAFETY: asks the window to close; no pointers involved.
+    unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.context("PostMessageW WM_CLOSE")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ProcessReader::new().read().map(|l| l.iter().any(|p| p.pid == pid)).unwrap_or(false) {
+        if Instant::now() > deadline {
+            bail!("pid {pid} did not exit after WM_CLOSE");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}

@@ -46,6 +46,20 @@ The target stays unchanged; the process-list kernel call is the dominant cost on
 
 `cargo test -p negotium-collector --test accuracy`: one busy thread reports within ±35 % of 100 / logical_cpus percent. Tolerance unchanged.
 
-## Task Manager baseline
+## Task Manager baseline (Taskmgr.exe 10.0.26100.9549)
 
-See Task 12.
+Raw data (not yet recorded): `2026-10-14-taskmgr-baseline.json`
+
+The measurement needs an elevated terminal (Task Manager auto-elevates and UIPI blocks probing higher-integrity windows), so it has not been run yet. Close Task Manager, then run from the repository root in an elevated terminal and fill the table from the JSON:
+
+```
+cargo run -p negotium-bench --release -- taskmgr --runs 5 --sample-secs 60 --out docs/benchmarks/2026-10-14-taskmgr-baseline.json
+```
+
+| Metric | Task Manager | Negotium target (spec §8) |
+|---|---|---|
+| Launch → first window, median of 5 | pending (run elevated) | ≤ 250 ms |
+| CPU while visible, mean / max | pending (run elevated) | ≤ 0.5 % of one core (= 0.0156 % of total on 32 logical processors) |
+| Private working set, max | pending (run elevated) | ≤ 60 MB |
+| UI responsiveness (WM_NULL), median / p95 / max | pending (run elevated) | no frame > 16 ms (Plan 2 measures frames) |
+| Responsiveness timeouts (> 1 s) | pending (run elevated) | 0 |
