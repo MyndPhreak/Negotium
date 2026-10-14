@@ -9,6 +9,7 @@ publish.workspace = true
 negotium-snapshot.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_System_LibraryLoader",
     "Win32_System_Performance",
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
@@ -19,6 +20,11 @@ windows = { workspace = true, features = [
 [[bin]]
 name = "negotium-burn"
 path = "src/bin/burn.rs"
+test = false
+
+[[bin]]
+name = "negotium-hang"
+path = "src/bin/hang.rs"
 test = false
 
 [dev-dependencies]

@@ -68,3 +68,10 @@ If interrupted with Ctrl+C during sampling, close Task Manager before re-running
 | Private working set, max | pending (run elevated) | ≤ 60 MB |
 | UI responsiveness (WM_NULL), median / p95 / max | pending (run elevated) | no frame > 16 ms (Plan 2 measures frames) |
 | Responsiveness timeouts (> 1 s) | pending (run elevated) | 0 |
+
+## Manual check: frozen windows
+
+1. `cargo run -p negotium-collector --bin negotium-hang --release`
+2. In another terminal: `cargo run -p negotium-probe --release -- --ticks 30`
+3. After ~8 s the window title shows "Not Responding"; click inside it once.
+4. Expected: the probe lists `negotium-hang` with `NOT RESPONDING` on every tick after that, and no `dwm` app row appears.
