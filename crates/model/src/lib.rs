@@ -3,18 +3,21 @@ pub mod grouping;
 pub mod hung;
 pub mod ranking;
 pub mod rates;
+pub mod tree;
 
 pub use grouping::{AppKey, AppKind, SHELL_HOSTS, display_name, group};
 pub use hung::HungTracker;
 pub use ranking::{Metric, RESORT_INTERVAL_MS, Ranker, top_n};
 pub use rates::{ProcRates, RateTracker};
+pub use tree::descendants_deepest_first;
 
 use negotium_snapshot::Snapshot;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcRow {
     pub pid: u32,
+    pub parent_pid: u32,
     pub create_time: i64,
     pub name: String,
     pub cpu_pct: f32,
@@ -42,6 +45,7 @@ pub struct Model {
     rates: RateTracker,
     hung: HungTracker,
     system_root: String,
+    sticky: HashMap<(u32, i64), AppKey>,
 }
 
 impl Default for Model {
@@ -57,12 +61,32 @@ impl Model {
 
     /// For tests and callers that know the Windows directory.
     pub fn with_system_root(system_root: impl Into<String>) -> Self {
-        Self { rates: RateTracker::new(), hung: HungTracker::new(), system_root: system_root.into() }
+        Self { rates: RateTracker::new(), hung: HungTracker::new(), system_root: system_root.into(), sticky: HashMap::new() }
     }
 
     pub fn update(&mut self, snap: &Snapshot) -> Vec<AppRow> {
         let rates = self.rates.update(snap);
-        let groups = group(&snap.processes, &snap.windows, &self.system_root);
+        let mut groups = group(&snap.processes, &snap.windows, &self.system_root);
+        // An app keeps its row while its root lives, even if its window closes
+        // (minimise-to-tray), so rows don't change key, rank, or history id.
+        let alive: std::collections::HashSet<(u32, i64)> =
+            snap.processes.iter().map(|p| (p.pid, p.create_time)).collect();
+        for (proc_key, key) in groups.iter_mut() {
+            match key {
+                AppKey::Window { .. } => {
+                    self.sticky.insert(*proc_key, key.clone());
+                }
+                AppKey::Background { .. } => {
+                    if let Some(prev @ AppKey::Window { pid, create_time }) = self.sticky.get(proc_key)
+                        && alive.contains(&(*pid, *create_time))
+                    {
+                        *key = prev.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.sticky.retain(|k, _| alive.contains(k));
         let gpu = snap.totals.gpu_pct_by_pid.as_ref();
         let hung = self.hung.update(&snap.windows, snap.taken_at_ms);
 
@@ -91,6 +115,7 @@ impl Model {
             }
             row.processes.push(ProcRow {
                 pid: p.pid,
+                parent_pid: p.parent_pid,
                 create_time: p.create_time,
                 name: p.name.clone(),
                 cpu_pct: r.cpu_pct,
@@ -158,5 +183,27 @@ mod tests {
         m.update(&snap(0, true));
         assert_eq!(m.update(&snap(3000, true))[0].hung_for_ms, Some(3000));
         assert_eq!(m.update(&snap(4000, false))[0].hung_for_ms, None);
+    }
+
+    #[test]
+    fn app_keeps_its_row_when_its_window_closes() {
+        let mut m = Model::with_system_root(r"C:\Windows");
+        let snap = |t: u64, with_window: bool| Snapshot {
+            taken_at_ms: t,
+            processes: vec![p(2, 1, 0, 0), {
+                let mut helper = p(3, 2, 0, 0);
+                helper.name = "helper.exe".into();
+                helper
+            }],
+            windows: if with_window { vec![WindowSample { pid: 2, hung: false, title: "App".into() }] } else { vec![] },
+            totals: SystemTotals { logical_cpus: 1, ..Default::default() },
+            source_errors: vec![],
+        };
+        let before = m.update(&snap(0, true));
+        let after = m.update(&snap(1000, false));
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1, "minimising to the tray must not split or rename the app");
+        assert_eq!(after[0].key, before[0].key);
+        assert_eq!(after[0].processes.iter().map(|p| p.parent_pid).collect::<Vec<_>>(), vec![1, 2]);
     }
 }

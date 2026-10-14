@@ -1,5 +1,6 @@
 //! Process → app grouping rules (spec §4.3), applied in order per process:
-//! 1. own package family → `Package`;
+//! 1. own package family → `Package` (unless the image is under %SystemRoot%, e.g.
+//!    `SystemApps\StartMenuExperienceHost` → `Windows`);
 //! 2. nearest window-owning ancestor (stopping at shell hosts and at parents created after
 //!    the child); a packaged root yields `Package`, otherwise `Window`;
 //! 3. session 0 or an image under %SystemRoot% → `Windows`;
@@ -44,14 +45,15 @@ pub fn group(processes: &[ProcessSample], windows: &[WindowSample], system_root:
         .iter()
         .filter(|p| p.pid != 0)
         .map(|p| {
+            let system = p.session_id == 0 || is_under(p, &system_prefix);
             let key = if let Some(pfn) = &p.package_family {
-                AppKey::Package(pfn.clone())
+                if is_under(p, &system_prefix) { AppKey::Windows } else { AppKey::Package(pfn.clone()) }
             } else if let Some(root) = window_root(p, &by_pid, &window_pids) {
                 match &root.package_family {
                     Some(pfn) => AppKey::Package(pfn.clone()),
                     None => AppKey::Window { pid: root.pid, create_time: root.create_time },
                 }
-            } else if p.session_id == 0 || is_under(p, &system_prefix) {
+            } else if system {
                 AppKey::Windows
             } else {
                 let top = host_root(p, &by_pid);
@@ -250,5 +252,18 @@ mod tests {
         let procs = vec![chrome, blank];
         assert_eq!(display_name(&AppKey::Window { pid: 20, create_time: 10 }, &procs), "Google Chrome");
         assert_eq!(display_name(&AppKey::Background { pid: 21, create_time: 11 }, &procs), "tool");
+    }
+
+    #[test]
+    fn packaged_system_components_join_windows() {
+        let mut start = p(70, 1, 1, "StartMenuExperienceHost.exe", 1);
+        start.package_family = Some("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy".into());
+        start.image_path = Some(r"C:\Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe".into());
+        let mut term = p(71, 1, 1, "WindowsTerminal.exe", 1);
+        term.package_family = Some("Microsoft.WindowsTerminal_8wekyb3d8bbwe".into());
+        term.image_path = Some(r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal\WindowsTerminal.exe".into());
+        let g = group(&[start, term], &[win(70), win(71)], SYS);
+        assert_eq!(g[&(70, 1)], AppKey::Windows);
+        assert_eq!(g[&(71, 1)], AppKey::Package("Microsoft.WindowsTerminal_8wekyb3d8bbwe".into()));
     }
 }
