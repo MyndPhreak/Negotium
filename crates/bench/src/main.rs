@@ -34,11 +34,13 @@ struct Report {
     private_working_set_mb: Summary,
     responsiveness_ms: Summary,
     responsiveness_timeouts: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame_stats: Option<serde_json::Value>,
 }
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let target = args.next().context("usage: negotium-bench <taskmgr|PATH> [--runs N] [--sample-secs S] [--warmup-secs S] [--out FILE]")?;
+    let target = args.next().context("usage: negotium-bench <taskmgr|negotium|PATH> [--runs N] [--sample-secs S] [--warmup-secs S] [--out FILE]")?;
     let (mut runs, mut sample_secs, mut warmup_secs, mut out) = (5u32, 60u64, 5u64, None::<String>);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -53,12 +55,23 @@ fn main() -> Result<()> {
     if !unsafe { IsUserAnAdmin() }.as_bool() {
         bail!("run from an elevated terminal: Task Manager auto-elevates and UIPI blocks probing higher-integrity windows");
     }
+    let is_negotium = target.eq_ignore_ascii_case("negotium");
     let path = if target.eq_ignore_ascii_case("taskmgr") {
         PathBuf::from(r"C:\Windows\System32\Taskmgr.exe")
+    } else if is_negotium {
+        std::env::current_exe()?.with_file_name("negotium.exe")
     } else {
         PathBuf::from(&target)
     };
     let exe_name = path.file_name().context("target has no file name")?.to_string_lossy().to_lowercase();
+
+    let stats_path = std::env::temp_dir().join("negotium-frame-stats.json");
+    if is_negotium {
+        let _ = std::fs::remove_file(&stats_path);
+        // SAFETY: single-threaded at this point; no other thread reads the environment.
+        unsafe { std::env::set_var("NEGOTIUM_FRAME_STATS", &stats_path) };
+    }
+    let launch_args = is_negotium.then_some("--exit-on-close");
 
     let mut startup_ms = Vec::new();
     let mut last: Option<Launched> = None;
@@ -71,7 +84,7 @@ fn main() -> Result<()> {
         }
         let t0 = Instant::now();
         // An early return below drops `target`, which cleans the launched process up.
-        let mut target = launch(&path)?;
+        let mut target = launch(&path, launch_args)?;
         let hwnd = wait_for_window(target.pid)?;
         target.hwnd = Some(hwnd.0 as usize);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -85,6 +98,11 @@ fn main() -> Result<()> {
         sample(&target, Duration::from_secs(warmup_secs), Duration::from_secs(sample_secs))?;
     target.close()?;
 
+    let frame_stats = if is_negotium {
+        std::fs::read_to_string(&stats_path).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    } else {
+        None
+    };
     let report = Report {
         target: path.display().to_string(),
         logical_cpus: logical_cpus(),
@@ -95,6 +113,7 @@ fn main() -> Result<()> {
         private_working_set_mb: summary(&ws),
         responsiveness_ms: summary(&resp),
         responsiveness_timeouts: timeouts,
+        frame_stats,
     };
     let json = serde_json::to_string_pretty(&report)?;
     println!("{json}");
@@ -173,16 +192,18 @@ impl Drop for Launched {
     }
 }
 
-fn launch(path: &PathBuf) -> Result<Launched> {
+fn launch(path: &PathBuf, args: Option<&str>) -> Result<Launched> {
     let file = HSTRING::from(path.as_os_str());
+    let params = args.map(HSTRING::from);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,
         lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: params.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr())),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
-    // SAFETY: `info` is fully initialized and `file` outlives the call.
+    // SAFETY: `info` is fully initialized and `file` and `params` outlive the call.
     unsafe { ShellExecuteExW(&mut info) }.context("ShellExecuteExW")?;
     let handle = info.hProcess;
     if handle.is_invalid() {

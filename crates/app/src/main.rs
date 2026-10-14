@@ -78,14 +78,34 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_dismiss_banner(move || b.borrow_mut().dismiss_banner());
     }
 
-    // Close hides to tray (spec 5.5); the worker slows to 2 s while hidden.
+    // Close hides to tray (spec 5.5); the worker slows to 2 s while hidden. With --exit-on-close
+    // (benchmark use only) it quits instead, so a WM_CLOSE from the bench ends the process.
+    let exit_on_close = std::env::args().any(|a| a == "--exit-on-close");
     {
         let controls = controls.clone();
         ui.window().on_close_requested(move || {
+            if exit_on_close {
+                controls.request_stop();
+                let _ = slint::quit_event_loop();
+                return slint::CloseRequestResponse::HideWindow;
+            }
             controls.set_visible(false);
             // A hidden window cannot report pointer-leave, so release the hover freeze here.
             controls.set_frozen(false);
             slint::CloseRequestResponse::HideWindow
+        });
+    }
+
+    // Optional render-time statistics for the benchmark (NEGOTIUM_FRAME_STATS=<path>).
+    let frame_stats_path = std::env::var_os("NEGOTIUM_FRAME_STATS");
+    let frame_stats: std::rc::Rc<std::cell::RefCell<negotium::framestats::FrameStats>> = Default::default();
+    if frame_stats_path.is_some() {
+        let stats = frame_stats.clone();
+        // Err means the renderer has no notifier support; the run then reports 0 frames.
+        let _ = ui.window().set_rendering_notifier(move |state, _| match state {
+            slint::RenderingState::BeforeRendering => stats.borrow_mut().begin(),
+            slint::RenderingState::AfterRendering => stats.borrow_mut().end(),
+            _ => {}
         });
     }
     {
@@ -212,5 +232,9 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     tray.show()?;
-    slint::run_event_loop_until_quit()
+    let result = slint::run_event_loop_until_quit();
+    if let Some(path) = frame_stats_path {
+        let _ = std::fs::write(path, frame_stats.borrow().summary_json());
+    }
+    result
 }

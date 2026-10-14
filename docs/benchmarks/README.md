@@ -69,6 +69,25 @@ If interrupted with Ctrl+C during sampling, close Task Manager before re-running
 | UI responsiveness (WM_NULL), median / p95 / max | pending (run elevated) | no frame > 16 ms (Plan 2 measures frames) |
 | Responsiveness timeouts (> 1 s) | pending (run elevated) | 0 |
 
+## Negotium vs Task Manager
+
+Run both from an elevated terminal (close both apps first):
+
+    cargo build --release -p negotium -p negotium-bench
+    targetelease
+egotium-bench.exe taskmgr  --runs 5 --sample-secs 60 --out docs/benchmarks/taskmgr.json
+    targetelease
+egotium-bench.exe negotium --runs 5 --sample-secs 60 --out docs/benchmarks/negotium.json
+
+| Metric | Task Manager | Negotium | Target (spec §8) |
+|---|---|---|---|
+| Launch → first window, run 1 (cold) | pending | pending | ≤ 250 ms |
+| Launch → first window, median of 5 | pending | pending | ≤ 250 ms |
+| CPU while visible, mean / max (% of total) | pending | pending | ≤ 0.5 % of one core |
+| Private working set, max | pending | pending | ≤ 60 MB |
+| UI responsiveness (WM_NULL) median / p95 / max | pending | pending | — |
+| Render time per frame, max / frames > 16 ms | n/a | pending | none > 16 ms |
+
 ## Manual check: frozen windows
 
 1. `cargo run -p negotium-collector --bin negotium-hang --release`
