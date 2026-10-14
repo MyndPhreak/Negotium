@@ -24,6 +24,8 @@ pub struct ProcRow {
     pub private_bytes: u64,
     pub disk_bps: f64,
     pub gpu_pct: Option<f32>,
+    /// How long this process has had a hung window; `None` while it responds.
+    pub hung_for_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,6 +124,7 @@ impl Model {
                 private_bytes: p.private_working_set,
                 disk_bps: r.disk_bps,
                 gpu_pct: proc_gpu,
+                hung_for_ms: hung.get(&p.pid).copied(),
             });
             if let Some(&ms) = hung.get(&p.pid) {
                 row.hung_for_ms = Some(row.hung_for_ms.map_or(ms, |cur| cur.max(ms)));
@@ -181,8 +184,42 @@ mod tests {
             source_errors: vec![],
         };
         m.update(&snap(0, true));
-        assert_eq!(m.update(&snap(3000, true))[0].hung_for_ms, Some(3000));
-        assert_eq!(m.update(&snap(4000, false))[0].hung_for_ms, None);
+        let rows = m.update(&snap(3000, true));
+        assert_eq!(rows[0].hung_for_ms, Some(3000));
+        assert_eq!(rows[0].processes[0].hung_for_ms, Some(3000));
+        let rows = m.update(&snap(4000, false));
+        assert_eq!(rows[0].hung_for_ms, None);
+        assert_eq!(rows[0].processes[0].hung_for_ms, None);
+    }
+
+    #[test]
+    fn each_process_reports_its_own_hung_duration() {
+        // Packaged system apps (C:\Windows\SystemApps) land in the Windows group even though they
+        // own windows; only one of them is hung.
+        let mut m = Model::with_system_root(r"C:\Windows");
+        let sys = |pid: u32| {
+            let mut s = p(pid, 4, 0, 0);
+            s.image_path = Some(format!(r"C:\Windows\SystemApps\Shell\host{pid}.exe"));
+            s.package_family = Some("Microsoft.Windows.Shell".into());
+            s
+        };
+        let snap = |t: u64| Snapshot {
+            taken_at_ms: t,
+            processes: vec![sys(20), sys(21)],
+            windows: vec![
+                WindowSample { pid: 20, hung: false, title: "Start".into() },
+                WindowSample { pid: 21, hung: true, title: "Search".into() },
+            ],
+            totals: SystemTotals { logical_cpus: 1, ..Default::default() },
+            source_errors: vec![],
+        };
+        m.update(&snap(0));
+        let rows = m.update(&snap(5000));
+        let group = rows.iter().find(|r| r.key == AppKey::Windows).expect("windows group");
+        assert_eq!(group.hung_for_ms, Some(5000));
+        let by_pid = |pid| group.processes.iter().find(|p| p.pid == pid).unwrap().hung_for_ms;
+        assert_eq!(by_pid(20), None);
+        assert_eq!(by_pid(21), Some(5000));
     }
 
     #[test]

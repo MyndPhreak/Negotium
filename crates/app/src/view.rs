@@ -233,7 +233,9 @@ pub fn build_frame(
                     id: cid, parent: id, depth: 1, name: p.name.clone(), search_text: p.name.to_lowercase(), count: String::new(),
                     cpu: format::pct1(p.cpu_pct), mem: format::bytes(p.private_bytes as f64), disk: format::byte_rate(p.disk_bps),
                     gpu: p.gpu_pct.map(format::pct1).unwrap_or_else(|| "—".into()), net: "—".into(),
-                    bar: 0.0, hung: String::new(), expandable: false, actionable: true,
+                    // Its own hung text, so Force close shows on (and targets) this process even
+                    // when its app row is the never-actionable Windows group.
+                    bar: 0.0, hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true,
                 });
             }
         }
@@ -278,7 +280,7 @@ mod tests {
     use negotium_snapshot::{MemoryTotals, SystemTotals};
 
     fn proc(pid: u32, parent: u32, cpu: f32, name: &str) -> ProcRow {
-        ProcRow { pid, create_time: pid as i64, parent_pid: parent, name: name.into(), cpu_pct: cpu, private_bytes: 1024, disk_bps: 0.0, gpu_pct: None }
+        ProcRow { pid, create_time: pid as i64, parent_pid: parent, name: name.into(), cpu_pct: cpu, private_bytes: 1024, disk_bps: 0.0, gpu_pct: None, hung_for_ms: None }
     }
     fn app(pid: u32, name: &str, cpu: f32, procs: Vec<ProcRow>, hung: Option<u64>) -> AppRow {
         AppRow {
@@ -348,6 +350,28 @@ mod tests {
         let editor = f.rows.iter().find(|r| r.name == "Editor").unwrap();
         assert!(editor.actionable);
         assert!(!f.targets[&editor.id].group);
+    }
+
+    #[test]
+    fn a_hung_member_of_the_windows_group_offers_force_close_on_its_own_row() {
+        let mut hung_child = proc(6, 4, 0.0, "SearchHost.exe");
+        hung_child.hung_for_ms = Some(9_000);
+        let mut win = app(4, "Windows", 1.0, vec![proc(5, 4, 1.0, "StartMenuExperienceHost.exe"), hung_child], Some(9_000));
+        win.key = AppKey::Windows;
+        win.kind = AppKind::Windows;
+        let mut s = snap(Some(1.0));
+        s.windows = vec![negotium_snapshot::WindowSample { pid: 6, hung: true, title: "Search".into() }];
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &s, &[win], &[0], &History::new(10), Metric::Cpu, true);
+        let group = f.rows.iter().find(|r| r.depth == 0).unwrap();
+        assert_eq!(group.hung, "Not responding · 9s", "the group still shows the roll-up");
+        assert!(!group.actionable, "R7: the group itself is never actionable");
+        let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").unwrap();
+        assert_eq!(child.hung, "Not responding · 9s");
+        assert!(child.actionable, "Force close shows on the hung child row");
+        assert_eq!(f.targets[&child.id].hung_pid, Some((6, 6)));
+        let healthy = f.rows.iter().find(|r| r.name == "StartMenuExperienceHost.exe").unwrap();
+        assert_eq!(healthy.hung, "");
     }
 
     #[test]
