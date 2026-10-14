@@ -1,0 +1,45 @@
+import { Theme } from "theme.slint";
+
+export struct MeterData { label: string, value: string, sub: string, spark: string, available: bool }
+
+component Meter inherits Rectangle {
+    in property <MeterData> data;
+    in property <bool> selected;
+    callback activated();
+    min-width: 96px;
+    border-radius: Theme.radius;
+    background: selected ? Theme.accent.with-alpha(0.18) : Theme.card;
+    border-width: 1px;
+    border-color: selected ? Theme.accent : Theme.card-border;
+    accessible-role: button;
+    accessible-label: data.label + " meter";
+    accessible-action-default => { root.activated(); }
+    TouchArea { clicked => { root.activated(); } }
+    VerticalLayout {
+        padding: 10px;
+        spacing: 2px;
+        Text { text: data.label; color: Theme.muted; font-size: 12px; }
+        Text { text: data.available ? data.value : "Unavailable"; color: Theme.text; font-size: data.available ? 20px : 14px; font-weight: 600; }
+        Text { text: data.sub; color: Theme.muted; font-size: 11px; }
+        Path {
+            height: 26px;
+            commands: data.spark;
+            viewbox-width: 60;
+            viewbox-height: 100;
+            stroke: Theme.accent;
+            stroke-width: 1.5px;
+        }
+    }
+}
+
+export component MetersRow inherits HorizontalLayout {
+    in property <[MeterData]> meters;
+    in property <int> selected;
+    callback select(int);
+    spacing: 8px;
+    for m[i] in meters : Meter {
+        data: m;
+        selected: i == root.selected;
+        activated => { root.select(i); }
+    }
+}

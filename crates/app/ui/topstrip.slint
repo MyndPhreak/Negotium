@@ -1,0 +1,30 @@
+import { Theme } from "theme.slint";
+
+export struct TileData { id: int, name: string, value: string, weight: float, hung: bool }
+
+export component TopStrip inherits VerticalLayout {
+    in property <[TileData]> tiles;
+    in property <string> caption;
+    callback open(int);
+    spacing: 4px;
+    Text { text: caption; color: Theme.muted; font-size: 11px; }
+    HorizontalLayout {
+        height: 52px;
+        spacing: 4px;
+        for t in tiles : Rectangle {
+            horizontal-stretch: max(t.weight, 0.0001);
+            min-width: 28px;
+            border-radius: 6px;
+            background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);
+            accessible-role: button;
+            accessible-label: t.name + " tile";
+            accessible-action-default => { root.open(t.id); }
+            TouchArea { clicked => { root.open(t.id); } }
+            VerticalLayout {
+                padding: 6px;
+                Text { text: (t.hung ? "⚠ " : "") + t.name; color: Theme.text; font-size: 12px; overflow: elide; }
+                Text { text: t.value; color: Theme.text; font-size: 12px; font-weight: 600; overflow: elide; }
+            }
+        }
+    }
+}

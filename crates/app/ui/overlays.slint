@@ -1,0 +1,60 @@
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component Banner inherits Rectangle {
+    callback restart();
+    callback dismiss();
+    height: 40px;
+    border-radius: Theme.radius;
+    background: Theme.accent.with-alpha(0.15);
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 8px;
+        Text { text: "Some processes need admin rights to show details or be ended."; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+        Button { text: "Restart as admin"; clicked => { root.restart(); } }
+        Button { text: "Dismiss"; clicked => { root.dismiss(); } }
+    }
+}
+
+export component Toast inherits Rectangle {
+    in property <string> text;
+    callback dismiss();
+    height: 36px;
+    border-radius: Theme.radius;
+    background: Theme.card;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    HorizontalLayout {
+        padding: 8px;
+        Text { text: root.text; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+        Button { text: "OK"; clicked => { root.dismiss(); } }
+    }
+}
+
+export component Modal inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    in property <string> confirm-label;
+    in property <bool> show-cancel: true;
+    callback done(bool);
+    background: #00000066;
+    TouchArea { }
+    Rectangle {
+        width: min(parent.width - 48px, 520px);
+        height: layout.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.dark ? #2b2b2b : #ffffff;
+        layout := VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            Text { text: root.title; color: Theme.text; font-size: 16px; font-weight: 600; }
+            Text { text: root.body; color: Theme.text; wrap: word-wrap; }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                if root.show-cancel : Button { text: "Cancel"; clicked => { root.done(false); } }
+                Button { text: root.confirm-label; primary: true; clicked => { root.done(true); } }
+            }
+        }
+    }
+}

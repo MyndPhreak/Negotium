@@ -1,0 +1,10 @@
+export component NegotiumTray inherits SystemTrayIcon {
+    icon: @image-url("../assets/negotium.svg");
+    tooltip: "Negotium";
+    callback open();
+    callback exit();
+    Menu {
+        MenuItem { title: "Open"; activated => { root.open(); } }
+        MenuItem { title: "Exit"; activated => { root.exit(); } }
+    }
+}

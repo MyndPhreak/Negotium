@@ -1,3 +1,87 @@
+import { Theme } from "theme.slint";
+import { MetersRow, MeterData } from "meters.slint";
+import { TopStrip, TileData } from "topstrip.slint";
+import { AppList, RowData } from "applist.slint";
+import { Banner, Toast, Modal } from "overlays.slint";
+export { NegotiumTray } from "tray.slint";
+export { Theme, MeterData, TileData, RowData }
+
 export component MainWindow inherits Window {
     title: "Negotium";
+    icon: @image-url("../assets/negotium.svg");
+    preferred-width: 1000px;
+    preferred-height: 720px;
+    min-width: 560px;
+    min-height: 440px;
+    default-font-family: "Segoe UI Variable Text";
+    background: Theme.window-bg;
+
+    in property <[MeterData]> meters;
+    in property <int> selected-metric;
+    in property <[TileData]> tiles;
+    in property <string> top-caption;
+    in property <[RowData]> rows;
+    in property <bool> show-admin-banner;
+    in property <string> toast;
+    in property <string> confirm-text;
+    in property <bool> confirm-visible;
+    in property <string> details-text;
+    in property <bool> details-visible;
+
+    callback select-metric(int);
+    callback open-tile(int);
+    callback toggle-row(int);
+    callback row-action(string, int);
+    callback list-hover(bool);
+    callback search-changed(string);
+    callback restart-admin();
+    callback dismiss-banner();
+    callback confirm(bool);
+    callback close-details();
+    callback dismiss-toast();
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+        if root.show-admin-banner : Banner {
+            restart => { root.restart-admin(); }
+            dismiss => { root.dismiss-banner(); }
+        }
+        MetersRow {
+            meters: root.meters;
+            selected: root.selected-metric;
+            select(i) => { root.select-metric(i); }
+        }
+        TopStrip {
+            tiles: root.tiles;
+            caption: root.top-caption;
+            open(id) => { root.open-tile(id); }
+        }
+        AppList {
+            vertical-stretch: 1;
+            rows: root.rows;
+            metric: root.selected-metric;
+            toggle(id) => { root.toggle-row(id); }
+            action(name, id) => { root.row-action(name, id); }
+            hover(h) => { root.list-hover(h); }
+            search(text) => { root.search-changed(text); }
+        }
+        if root.toast != "" : Toast {
+            text: root.toast;
+            dismiss => { root.dismiss-toast(); }
+        }
+    }
+    if root.confirm-visible : Modal {
+        title: "End a critical system process?";
+        body: root.confirm-text;
+        confirm-label: "End process";
+        done(ok) => { root.confirm(ok); }
+    }
+    if root.details-visible : Modal {
+        title: "Details";
+        body: root.details-text;
+        confirm-label: "Close";
+        show-cancel: false;
+        done(ok) => { root.close-details(); }
+    }
 }
