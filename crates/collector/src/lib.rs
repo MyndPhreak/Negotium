@@ -4,3 +4,6 @@ pub mod processes;
 
 pub use identity::{Identity, IdentityCache};
 pub use processes::{ProcessReader, RawProcess};
+pub mod windows_scan;
+
+pub use windows_scan::scan_windows;
