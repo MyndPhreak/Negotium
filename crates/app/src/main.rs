@@ -30,7 +30,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let controls = controls.clone();
         let weak = weak.clone();
         ui.on_select_metric(move |i| {
-            controls.set_metric(Metric::ALL[(i.max(0) as usize).min(4)]);
+            controls.set_metric(Metric::ALL[(i.max(0) as usize).min(Metric::ALL.len() - 1)]);
             if let Some(ui) = weak.upgrade() {
                 ui.set_selected_metric(i);
             }
@@ -64,7 +64,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_open_tile(move |id| {
             {
                 let mut b = b.borrow_mut();
-                b.search.clear();
+                b.search.clear(); // the box itself is emptied by main.slint in the same click
                 b.expanded.insert(id);
             }
             b.borrow().refresh_rows();
@@ -80,6 +80,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let controls = controls.clone();
         ui.window().on_close_requested(move || {
             controls.set_visible(false);
+            // A hidden window cannot report pointer-leave, so release the hover freeze here.
+            controls.set_frozen(false);
             slint::CloseRequestResponse::HideWindow
         });
     }

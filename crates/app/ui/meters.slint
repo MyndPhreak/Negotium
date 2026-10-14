@@ -53,6 +53,9 @@ export component MetersRow inherits HorizontalLayout {
     in property <int> selected;
     in property <bool> interactive: true;
     callback select(int);
+    // An empty repeater derives a maximum width below the window's min-width, which clamped the
+    // window to min-width and made it ignore preferred-width. An explicit cap overrides that.
+    max-width: 16384px;
     spacing: 8px;
     for m[i] in meters : Meter {
         data: m;

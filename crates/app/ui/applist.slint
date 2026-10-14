@@ -28,6 +28,8 @@ export component AppList inherits VerticalLayout {
     in property <[RowData]> rows;
     in property <int> metric;
     in property <bool> interactive: true;
+    in-out property <string> search-text;
+    out property <bool> hovered: area.has-hover;
     callback toggle(int);
     callback action(string, int);
     callback hover(bool);
@@ -35,6 +37,7 @@ export component AppList inherits VerticalLayout {
     spacing: 6px;
 
     LineEdit {
+        text <=> root.search-text;
         placeholder-text: "Search apps and processes";
         accessible-label: "Search apps and processes";
         enabled: root.interactive;

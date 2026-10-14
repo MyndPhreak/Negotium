@@ -131,14 +131,47 @@ fn list_hover_is_released_after_a_modal_opens_and_closes_over_the_list() {
     let row = El::find_by_accessible_label(&ui, BROWSER_ROW).next().expect("browser row");
     let (rx, ry) = centre(&row);
     move_pointer(&ui, rx, ry);
-    assert_eq!(events.borrow().last(), Some(&true), "hovering the list reports true");
+    assert_eq!(*events.borrow(), [true], "hovering the list reports true");
+    // The modal opens while the pointer is still over the list: hover must be released.
     ui.set_confirm_visible(true);
+    slint::platform::update_timers_and_animations(); // runs `changed` handlers
+    assert_eq!(*events.borrow(), [true, false], "opening the modal releases the list hover");
+    let after_open = events.borrow().len();
+    // Move the pointer onto the modal (its Cancel button) and close it from there.
+    let cancel = El::find_by_accessible_label(&ui, "Cancel").next().expect("cancel button");
+    let (cx, cy) = centre(&cancel);
+    move_pointer(&ui, cx, cy);
     ui.set_confirm_visible(false);
-    move_pointer(&ui, rx, 5.0); // off the list: over the meters/padding area
-    assert_eq!(events.borrow().last(), Some(&false), "leaving the list reports false: {:?}", events.borrow());
-    // The list is not stuck: hovering again and leaving again toggles normally.
+    slint::platform::update_timers_and_animations();
+    assert!(events.borrow()[after_open - 1..].iter().all(|h| !h), "no hover reported while the modal covers the list: {:?}", events.borrow());
+    // Back over the list and off it again: reports normally, never stuck.
     move_pointer(&ui, rx, ry);
-    assert_eq!(events.borrow().last(), Some(&true), "re-hover after the modal reports true: {:?}", events.borrow());
+    assert_eq!(events.borrow().last(), Some(&true), "re-hover after the modal: {:?}", events.borrow());
     move_pointer(&ui, rx, 5.0);
-    assert_eq!(events.borrow().last(), Some(&false), "and leaving reports false again: {:?}", events.borrow());
+    assert_eq!(events.borrow().last(), Some(&false), "leaving reports false again: {:?}", events.borrow());
+}
+
+#[test]
+fn window_opens_at_its_preferred_width() {
+    // The real app creates the window before the first frame arrives, so every model is empty. Empty
+    // repeaters in the meters row and top strip once derived a maximum width below min-width, which
+    // clamped the window to min-width and made it ignore preferred-width.
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    ui.show().unwrap();
+    let size = ui.window().size().to_logical(ui.window().scale_factor());
+    assert!(size.width >= 980.0, "opened {}x{} logical", size.width, size.height);
+    assert!(size.height >= 700.0, "opened {}x{} logical", size.width, size.height);
+}
+
+#[test]
+fn clicking_a_tile_clears_the_search_box() {
+    let ui = window();
+    ui.set_tiles(ModelRc::new(VecModel::from(vec![negotium::TileData {
+        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false,
+    }])));
+    ui.set_search_text("chr".into());
+    let tile = ElementHandle::find_by_accessible_label(&ui, "Chrome tile").next().expect("tile");
+    tile.invoke_accessible_default_action();
+    assert_eq!(ui.get_search_text(), "");
 }

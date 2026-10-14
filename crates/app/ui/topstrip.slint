@@ -11,6 +11,7 @@ export component TopStrip inherits VerticalLayout {
     Text { text: caption; color: Theme.muted; font-size: 11px; }
     HorizontalLayout {
         height: 52px;
+        max-width: 16384px; // see MetersRow: empty repeaters must not cap the window width
         spacing: 4px;
         for t in tiles : Rectangle {
             horizontal-stretch: max(t.weight, 0.0001);

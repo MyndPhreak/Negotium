@@ -22,6 +22,7 @@ export component MainWindow inherits Window {
     in property <string> top-caption;
     in property <[RowData]> rows;
     in property <bool> show-admin-banner;
+    in-out property <string> search-text;
     in property <string> toast;
     in property <string> confirm-text;
     in property <bool> confirm-visible;
@@ -41,6 +42,10 @@ export component MainWindow inherits Window {
     callback close-details();
     callback dismiss-toast();
 
+    // has-hover only re-evaluates on the next pointer event, so release the list freeze explicitly
+    // when a modal opens and re-evaluate it when the modal closes.
+    changed modal-open => { root.list-hover(!root.modal-open && list.hovered); }
+
     VerticalLayout {
         padding: 12px;
         spacing: 10px;
@@ -59,12 +64,14 @@ export component MainWindow inherits Window {
             tiles: root.tiles;
             caption: root.top-caption;
             interactive: !root.modal-open;
-            open(id) => { root.open-tile(id); }
+            // Opening a tile clears the filter, so the box must be emptied together with it.
+            open(id) => { root.search-text = ""; root.open-tile(id); }
         }
-        AppList {
+        list := AppList {
             vertical-stretch: 1;
             rows: root.rows;
             metric: root.selected-metric;
+            search-text <=> root.search-text;
             interactive: !root.modal-open;
             toggle(id) => { root.toggle-row(id); }
             action(name, id) => { root.row-action(name, id); }
