@@ -23,6 +23,17 @@ fn show_main(controls: &Controls, weak: &slint::Weak<MainWindow>) {
     }
 }
 
+/// Every quit goes through here. The window mark is removed first, so a launch made while this
+/// instance shuts down never hands its activation to a dying window: it finds no window, waits
+/// for the lock and starts fresh.
+fn begin_exit(controls: &Controls, weak: &slint::Weak<MainWindow>) {
+    if let Some(hwnd) = weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)) {
+        platform::unmark_main_window(hwnd);
+    }
+    controls.request_stop();
+    let _ = slint::quit_event_loop();
+}
+
 fn make_tray(controls: &Arc<Controls>, weak: &slint::Weak<MainWindow>) -> Result<NegotiumTray, slint::PlatformError> {
     let tray = NegotiumTray::new()?;
     {
@@ -30,11 +41,8 @@ fn make_tray(controls: &Arc<Controls>, weak: &slint::Weak<MainWindow>) -> Result
         tray.on_open(move || show_main(&controls, &weak));
     }
     {
-        let controls = controls.clone();
-        tray.on_exit(move || {
-            controls.request_stop();
-            let _ = slint::quit_event_loop();
-        });
+        let (controls, weak) = (controls.clone(), weak.clone());
+        tray.on_exit(move || begin_exit(&controls, &weak));
     }
     tray.show()?;
     Ok(tray)
@@ -160,10 +168,10 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let controls = controls.clone();
         let b = bridge.clone();
+        let close_weak = weak.clone();
         ui.window().on_close_requested(move || {
             if exit_on_close {
-                controls.request_stop();
-                let _ = slint::quit_event_loop();
+                begin_exit(&controls, &close_weak);
                 return slint::CloseRequestResponse::HideWindow;
             }
             controls.set_visible(false);
@@ -263,9 +271,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let weak = weak.clone();
+        let controls = controls.clone();
         ui.on_restart_admin(move || {
             if negotium_actions::restart_as_admin("--restarted").is_ok() {
-                let _ = slint::quit_event_loop();
+                begin_exit(&controls, &weak);
             } else if let Some(ui) = weak.upgrade() {
                 ui.set_toast("Restart as admin was cancelled.".into());
             }
@@ -316,11 +325,6 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     let result = slint::run_event_loop_until_quit();
-    // Shutting down: stop a new launch from handing its activation to this dying instance; it
-    // then waits for the lock and starts fresh.
-    if let Some(hwnd) = platform::main_hwnd(&ui) {
-        platform::unmark_main_window(hwnd);
-    }
     if let Some(path) = frame_stats_path {
         let _ = std::fs::write(path, frame_stats.borrow().summary_json());
     }
