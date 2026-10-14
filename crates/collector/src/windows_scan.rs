@@ -27,8 +27,11 @@ fn hung_window_from_ghost_window() -> Option<HungWindowFromGhostWindowFn> {
     })
 }
 
+/// UTF-16 for the window class DWM gives the stand-in of a hung window.
+const GHOST_CLASS: [u16; 5] = [b'G' as u16, b'h' as u16, b'o' as u16, b's' as u16, b't' as u16];
+
 pub(crate) fn is_ghost_class(class: &[u16]) -> bool {
-    class == "Ghost".encode_utf16().collect::<Vec<_>>().as_slice()
+    class == GHOST_CLASS
 }
 
 /// Visible, unowned, titled top-level windows.
@@ -47,7 +50,8 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // None of them sends a window message (IsHungAppWindow and InternalGetWindowText read
     // cached state), so none can block on a hung window, even one in this process.
     // GetClassNameW reads the window's class atom and HungWindowFromGhostWindow reads
-    // user32's ghost table; neither sends a window message.
+    // user32's ghost table; neither sends a window message. A `Ghost` whose original cannot be
+    // resolved is skipped (it is owned by dwm.exe and must never become an app row).
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() {
             return true.into();
@@ -66,12 +70,18 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
                 Some(f) => f(hwnd),
                 None => HWND::default(),
             };
-            if original.is_invalid() { (hwnd, false) } else { (original, true) }
+            if original.is_invalid() {
+                return true.into();
+            }
+            (original, true)
         } else {
             (hwnd, IsHungAppWindow(hwnd).as_bool())
         };
         let mut pid = 0u32;
         GetWindowThreadProcessId(source, Some(&mut pid));
+        if pid == 0 {
+            return true.into();
+        }
         out.push(WindowSample { pid, hung, title });
     }
     true.into()
