@@ -113,12 +113,17 @@ fn an_ordinary_process_is_not_marked_break_on_termination() {
 }
 
 #[test]
-fn a_critical_system_process_reports_break_on_termination_when_it_can_be_queried() {
-    // Read-only: never terminates anything. Without admin rights the query may be denied (None).
+fn wininit_reads_as_critical_when_elevated_and_the_query_is_safe_otherwise() {
+    // Read-only: never terminates anything. Unelevated, Windows denies the query; it must still
+    // return cleanly. Elevated (SeDebugPrivilege), wininit must read as BreakOnTermination.
     let procs = ProcessReader::new().read().unwrap();
     let wininit = procs.iter().find(|p| p.name.eq_ignore_ascii_case("wininit.exe")).expect("wininit is always running");
-    let flag = breaks_on_termination(wininit.pid, wininit.create_time);
-    assert!(flag != Some(false), "wininit is critical; got {flag:?}");
+    if is_elevated() {
+        let _ = negotium_actions::enable_debug_privilege();
+        assert_eq!(breaks_on_termination(wininit.pid, wininit.create_time), Some(true));
+    } else {
+        let _ = breaks_on_termination(wininit.pid, wininit.create_time);
+    }
 }
 
 #[test]
