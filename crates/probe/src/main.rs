@@ -2,7 +2,7 @@
 //! each tick; optionally records snapshots (JSON lines) and tick timings.
 use anyhow::{Context, Result, bail};
 use negotium_collector::Collector;
-use negotium_history::{DEFAULT_CAPACITY, History};
+use negotium_history::History;
 use negotium_model::{Metric, Model, Ranker};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -56,7 +56,7 @@ fn main() -> Result<()> {
     let mut collector = Collector::new();
     let mut model = Model::new();
     let mut ranker = Ranker::new();
-    let mut history = History::new(DEFAULT_CAPACITY);
+    let mut history = History::new();
     let mut recorder = match &args.record {
         Some(path) => Some(BufWriter::new(File::create(path).with_context(|| format!("create {path}"))?)),
         None => None,

@@ -3,7 +3,7 @@
 use crate::controls::Controls;
 use crate::view::{Frame, FrameOptions, IdMap, build_frame};
 use negotium_collector::Collector;
-use negotium_history::{DEFAULT_CAPACITY, History};
+use negotium_history::History;
 use negotium_model::{Model, Ranker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
@@ -92,7 +92,7 @@ impl LiveSource {
             collector: Collector::new(),
             model: Model::new(),
             ranker: Ranker::new(),
-            history: History::new(DEFAULT_CAPACITY),
+            history: History::new(),
             ids: IdMap::new(),
             elevated: negotium_actions::is_elevated(),
             log: crate::log::Log::new(crate::log::Log::default_path()),

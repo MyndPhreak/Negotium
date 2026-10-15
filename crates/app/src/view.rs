@@ -1,7 +1,7 @@
 //! Builds the plain-data Frame the UI renders. Runs on the worker thread; `visible_rows`
 //! runs on the UI thread (no Windows calls anywhere here).
 use crate::format;
-use negotium_history::History;
+use negotium_history::{History, Series};
 use negotium_model::{AppKey, AppRow, Metric, top_n};
 use negotium_snapshot::Snapshot;
 use std::collections::{HashMap, HashSet};
@@ -143,16 +143,16 @@ fn busiest_gpu(gpus: &[negotium_snapshot::GpuSample]) -> Option<&negotium_snapsh
 fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     let t = &snap.totals;
     let since = snap.taken_at_ms.saturating_sub(SPARK_SECONDS * 1000);
-    let samples: Vec<_> = history.since(since).collect();
+    let series = |key: Series| -> Vec<Option<f32>> { history.points(&key, since).map(|(_, v)| v).collect() };
     let mem_total = t.memory.as_ref().map(|m| m.total as f32).unwrap_or(0.0);
-    let net_series: Vec<Option<f32>> = samples.iter().map(|s| s.net_bps.map(|v| v as f32)).collect();
+    let net_series = series(Series::NetTotal);
     let net_max = net_series.iter().flatten().fold(0.0f32, |a, b| a.max(*b)).max(t.net_bps.unwrap_or(0.0) as f32);
     vec![
         MeterView {
             label: "CPU",
             value: t.cpu_pct.map(format::pct).unwrap_or_default(),
             sub: String::new(),
-            spark: spark_path(&samples.iter().map(|s| s.cpu_pct).collect::<Vec<_>>(), 100.0),
+            spark: spark_path(&series(Series::Cpu), 100.0),
             available: t.cpu_pct.is_some(),
         },
         MeterView {
@@ -162,14 +162,14 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
                 let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
                 format!("{:.1} / {:.1} GB", gb(m.used), gb(m.total))
             }).unwrap_or_default(),
-            spark: spark_path(&samples.iter().map(|s| s.mem_used.map(|u| u as f32)).collect::<Vec<_>>(), mem_total),
+            spark: spark_path(&series(Series::MemUsed), mem_total),
             available: t.memory.is_some(),
         },
         MeterView {
             label: "Disk",
             value: t.busiest_disk_pct().map(format::pct).unwrap_or_default(),
             sub: String::new(),
-            spark: spark_path(&samples.iter().map(|s| s.disk_active_pct).collect::<Vec<_>>(), 100.0),
+            spark: spark_path(&series(Series::DiskBusiest), 100.0),
             available: t.busiest_disk_pct().is_some(),
         },
         MeterView {
@@ -182,7 +182,7 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
                 .and_then(|g| g.temp_c)
                 .map(format::temp_c)
                 .unwrap_or_default(),
-            spark: spark_path(&samples.iter().map(|s| s.gpu_pct).collect::<Vec<_>>(), 100.0),
+            spark: spark_path(&series(Series::Gpu), 100.0),
             available: t.gpu_pct.is_some(),
         },
         MeterView {
@@ -353,10 +353,10 @@ mod tests {
         s.totals.gpu_pct = Some(80.0);
         s.totals.gpus = Some(vec![gpu("igpu", 5.0, None), gpu("dgpu", 80.0, Some(64.6))]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "65 °C");
         s.totals.gpus = Some(vec![gpu("dgpu", 80.0, None)]);
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "", "no sensor: no label");
     }
 
@@ -367,10 +367,10 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.totals.gpus = Some(vec![gpu("first", 0.0, 40.0), gpu("second", 0.0, 70.0)]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "40 °C", "tie: the first GPU");
         s.totals.gpus = Some(vec![gpu("unknown", f32::NAN, 90.0), gpu("known", 0.0, 55.0)]);
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "55 °C", "unknown utilization never beats a known one");
     }
 
@@ -389,7 +389,7 @@ mod tests {
             app(3, "Editor", 5.0, vec![proc(3, 0, 5.0, "code.exe")], Some(14_400)),
         ];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(37.6)), &rows, &[1, 0], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &snap(Some(37.6)), &rows, &[1, 0], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters.len(), 5);
         assert_eq!(f.meters[0].value, "38%");
         assert_eq!(f.meters[1].sub, "8.0 / 16.0 GB");
@@ -414,7 +414,7 @@ mod tests {
         win.kind = AppKind::Windows;
         let rows = vec![win, app(9, "Editor", 5.0, vec![proc(9, 0, 5.0, "code.exe")], None)];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &opts(Metric::Cpu, true));
         let windows = f.rows.iter().find(|r| r.name == "Windows" && r.depth == 0).unwrap();
         assert!(!windows.actionable);
         assert!(f.targets[&windows.id].group);
@@ -439,7 +439,7 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.windows = vec![negotium_snapshot::WindowSample { pid: 6, hung: true, title: "Search".into() }];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[win], &[0], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &s, &[win], &[0], &History::new(), &opts(Metric::Cpu, true));
         let group = f.rows.iter().find(|r| r.depth == 0).unwrap();
         assert_eq!(group.hung, "Not responding · 9s", "the group still shows the roll-up");
         assert!(!group.actionable, "R7: the group itself is never actionable");
@@ -459,17 +459,17 @@ mod tests {
         ];
         let mut ids = IdMap::new();
         let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &collapsed);
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &collapsed);
         assert!(f.rows.iter().all(|r| r.depth == 0), "no child rows for collapsed apps");
         assert_eq!(f.targets.len(), 2, "and no child targets");
         let code = f.rows.iter().find(|r| r.name == "Code").unwrap().id;
         let one = FrameOptions { expanded: HashSet::from([code]), ..collapsed.clone() };
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &one);
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &one);
         let children: Vec<_> = f.rows.iter().filter(|r| r.depth == 1).collect();
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|r| r.parent == code && f.targets.contains_key(&r.id)));
         let searching = FrameOptions { all_children: true, ..collapsed };
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(10), &searching);
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &searching);
         assert_eq!(f.rows.iter().filter(|r| r.depth == 1).count(), 4, "a search can match any process");
     }
 
@@ -482,7 +482,7 @@ mod tests {
         win.kind = AppKind::Windows;
         let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(10), &collapsed);
+        let f = build_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(), &collapsed);
         let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").expect("built so it can be shown and force-closed");
         assert_eq!(child.hung, "Not responding · 9s");
     }
@@ -491,7 +491,7 @@ mod tests {
     fn degenerate_inputs_do_not_divide_by_zero() {
         let rows = vec![app(1, "Idle", 0.0, vec![proc(1, 0, 0.0, "idle.exe")], None)];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(None), &rows, &[0], &History::new(10), &opts(Metric::Gpu, false));
+        let f = build_frame(&mut ids, &snap(None), &rows, &[0], &History::new(), &opts(Metric::Gpu, false));
         assert!(f.tiles.is_empty());
         assert!(f.rows.iter().all(|r| r.bar == 0.0));
         assert!(!f.meters[0].available, "CPU meter shows Unavailable when cpu_pct is None");
@@ -503,7 +503,7 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.totals.disks = Some(vec![]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert!(!f.meters[2].available);
     }
 
@@ -511,8 +511,8 @@ mod tests {
     fn ids_are_stable_across_frames() {
         let rows = vec![app(1, "Chrome", 30.0, vec![proc(1, 0, 30.0, "chrome.exe")], None)];
         let mut ids = IdMap::new();
-        let a = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(10), &opts(Metric::Cpu, true));
-        let b = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(10), &opts(Metric::Cpu, true));
+        let a = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
+        let b = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(a.rows[0].id, b.rows[0].id);
     }
 
