@@ -38,6 +38,26 @@ pub struct DiskSample {
     pub active_pct: f32,
     pub read_bps: f64,
     pub write_bps: f64,
+    /// Average time per transfer, milliseconds. `None` when the counter has no value for this disk.
+    #[serde(default)]
+    pub response_ms: Option<f32>,
+}
+
+/// One "Network Interface" instance, joined to the interface table (friendly name, hardware or
+/// virtual, link speed, addresses). `name` is the PDH instance name: the key for its history.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AdapterSample {
+    pub name: String,
+    /// "Ethernet"
+    pub alias: Option<String>,
+    pub description: Option<String>,
+    pub sent_bps: f64,
+    pub recv_bps: f64,
+    pub hardware: bool,
+    pub connected: bool,
+    /// Link speed in bits per second.
+    pub link_bps: Option<u64>,
+    pub addresses: Vec<String>,
 }
 
 /// The kernel's page lists (PDH `Memory` counter set), for the memory composition bar.
@@ -86,7 +106,10 @@ pub struct SystemTotals {
     pub disks: Option<Vec<DiskSample>>,
     pub gpu_pct: Option<f32>,
     pub gpu_pct_by_pid: Option<BTreeMap<u32, f32>>,
+    /// Physical network throughput: hardware interfaces only (a vEthernet or VPN sees the same bytes).
     pub net_bps: Option<f64>,
+    #[serde(default)]
+    pub adapters: Option<Vec<AdapterSample>>,
 }
 
 impl SystemTotals {
@@ -111,7 +134,7 @@ mod tests {
     use super::*;
 
     fn disk(name: &str, active: f32) -> DiskSample {
-        DiskSample { name: name.into(), active_pct: active, read_bps: 0.0, write_bps: 0.0 }
+        DiskSample { name: name.into(), active_pct: active, read_bps: 0.0, write_bps: 0.0, response_ms: None }
     }
 
     #[test]

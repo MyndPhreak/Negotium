@@ -4,7 +4,7 @@ use negotium_snapshot::{DiskSample, MemoryLists};
 use std::collections::BTreeMap;
 use windows::Win32::System::Performance::{
     PDH_CSTATUS_NEW_DATA, PDH_FMT, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER,
-    PDH_HQUERY, PDH_MORE_DATA, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
+    PDH_HQUERY, PDH_INVALID_DATA, PDH_MORE_DATA, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
     PdhGetFormattedCounterArrayW, PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
 use windows::core::{PCWSTR, w};
@@ -18,7 +18,8 @@ pub struct PdhReadings {
     pub cpu_mhz: Option<f32>,
     pub mem_lists: Option<MemoryLists>,
     pub disks: Option<Vec<DiskSample>>,
-    pub net_bps: Option<f64>,
+    /// (instance, sent, received) bytes per second for every network interface instance.
+    pub adapters: Option<Vec<(String, f64, f64)>>,
     pub gpu_pct: Option<f32>,
     pub gpu_pct_by_pid: Option<BTreeMap<u32, f32>>,
     pub errors: Vec<String>,
@@ -40,7 +41,9 @@ pub(crate) struct Counters {
     disk_idle: Counter,
     disk_read: Counter,
     disk_write: Counter,
-    net: Counter,
+    disk_response: Counter,
+    net_sent: Counter,
+    net_recv: Counter,
     gpu: Counter,
 }
 
@@ -58,7 +61,9 @@ impl Counters {
             disk_idle: add(query, w!("\\PhysicalDisk(*)\\% Idle Time")),
             disk_read: add(query, w!("\\PhysicalDisk(*)\\Disk Read Bytes/sec")),
             disk_write: add(query, w!("\\PhysicalDisk(*)\\Disk Write Bytes/sec")),
-            net: add(query, w!("\\Network Interface(*)\\Bytes Total/sec")),
+            disk_response: add(query, w!("\\PhysicalDisk(*)\\Avg. Disk sec/Transfer")),
+            net_sent: add(query, w!("\\Network Interface(*)\\Bytes Sent/sec")),
+            net_recv: add(query, w!("\\Network Interface(*)\\Bytes Received/sec")),
             gpu: add(query, w!("\\GPU Engine(*)\\Utilization Percentage")),
         }
     }
@@ -78,7 +83,9 @@ impl Counters {
             disk_idle: f,
             disk_read: f,
             disk_write: f,
-            net: f,
+            disk_response: f,
+            net_sent: f,
+            net_recv: f,
             gpu: f,
         }
     }
@@ -126,7 +133,9 @@ impl PdhSources {
         let idle = get(&mut errors, "disk idle", c.disk_idle, read_array);
         let read = get(&mut errors, "disk read", c.disk_read, read_array);
         let write = get(&mut errors, "disk write", c.disk_write, read_array);
-        let net = get(&mut errors, "network", c.net, read_array);
+        let response = get(&mut errors, "disk response", c.disk_response, read_array);
+        let sent = get(&mut errors, "network sent", c.net_sent, read_array);
+        let recv = get(&mut errors, "network received", c.net_recv, read_array);
         let gpu = get(&mut errors, "gpu", c.gpu, read_array);
 
         let (gpu_pct, gpu_pct_by_pid) = match gpu {
@@ -141,11 +150,15 @@ impl PdhSources {
             per_core_pct: per_core_from(cpu.as_deref().unwrap_or_default(), &self.groups),
             cpu_mhz: cpu_mhz(freq, perf),
             mem_lists: memory_lists(modified, standby, free),
+            // The response counter is optional: without it the disks still report, with no response time.
             disks: match (idle, read, write) {
-                (Some(i), Some(r), Some(w)) => Some(disks_from(&i, &r, &w)),
+                (Some(i), Some(r), Some(w)) => Some(disks_from(&i, &r, &w, response.as_deref().unwrap_or(&[]))),
                 _ => None,
             },
-            net_bps: net.map(|v| v.iter().map(|(_, x)| x.max(0.0)).sum()),
+            adapters: match (sent, recv) {
+                (Some(s), Some(r)) => Some(adapters_from(&s, &r)),
+                _ => None,
+            },
             gpu_pct,
             gpu_pct_by_pid,
             errors,
@@ -191,7 +204,13 @@ fn read_value(counter: PDH_HCOUNTER) -> Result<f64, u32> {
     }
     // SAFETY: doubleValue is the active union member because we requested PDH_FMT_DOUBLE.
     let v = unsafe { value.Anonymous.doubleValue };
-    Ok(if v.is_finite() { v } else { 0.0 })
+    // A NaN or infinite value is no value: missing, never 0.
+    finite(v).ok_or(PDH_INVALID_DATA)
+}
+
+/// `Some(v)` for a finite value; NaN and infinities are missing.
+fn finite(v: f64) -> Option<f64> {
+    v.is_finite().then_some(v)
 }
 
 impl Drop for PdhSources {
@@ -232,12 +251,12 @@ fn read_array(counter: PDH_HCOUNTER) -> Result<Vec<(String, f64)>, u32> {
     Ok(slice
         .iter()
         .filter(|it| it.FmtValue.CStatus <= PDH_CSTATUS_NEW_DATA)
-        .map(|it| {
+        .filter_map(|it| {
             // SAFETY: szName is a NUL-terminated string inside `buf`.
             let name = unsafe { it.szName.to_string() }.unwrap_or_default();
             // SAFETY: doubleValue is the active union member because we requested PDH_FMT_DOUBLE.
             let value = unsafe { it.FmtValue.Anonymous.doubleValue };
-            (name, if value.is_finite() { value } else { 0.0 })
+            finite(value).map(|v| (name, v))
         })
         .collect())
 }
@@ -302,17 +321,29 @@ pub fn gpu_from(items: &[(String, f64)]) -> (Option<f32>, BTreeMap<u32, f32>) {
     (system, per_pid)
 }
 
-pub fn disks_from(idle: &[(String, f64)], read: &[(String, f64)], write: &[(String, f64)]) -> Vec<DiskSample> {
-    let lookup = |set: &[(String, f64)], name: &str| {
-        set.iter().find(|(n, _)| n == name).map(|(_, v)| v.max(0.0)).unwrap_or(0.0)
-    };
+/// `response` is optional data: an instance without a value has no response time.
+pub fn disks_from(
+    idle: &[(String, f64)], read: &[(String, f64)], write: &[(String, f64)], response: &[(String, f64)],
+) -> Vec<DiskSample> {
+    let find = |set: &[(String, f64)], name: &str| set.iter().find(|(n, _)| n == name).map(|(_, v)| v.max(0.0));
     idle.iter()
         .filter(|(name, _)| name != "_Total")
         .map(|(name, idle_pct)| DiskSample {
             name: name.clone(),
             active_pct: (100.0 - idle_pct).clamp(0.0, 100.0) as f32,
-            read_bps: lookup(read, name),
-            write_bps: lookup(write, name),
+            read_bps: find(read, name).unwrap_or(0.0),
+            write_bps: find(write, name).unwrap_or(0.0),
+            response_ms: find(response, name).map(|seconds| (seconds * 1000.0) as f32),
+        })
+        .collect()
+}
+
+/// (instance, sent, received) for every instance of the sent counter.
+pub fn adapters_from(sent: &[(String, f64)], recv: &[(String, f64)]) -> Vec<(String, f64, f64)> {
+    sent.iter()
+        .map(|(name, s)| {
+            let r = recv.iter().find(|(n, _)| n == name).map(|(_, v)| v.max(0.0)).unwrap_or(0.0);
+            (name.clone(), s.max(0.0), r)
         })
         .collect()
 }
@@ -385,13 +416,48 @@ mod tests {
         let idle = items(&[("0 C:", 75.0), ("_Total", 80.0), ("1 D:", 100.0)]);
         let read = items(&[("0 C:", 1000.0), ("1 D:", 0.0)]);
         let write = items(&[("0 C:", 500.0)]);
-        let disks = disks_from(&idle, &read, &write);
+        let response = items(&[("0 C:", 0.0004), ("1 D:", -1.0)]);
+        let disks = disks_from(&idle, &read, &write, &response);
         assert_eq!(disks.len(), 2);
         assert_eq!(disks[0].name, "0 C:");
         assert_eq!(disks[0].active_pct, 25.0);
         assert_eq!(disks[0].read_bps, 1000.0);
         assert_eq!(disks[0].write_bps, 500.0);
+        let ms = disks[0].response_ms.expect("response for 0 C:");
+        assert!((ms - 0.4).abs() < 1e-6, "seconds per transfer shown in ms");
         assert_eq!(disks[1].write_bps, 0.0);
+        assert_eq!(disks[1].response_ms, Some(0.0), "negative values clamp to zero");
+    }
+
+    #[test]
+    fn a_missing_response_counter_leaves_the_disks_with_no_response_time() {
+        // Spec section 7: the response counter failing must not take the disks down with it.
+        let idle = items(&[("0 C:", 75.0)]);
+        let disks = disks_from(&idle, &items(&[("0 C:", 1.0)]), &items(&[("0 C:", 2.0)]), &[]);
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].active_pct, 25.0);
+        assert_eq!(disks[0].response_ms, None);
+        let partial = disks_from(&items(&[("0 C:", 75.0), ("1 D:", 90.0)]), &[], &[], &items(&[("1 D:", 0.002)]));
+        assert_eq!(partial[0].response_ms, None, "an instance missing from the response set is None");
+        assert_eq!(partial[1].response_ms, Some(2.0));
+    }
+
+    #[test]
+    fn adapters_pair_sent_and_received_by_instance() {
+        let sent = items(&[("Intel[R] Ethernet", 100.0), ("Hyper-V Virtual Ethernet Adapter", 40.0)]);
+        let recv = items(&[("Intel[R] Ethernet", 900.0)]);
+        assert_eq!(
+            adapters_from(&sent, &recv),
+            vec![("Intel[R] Ethernet".to_string(), 100.0, 900.0), ("Hyper-V Virtual Ethernet Adapter".to_string(), 40.0, 0.0)]
+        );
+    }
+
+    #[test]
+    fn non_finite_counter_values_are_missing_not_zero() {
+        assert_eq!(finite(1.5), Some(1.5));
+        assert_eq!(finite(f64::NAN), None);
+        assert_eq!(finite(f64::INFINITY), None);
+        assert_eq!(finite(f64::NEG_INFINITY), None);
     }
 
     #[test]
@@ -405,6 +471,18 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_response_counter_does_not_take_the_disks_down() {
+        let mut sources = PdhSources::open().expect("open pdh");
+        sources.counters.disk_response = Err(0xC0000BB8);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let r = sources.read();
+        let disks = r.disks.expect("disks are built without the response counter");
+        assert!(!disks.is_empty());
+        assert!(disks.iter().all(|d| d.response_ms.is_none()));
+        assert!(r.errors.iter().any(|e| e.starts_with("pdh disk response: counter unavailable")), "{:?}", r.errors);
+    }
+
+    #[test]
     fn failed_counter_registration_is_reported_by_read() {
         let mut query = PDH_HQUERY::default();
         // SAFETY: opening a real-time query with no data source; owned by `sources` below.
@@ -412,7 +490,7 @@ mod tests {
         // Dropping `sources` closes the query.
         let mut sources = PdhSources { query, counters: Counters::failed(0xC0000BB8), groups: vec![2] };
         let r = sources.read();
-        assert!(r.cpu_pct.is_none() && r.disks.is_none() && r.net_bps.is_none() && r.gpu_pct.is_none());
+        assert!(r.cpu_pct.is_none() && r.disks.is_none() && r.adapters.is_none() && r.gpu_pct.is_none());
         assert!(r.cpu_mhz.is_none() && r.mem_lists.is_none());
         assert_eq!(r.per_core_pct, vec![None, None]);
         for label in ["cpu", "cpu frequency", "cpu performance", "memory modified", "memory free"] {

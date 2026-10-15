@@ -14,6 +14,7 @@ pub struct Collector {
     started: Instant,
     logical_cpus: u32,
     info: SystemInfo,
+    net: crate::net::NetTable,
 }
 
 impl Default for Collector {
@@ -31,6 +32,7 @@ impl Collector {
             started: Instant::now(),
             logical_cpus: logical_cpus(),
             info: read_system_info(),
+            net: crate::net::NetTable::new(),
         }
     }
 
@@ -80,19 +82,35 @@ impl Collector {
         if totals.memory.is_none() {
             source_errors.push("memory: GlobalMemoryStatusEx failed".into());
         }
-        match &mut self.pdh {
-            Ok(pdh) => {
-                let r = pdh.read();
+        // Needs only the process list, so it is reported even when PDH could not be opened.
+        if let Some(m) = totals.memory.as_mut() {
+            m.compressed = compressed_bytes(&processes);
+        }
+        let readings = match &mut self.pdh {
+            Ok(pdh) => Ok(pdh.read()),
+            Err(status) => Err(*status),
+        };
+        match readings {
+            Ok(r) => {
                 totals.cpu_pct = r.cpu_pct;
                 totals.per_core_pct = r.per_core_pct;
                 totals.cpu_mhz = r.cpu_mhz;
                 totals.disks = r.disks;
-                totals.net_bps = r.net_bps;
+                if let Some(raw) = r.adapters {
+                    let now = Instant::now();
+                    if self.net.needs_refresh(raw.iter().map(|(n, _, _)| n.as_str()), now)
+                        && let Err(e) = self.net.refresh(now)
+                    {
+                        source_errors.push(e);
+                    }
+                    let adapters = crate::net::join_adapters(&raw, &self.net);
+                    totals.net_bps = Some(crate::net::hardware_total(&adapters));
+                    totals.adapters = Some(adapters);
+                }
                 totals.gpu_pct = r.gpu_pct;
                 totals.gpu_pct_by_pid = r.gpu_pct_by_pid;
                 if let Some(m) = totals.memory.as_mut() {
                     m.lists = r.mem_lists;
-                    m.compressed = compressed_bytes(&processes);
                 }
                 source_errors.extend(r.errors);
             }

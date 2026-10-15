@@ -12,7 +12,7 @@ fn reads_cpu_and_per_core_after_priming() {
     assert!(r.per_core_pct.iter().any(|c| c.is_some()));
     assert!(r.mem_lists.is_some(), "Memory counter set readable without admin");
     assert!(r.disks.is_some());
-    assert!(r.net_bps.is_some());
+    assert!(r.adapters.is_some());
 }
 
 #[test]
