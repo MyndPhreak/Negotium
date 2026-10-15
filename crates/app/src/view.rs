@@ -124,6 +124,22 @@ fn caption(metric: Metric) -> &'static str {
     }
 }
 
+/// The busiest GPU; the first one (DXGI order) on a tie, so the label does not flip at idle. An
+/// unknown (NaN) utilization never wins over a known one.
+fn busiest_gpu(gpus: &[negotium_snapshot::GpuSample]) -> Option<&negotium_snapshot::GpuSample> {
+    let mut best: Option<&negotium_snapshot::GpuSample> = None;
+    for g in gpus {
+        let beats = match best {
+            None => true,
+            Some(b) => g.util_pct > b.util_pct || (b.util_pct.is_nan() && !g.util_pct.is_nan()),
+        };
+        if beats {
+            best = Some(g);
+        }
+    }
+    best
+}
+
 fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     let t = &snap.totals;
     let since = snap.taken_at_ms.saturating_sub(SPARK_SECONDS * 1000);
@@ -162,7 +178,7 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
             sub: t
                 .gpus
                 .as_ref()
-                .and_then(|g| g.iter().max_by(|a, b| a.util_pct.total_cmp(&b.util_pct)))
+                .and_then(|g| busiest_gpu(g))
                 .and_then(|g| g.temp_c)
                 .map(format::temp_c)
                 .unwrap_or_default(),
@@ -342,6 +358,20 @@ mod tests {
         s.totals.gpus = Some(vec![gpu("dgpu", 80.0, None)]);
         let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "", "no sensor: no label");
+    }
+
+    #[test]
+    fn gpu_meter_temperature_does_not_flip_between_idle_gpus() {
+        use negotium_snapshot::GpuSample;
+        let gpu = |key: &str, util: f32, temp: f32| GpuSample { key: key.into(), util_pct: util, temp_c: Some(temp), ..Default::default() };
+        let mut s = snap(Some(1.0));
+        s.totals.gpus = Some(vec![gpu("first", 0.0, 40.0), gpu("second", 0.0, 70.0)]);
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        assert_eq!(f.meters[3].sub, "40 °C", "tie: the first GPU");
+        s.totals.gpus = Some(vec![gpu("unknown", f32::NAN, 90.0), gpu("known", 0.0, 55.0)]);
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        assert_eq!(f.meters[3].sub, "55 °C", "unknown utilization never beats a known one");
     }
 
     #[test]

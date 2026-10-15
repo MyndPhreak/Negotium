@@ -3,8 +3,8 @@ use crate::{
     IdentityCache, PdhSources, ProcessReader, SystemInfo, local_time_ms, logical_cpus, memory_totals, read_system_info,
     scan_windows, uptime_s,
 };
-use negotium_snapshot::{ProcessSample, Snapshot, SystemTotals};
-use std::collections::HashSet;
+use negotium_snapshot::{GpuSample, ProcessSample, Snapshot, SystemTotals};
+use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 
 pub struct Collector {
@@ -89,6 +89,7 @@ impl Collector {
         if let Some(m) = totals.memory.as_mut() {
             m.compressed = compressed_bytes(&processes);
         }
+        let mut gpu_parts = (None, None, None);
         let readings = match &mut self.pdh {
             Ok(pdh) => Ok(pdh.read()),
             Err(status) => Err(*status),
@@ -115,7 +116,7 @@ impl Collector {
                 }
                 totals.gpu_pct = r.gpu_pct;
                 totals.gpu_pct_by_pid = r.gpu_pct_by_pid;
-                totals.gpus = r.gpus;
+                gpu_parts = (r.gpus, r.gpu_dedicated, r.gpu_shared);
                 if let Some(m) = totals.memory.as_mut() {
                     m.lists = r.mem_lists;
                 }
@@ -128,13 +129,8 @@ impl Collector {
         source_errors.extend(self.info.gpu_errors.iter().cloned());
         let (temps, temp_errors) = self.gpu_temps.read_checked();
         source_errors.extend(temp_errors);
-        if let Some(gpus) = totals.gpus.as_mut() {
-            for (key, c) in temps {
-                if let Some(g) = gpus.iter_mut().find(|g| g.key == key) {
-                    g.temp_c = Some(c);
-                }
-            }
-        }
+        let (engines, dedicated, shared) = gpu_parts;
+        totals.gpus = merge_gpus(engines, &self.info.gpus, dedicated.as_ref(), shared.as_ref(), &temps);
 
         let windows = scan_windows().unwrap_or_else(|message| {
             source_errors.push(message);
@@ -143,6 +139,27 @@ impl Collector {
 
         Snapshot { taken_at_ms, processes, windows, totals, source_errors }
     }
+}
+
+/// One sample per adapter that PDH or DXGI knows. PDH samples (which have engines) come first; every
+/// DXGI adapter without one is seeded with unknown utilization (NaN, shown as "-"), so temperatures
+/// and adapter memory never depend on the engine counter. `None` only when nothing is known.
+pub(crate) fn merge_gpus(
+    pdh: Option<Vec<GpuSample>>, info: &[crate::gpu::GpuInfo], dedicated: Option<&BTreeMap<String, u64>>,
+    shared: Option<&BTreeMap<String, u64>>, temps: &[(&str, f32)],
+) -> Option<Vec<GpuSample>> {
+    let mut gpus = pdh.unwrap_or_default();
+    for g in info {
+        if !gpus.iter().any(|s| s.key == g.key) {
+            gpus.push(GpuSample { key: g.key.clone(), util_pct: f32::NAN, ..Default::default() });
+        }
+    }
+    for g in &mut gpus {
+        g.dedicated_used = dedicated.and_then(|m| m.get(&g.key).copied());
+        g.shared_used = shared.and_then(|m| m.get(&g.key).copied());
+        g.temp_c = temps.iter().find(|(k, _)| *k == g.key).map(|(_, c)| *c);
+    }
+    (!gpus.is_empty()).then_some(gpus)
 }
 
 /// The memory compression store lives in the minimal process "Memory Compression".
@@ -160,6 +177,30 @@ mod tests {
             private_working_set: ws, disk_io_bytes: 0, threads: 1, handles: 0, image_path: None,
             package_family: None, description: None,
         }
+    }
+
+    fn info(key: &str) -> crate::gpu::GpuInfo {
+        crate::gpu::GpuInfo { key: key.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn temperatures_and_memory_survive_missing_engine_data() {
+        let mem: BTreeMap<String, u64> = [("a".to_string(), 7u64)].into();
+        let g = merge_gpus(None, &[info("a"), info("b")], Some(&mem), None, &[("b", 61.0)]).unwrap();
+        assert_eq!(g.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), ["a", "b"], "DXGI order");
+        assert!(g.iter().all(|s| s.util_pct.is_nan()), "utilization unknown, never 0");
+        assert_eq!((g[0].dedicated_used, g[0].temp_c), (Some(7), None));
+        assert_eq!((g[1].dedicated_used, g[1].temp_c), (None, Some(61.0)));
+        assert_eq!(merge_gpus(None, &[], None, None, &[]), None);
+    }
+
+    #[test]
+    fn a_temperature_for_an_adapter_without_engine_samples_is_attached() {
+        let pdh = vec![GpuSample { key: "a".into(), util_pct: 40.0, ..Default::default() }];
+        let g = merge_gpus(Some(pdh), &[info("a"), info("b")], None, None, &[("a", 50.0), ("b", 60.0)]).unwrap();
+        assert_eq!((g[0].util_pct, g[0].temp_c), (40.0, Some(50.0)));
+        assert!(g[1].util_pct.is_nan());
+        assert_eq!(g[1].temp_c, Some(60.0));
     }
 
     #[test]

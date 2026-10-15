@@ -86,11 +86,17 @@ pub struct MemoryTotals {
     pub compressed: Option<u64>,
 }
 
+fn nan_if_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    Ok(Option::<f32>::deserialize(d)?.unwrap_or(f32::NAN))
+}
+
 /// One GPU (adapter instance "luid_…_phys_N", lowercase). util_pct is its busiest engine; engines
 /// holds the busiest engine of each type, in display order.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GpuSample {
     pub key: String,
+    /// NaN when unknown (no engine data for this adapter); JSON null reads back as NaN.
+    #[serde(deserialize_with = "nan_if_null")]
     pub util_pct: f32,
     pub engines: Vec<(String, f32)>,
     pub dedicated_used: Option<u64>,
@@ -167,6 +173,13 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snap);
+    }
+
+    #[test]
+    fn unknown_gpu_utilization_survives_json() {
+        let g = GpuSample { key: "k".into(), util_pct: f32::NAN, ..Default::default() };
+        let back: GpuSample = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert!(back.util_pct.is_nan());
     }
 
     #[test]

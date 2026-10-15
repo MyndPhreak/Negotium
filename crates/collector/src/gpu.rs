@@ -1,6 +1,7 @@
 //! GPU adapters from DXGI (name, memory sizes, LUID) and their temperature from the kernel
 //! adapter performance data (D3DKMTQueryAdapterInfo, KMTQAITYPE_ADAPTERPERFDATA), as Task Manager.
 //! Every failure comes back as a message for `source_errors`; none of them stops the other data.
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Wdk::Graphics::Direct3D::{
@@ -90,7 +91,8 @@ pub fn deci_celsius(raw: u32) -> Option<f32> {
 
 /// Kernel adapter handles opened once; queried every tick; closed on drop.
 pub struct GpuTemps {
-    handles: Vec<(String, u32)>,
+    /// (key, kernel handle, a query already failed and was reported).
+    handles: Vec<(String, u32, Cell<bool>)>,
     /// Adapters that could not be opened, reported on every read.
     open_errors: Vec<String>,
 }
@@ -107,7 +109,7 @@ impl GpuTemps {
             // SAFETY: `open` is a valid in/out struct; the handle is closed in Drop.
             let status = unsafe { D3DKMTOpenAdapterFromLuid(&mut open) };
             if status.is_ok() {
-                handles.push((g.key.clone(), open.hAdapter));
+                handles.push((g.key.clone(), open.hAdapter, Cell::new(false)));
             } else {
                 open_errors.push(format!("gpu temperature: D3DKMTOpenAdapterFromLuid failed {:#010x} for {}", status.0, g.name));
             }
@@ -121,12 +123,15 @@ impl GpuTemps {
         self.read_checked().0
     }
 
-    /// `read` plus a message for every failed open or query. A query that succeeds with no sensor
-    /// is not a failure.
+    /// `read` plus a message for every failed open, and for a failed query the first time it fails
+    /// (that adapter is not queried again). A query that succeeds with no sensor is not a failure.
     pub fn read_checked(&self) -> (Vec<(&str, f32)>, Vec<String>) {
         let mut errors = self.open_errors.clone();
         let mut temps = Vec::new();
-        for (key, h) in &self.handles {
+        for (key, h, failed) in &self.handles {
+            if failed.get() {
+                continue;
+            }
             let mut perf = D3DKMT_ADAPTER_PERFDATA { PhysicalAdapterIndex: 0, ..Default::default() };
             let mut query = D3DKMT_QUERYADAPTERINFO {
                 hAdapter: *h,
@@ -138,6 +143,8 @@ impl GpuTemps {
             // and outlives the call.
             let status = unsafe { D3DKMTQueryAdapterInfo(&mut query) };
             if status.is_err() {
+                // Reported once, then skipped: an adapter without support (iGPU, virtual) would fail every tick.
+                failed.set(true);
                 errors.push(format!("gpu temperature: D3DKMTQueryAdapterInfo failed {:#010x} for {key}", status.0));
             } else if let Some(c) = deci_celsius(perf.Temperature) {
                 temps.push((key.as_str(), c));
@@ -149,7 +156,7 @@ impl GpuTemps {
 
 impl Drop for GpuTemps {
     fn drop(&mut self) {
-        for (_, h) in &self.handles {
+        for (_, h, _) in &self.handles {
             let close = D3DKMT_CLOSEADAPTER { hAdapter: *h };
             // SAFETY: closes a handle opened in `open`, exactly once.
             unsafe {
@@ -174,6 +181,16 @@ mod tests {
         assert_eq!(deci_celsius(625), Some(62.5));
         assert_eq!(deci_celsius(0), None);
         assert_eq!(deci_celsius(5000), None, "implausible values are dropped");
+    }
+
+    #[test]
+    fn a_failing_temperature_query_is_reported_once_then_skipped() {
+        let temps = GpuTemps { handles: vec![("k".into(), 0xdead_beef, Cell::new(false))], open_errors: vec![] };
+        let (read, first) = temps.read_checked();
+        assert!(read.is_empty());
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(first[0].starts_with("gpu temperature: D3DKMTQueryAdapterInfo failed"), "{first:?}");
+        assert!(temps.read_checked().1.is_empty(), "not re-queried or re-reported");
     }
 
     #[test]

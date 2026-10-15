@@ -23,6 +23,10 @@ pub struct PdhReadings {
     pub gpu_pct: Option<f32>,
     pub gpu_pct_by_pid: Option<BTreeMap<u32, f32>>,
     pub gpus: Option<Vec<GpuSample>>,
+    /// Adapter memory by lowercase adapter key; attached to samples by the collector, which also
+    /// knows the adapters that have no engine instances.
+    pub gpu_dedicated: Option<BTreeMap<String, u64>>,
+    pub gpu_shared: Option<BTreeMap<String, u64>>,
     pub errors: Vec<String>,
 }
 
@@ -149,11 +153,7 @@ impl PdhSources {
         let shared = get(&mut errors, "gpu shared memory", c.gpu_shared, read_array).map(|v| gpu_memory_from(&v));
         let (gpu_pct, gpu_pct_by_pid, gpus) = match gpu {
             Some(v) => {
-                let (sys, per, mut gpus) = gpu_from(&v);
-                for g in &mut gpus {
-                    g.dedicated_used = dedicated.as_ref().and_then(|m| m.get(&g.key).copied());
-                    g.shared_used = shared.as_ref().and_then(|m| m.get(&g.key).copied());
-                }
+                let (sys, per, gpus) = gpu_from(&v);
                 (sys, Some(per), Some(gpus))
             }
             None => (None, None, None),
@@ -175,6 +175,8 @@ impl PdhSources {
             gpu_pct,
             gpu_pct_by_pid,
             gpus,
+            gpu_dedicated: dedicated,
+            gpu_shared: shared,
             errors,
         }
     }
