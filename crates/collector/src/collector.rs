@@ -98,10 +98,13 @@ impl Collector {
                 totals.disks = r.disks;
                 if let Some(raw) = r.adapters {
                     let now = Instant::now();
-                    if self.net.needs_refresh(raw.iter().map(|(n, _, _)| n.as_str()), now)
-                        && let Err(e) = self.net.refresh(now)
-                    {
-                        source_errors.push(e);
+                    let instances = || raw.iter().map(|(n, _, _)| n.as_str());
+                    if self.net.needs_refresh(instances(), now) {
+                        match self.net.refresh(now) {
+                            Ok(warning) => source_errors.extend(warning),
+                            Err(e) => source_errors.push(e),
+                        }
+                        self.net.note_unresolved(instances());
                     }
                     let adapters = crate::net::join_adapters(&raw, &self.net);
                     totals.net_bps = Some(crate::net::hardware_total(&adapters));

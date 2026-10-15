@@ -321,6 +321,10 @@ pub fn gpu_from(items: &[(String, f64)]) -> (Option<f32>, BTreeMap<u32, f32>) {
     (system, per_pid)
 }
 
+/// Throughput is a plain `f64`, so a read or write item that is absent (PDH omits items without
+/// valid data, and non-finite ones are skipped) counts as 0 bytes/s for a disk that is otherwise
+/// reported; a disk whose idle item is absent is dropped. Only `response`, which has an `Option`
+/// to carry it, keeps "missing" distinct.
 /// `response` is optional data: an instance without a value has no response time.
 pub fn disks_from(
     idle: &[(String, f64)], read: &[(String, f64)], write: &[(String, f64)], response: &[(String, f64)],
@@ -338,7 +342,8 @@ pub fn disks_from(
         .collect()
 }
 
-/// (instance, sent, received) for every instance of the sent counter.
+/// (instance, sent, received) for every instance of the sent counter; a received item that is
+/// absent counts as 0 (the tuple has no way to say missing), an absent sent item drops the adapter.
 pub fn adapters_from(sent: &[(String, f64)], recv: &[(String, f64)]) -> Vec<(String, f64, f64)> {
     sent.iter()
         .map(|(name, s)| {

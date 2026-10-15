@@ -3,7 +3,7 @@
 //! The table is read every REFRESH, or sooner (at most every MIN_REFRESH) when PDH reports an
 //! instance it doesn't know — never every tick.
 use negotium_snapshot::AdapterSample;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -49,18 +49,29 @@ pub fn pdh_instance_name(description: &str) -> String {
 pub struct NetTable {
     by_instance: HashMap<String, IfInfo>,
     read_at: Option<Instant>,
+    /// Instances PDH reported that the last read of the table did not contain (filter
+    /// interfaces, a name mismatch). They don't trigger an early re-read; only REFRESH does.
+    unresolved: HashSet<String>,
 }
+
+/// What one read of the interface tables returns: the interfaces and, when the address table
+/// failed, a warning (the interfaces are then listed without addresses).
+pub type InterfaceRead = Result<(Vec<IfInfo>, Option<String>), String>;
 
 impl NetTable {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn from_interfaces(list: Vec<IfInfo>, read_at: Instant) -> Self {
-        Self {
-            by_instance: list.into_iter().map(|i| (pdh_instance_name(&i.description), i)).collect(),
-            read_at: Some(read_at),
+    /// When two interfaces mangle to the same instance name, the hardware one wins, then the one
+    /// with the smaller alias, so the choice never depends on table order.
+    pub fn from_interfaces(mut list: Vec<IfInfo>, read_at: Instant) -> Self {
+        list.sort_by(|a, b| (!a.hardware, &a.alias, &a.description).cmp(&(!b.hardware, &b.alias, &b.description)));
+        let mut by_instance = HashMap::new();
+        for i in list {
+            by_instance.entry(pdh_instance_name(&i.description)).or_insert(i);
         }
+        Self { by_instance, read_at: Some(read_at), unresolved: HashSet::new() }
     }
 
     pub fn get(&self, instance: &str) -> Option<&IfInfo> {
@@ -70,16 +81,31 @@ impl NetTable {
     pub fn needs_refresh<'a>(&self, instances: impl IntoIterator<Item = &'a str>, now: Instant) -> bool {
         let Some(at) = self.read_at else { return true };
         let age = now.saturating_duration_since(at);
-        age >= REFRESH || (age >= MIN_REFRESH && instances.into_iter().any(|i| !self.by_instance.contains_key(i)))
+        age >= REFRESH
+            || (age >= MIN_REFRESH
+                && instances.into_iter().any(|i| !self.by_instance.contains_key(i) && !self.unresolved.contains(i)))
+    }
+
+    /// Remembers which of `instances` the table does not know; call it right after a refresh.
+    pub fn note_unresolved<'a>(&mut self, instances: impl IntoIterator<Item = &'a str>) {
+        self.unresolved =
+            instances.into_iter().filter(|i| !self.by_instance.contains_key(*i)).map(String::from).collect();
     }
 
     /// Re-reads the interface table. The time is recorded even on failure, so a failing table
-    /// is retried on the refresh schedule, not every tick.
-    pub fn refresh(&mut self, now: Instant) -> Result<(), String> {
+    /// is retried on the refresh schedule, not every tick. `Ok` carries a warning when only the
+    /// address table failed.
+    pub fn refresh(&mut self, now: Instant) -> Result<Option<String>, String> {
+        self.refresh_with(now, read_interfaces)
+    }
+
+    pub(crate) fn refresh_with(
+        &mut self, now: Instant, read: impl FnOnce() -> InterfaceRead,
+    ) -> Result<Option<String>, String> {
         self.read_at = Some(now);
-        let list = read_interfaces()?;
+        let (list, warning) = read()?;
         *self = Self::from_interfaces(list, now);
-        Ok(())
+        Ok(warning)
     }
 }
 
@@ -140,7 +166,7 @@ unsafe fn sockaddr_ip(a: &SOCKADDR_INET) -> Option<IpAddr> {
     }
 }
 
-fn read_interfaces() -> Result<Vec<IfInfo>, String> {
+fn read_interfaces() -> InterfaceRead {
     let mut by_luid: HashMap<u64, IfInfo> = HashMap::new();
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
     // SAFETY: GetIfTable2 allocates the table; it is freed with FreeMibTable below.
@@ -172,7 +198,9 @@ fn read_interfaces() -> Result<Vec<IfInfo>, String> {
 
     let mut addresses: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
     // SAFETY: as above, freed with FreeMibTable.
-    if unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut addresses) } == ERROR_SUCCESS {
+    let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut addresses) };
+    let mut warning = None;
+    if status == ERROR_SUCCESS {
         // SAFETY: on success `addresses` points to NumEntries consecutive rows.
         let rows = unsafe { std::slice::from_raw_parts((*addresses).Table.as_ptr(), (*addresses).NumEntries as usize) };
         for row in rows {
@@ -188,12 +216,14 @@ fn read_interfaces() -> Result<Vec<IfInfo>, String> {
         }
         // SAFETY: allocated by GetUnicastIpAddressTable, freed exactly once.
         unsafe { FreeMibTable(addresses as *const _) };
+    } else {
+        warning = Some(format!("network: GetUnicastIpAddressTable failed {:#010x}", status.0));
     }
     let mut list: Vec<IfInfo> = by_luid.into_values().collect();
     for i in &mut list {
         i.addresses.sort_by_key(|a| a.contains(':'));
     }
-    Ok(list)
+    Ok((list, warning))
 }
 
 #[cfg(test)]
@@ -250,6 +280,40 @@ mod tests {
         assert_eq!(joined[0].addresses, ["192.168.1.20"]);
         assert_eq!(joined[1].alias, None);
         assert!(!joined[1].hardware && joined[1].connected, "unknown interfaces are shown, not counted as hardware");
+    }
+
+    #[test]
+    fn an_address_table_failure_is_reported_and_the_interfaces_are_kept() {
+        let mut table = NetTable::new();
+        let read = || Ok((vec![info("Ethernet", "Intel(R) Ethernet", true)], Some("network: addresses".to_string())));
+        let warning = table.refresh_with(Instant::now(), read).unwrap();
+        assert_eq!(warning.as_deref(), Some("network: addresses"));
+        assert!(table.get("Intel[R] Ethernet").is_some());
+        let failed = table.refresh_with(Instant::now(), || Err("network: GetIfTable2 failed".to_string()));
+        assert_eq!(failed, Err("network: GetIfTable2 failed".to_string()));
+        assert!(table.get("Intel[R] Ethernet").is_some(), "a failed read keeps the last table");
+    }
+
+    #[test]
+    fn instances_that_stay_unknown_do_not_force_a_reread_before_the_refresh_interval() {
+        let t0 = Instant::now();
+        let mut table = NetTable::from_interfaces(vec![info("Ethernet", "Intel(R) Ethernet", true)], t0);
+        table.note_unresolved(["Intel[R] Ethernet", "Filter Adapter"]);
+        let later = t0 + MIN_REFRESH;
+        assert!(!table.needs_refresh(["Filter Adapter"], later), "known to be missing");
+        assert!(table.needs_refresh(["Filter Adapter", "Brand New"], later), "a different new instance still triggers");
+        assert!(table.needs_refresh(["Filter Adapter"], t0 + REFRESH));
+    }
+
+    #[test]
+    fn colliding_instance_names_prefer_hardware_whatever_the_table_order() {
+        let t0 = Instant::now();
+        let hw = info("Ethernet", "Intel(R) Ethernet", true);
+        let virt = info("vEthernet", "Intel[R] Ethernet", false);
+        for list in [vec![hw.clone(), virt.clone()], vec![virt, hw]] {
+            let table = NetTable::from_interfaces(list, t0);
+            assert_eq!(table.get("Intel[R] Ethernet").unwrap().alias, "Ethernet");
+        }
     }
 
     #[test]
