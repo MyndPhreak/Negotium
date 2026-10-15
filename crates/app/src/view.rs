@@ -1,6 +1,7 @@
 //! Builds the plain-data Frame the UI renders. Runs on the worker thread; `visible_rows`
 //! runs on the UI thread (no Windows calls anywhere here).
 use crate::format;
+use crate::graph;
 use negotium_history::{History, Series};
 use negotium_model::{AppKey, AppRow, Metric, top_n};
 use negotium_snapshot::Snapshot;
@@ -80,31 +81,6 @@ impl IdMap {
     }
 }
 
-pub fn spark_path(values: &[Option<f32>], max: f32) -> String {
-    if values.is_empty() {
-        return "M 0 100".to_string();
-    }
-    let n = values.len() as i64;
-    let mut out = String::new();
-    let mut pen_down = false;
-    for (i, v) in values.iter().enumerate() {
-        let x = SPARK_SECONDS as i64 - (n - 1 - i as i64);
-        match v {
-            Some(v) if max > 0.0 && v.is_finite() => {
-                let y = (100.0 - (v / max * 100.0).clamp(0.0, 100.0)).round() as i64;
-                out.push_str(&format!("{}{} {x} {y}", if out.is_empty() { "" } else { " " }, if pen_down { "L" } else { "M" }));
-                pen_down = true;
-            }
-            Some(_) => {
-                out.push_str(&format!("{}M {x} 100", if out.is_empty() { "" } else { " " }));
-                pen_down = false;
-            }
-            None => pen_down = false,
-        }
-    }
-    if out.is_empty() { "M 0 100".to_string() } else { out }
-}
-
 fn metric_text(row_value: f64, metric: Metric) -> String {
     match metric {
         Metric::Cpu | Metric::Gpu => format::pct1(row_value as f32),
@@ -142,17 +118,18 @@ fn busiest_gpu(gpus: &[negotium_snapshot::GpuSample]) -> Option<&negotium_snapsh
 
 fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     let t = &snap.totals;
-    let since = snap.taken_at_ms.saturating_sub(SPARK_SECONDS * 1000);
-    let series = |key: Series| -> Vec<Option<f32>> { history.points(&key, since).map(|(_, v)| v).collect() };
+    let span = SPARK_SECONDS * 1000;
+    let now = snap.taken_at_ms;
+    let since = now.saturating_sub(span);
+    let spark = |key: Series, max: f32| graph::shape(history.points(&key, since), now, span, max, SPARK_SECONDS as usize).line;
     let mem_total = t.memory.as_ref().map(|m| m.total as f32).unwrap_or(0.0);
-    let net_series = series(Series::NetTotal);
-    let net_max = net_series.iter().flatten().fold(0.0f32, |a, b| a.max(*b)).max(t.net_bps.unwrap_or(0.0) as f32);
+    let net_max = history.points(&Series::NetTotal, since).filter_map(|(_, v)| v).fold(0.0f32, f32::max).max(t.net_bps.unwrap_or(0.0) as f32);
     vec![
         MeterView {
             label: "CPU",
             value: t.cpu_pct.map(format::pct).unwrap_or_default(),
             sub: String::new(),
-            spark: spark_path(&series(Series::Cpu), 100.0),
+            spark: spark(Series::Cpu, 100.0),
             available: t.cpu_pct.is_some(),
         },
         MeterView {
@@ -162,14 +139,14 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
                 let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
                 format!("{:.1} / {:.1} GB", gb(m.used), gb(m.total))
             }).unwrap_or_default(),
-            spark: spark_path(&series(Series::MemUsed), mem_total),
+            spark: spark(Series::MemUsed, mem_total),
             available: t.memory.is_some(),
         },
         MeterView {
             label: "Disk",
             value: t.busiest_disk_pct().map(format::pct).unwrap_or_default(),
             sub: String::new(),
-            spark: spark_path(&series(Series::DiskBusiest), 100.0),
+            spark: spark(Series::DiskBusiest, 100.0),
             available: t.busiest_disk_pct().is_some(),
         },
         MeterView {
@@ -182,14 +159,14 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
                 .and_then(|g| g.temp_c)
                 .map(format::temp_c)
                 .unwrap_or_default(),
-            spark: spark_path(&series(Series::Gpu), 100.0),
+            spark: spark(Series::Gpu, 100.0),
             available: t.gpu_pct.is_some(),
         },
         MeterView {
             label: "Network",
             value: t.net_bps.map(format::bit_rate).unwrap_or_default(),
             sub: String::new(),
-            spark: spark_path(&net_series, net_max),
+            spark: spark(Series::NetTotal, net_max),
             available: t.net_bps.is_some(),
         },
     ]
@@ -375,11 +352,28 @@ mod tests {
     }
 
     #[test]
-    fn spark_path_right_aligns_samples_and_breaks_on_gaps() {
-        assert_eq!(spark_path(&[Some(0.0), Some(50.0), Some(100.0)], 100.0), "M 58 100 L 59 50 L 60 0");
-        assert_eq!(spark_path(&[Some(10.0), None, Some(10.0)], 100.0), "M 58 90 M 60 90");
-        assert_eq!(spark_path(&[], 100.0), "M 0 100");
-        assert_eq!(spark_path(&[Some(5.0)], 0.0), "M 60 100");
+    fn meter_sparklines_come_from_history_by_time() {
+        let mut h = History::new();
+        let mut s = snap(Some(0.0));
+        for (t, cpu) in [(58_000u64, 0.0f32), (59_000, 50.0), (60_000, 100.0)] {
+            s.taken_at_ms = t;
+            s.totals.cpu_pct = Some(cpu);
+            h.push(t, &s.totals, &[]);
+        }
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
+        assert_eq!(f.meters[0].spark, "M 966.7 100.0 L 983.3 50.0 L 1000.0 0.0");
+    }
+
+    #[test]
+    fn an_idle_network_draws_a_flat_line() {
+        let mut h = History::new();
+        let mut s = snap(Some(1.0));
+        s.totals.net_bps = Some(0.0);
+        h.push(60_000, &s.totals, &[]);
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
+        assert_eq!(f.meters[4].spark, "M 1000.0 100.0");
     }
 
     #[test]
