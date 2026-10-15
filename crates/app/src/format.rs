@@ -48,6 +48,10 @@ pub fn pct(p: f32) -> String {
 pub fn pct1(p: f32) -> String {
     format!("{:.1}%", if p.is_finite() { p.clamp(0.0, 100.0) + 0.0 } else { 0.0 })
 }
+pub fn temp_c(c: f32) -> String {
+    if c.is_finite() { format!("{:.0} °C", c) } else { "—".to_string() }
+}
+
 pub fn hung(ms: u64) -> String {
     let s = ms / 1000;
     if s < 60 { format!("Not responding · {s}s") } else { format!("Not responding · {}m {:02}s", s / 60, s % 60) }
@@ -56,6 +60,12 @@ pub fn hung(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temperatures_round_to_whole_degrees() {
+        assert_eq!(temp_c(62.4), "62 °C");
+        assert_eq!(temp_c(f32::NAN), "—");
+    }
 
     #[test]
     fn bytes_use_binary_units_with_one_decimal() {

@@ -15,6 +15,7 @@ pub struct Collector {
     logical_cpus: u32,
     info: SystemInfo,
     net: crate::net::NetTable,
+    gpu_temps: crate::gpu::GpuTemps,
 }
 
 impl Default for Collector {
@@ -25,13 +26,15 @@ impl Default for Collector {
 
 impl Collector {
     pub fn new() -> Self {
+        let info = read_system_info();
         Self {
             processes: ProcessReader::new(),
             identity: IdentityCache::new(),
             pdh: PdhSources::open(),
             started: Instant::now(),
             logical_cpus: logical_cpus(),
-            info: read_system_info(),
+            gpu_temps: crate::gpu::GpuTemps::open(&info.gpus),
+            info,
             net: crate::net::NetTable::new(),
         }
     }
@@ -112,12 +115,25 @@ impl Collector {
                 }
                 totals.gpu_pct = r.gpu_pct;
                 totals.gpu_pct_by_pid = r.gpu_pct_by_pid;
+                totals.gpus = r.gpus;
                 if let Some(m) = totals.memory.as_mut() {
                     m.lists = r.mem_lists;
                 }
                 source_errors.extend(r.errors);
             }
             Err(status) => source_errors.push(format!("pdh open: {status:#010x}")),
+        }
+
+        // Independent of PDH: DXGI enumeration and kernel temperature queries fail on their own.
+        source_errors.extend(self.info.gpu_errors.iter().cloned());
+        let (temps, temp_errors) = self.gpu_temps.read_checked();
+        source_errors.extend(temp_errors);
+        if let Some(gpus) = totals.gpus.as_mut() {
+            for (key, c) in temps {
+                if let Some(g) = gpus.iter_mut().find(|g| g.key == key) {
+                    g.temp_c = Some(c);
+                }
+            }
         }
 
         let windows = scan_windows().unwrap_or_else(|message| {

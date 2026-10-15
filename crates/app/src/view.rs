@@ -159,7 +159,13 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
         MeterView {
             label: "GPU",
             value: t.gpu_pct.map(format::pct).unwrap_or_default(),
-            sub: String::new(),
+            sub: t
+                .gpus
+                .as_ref()
+                .and_then(|g| g.iter().max_by(|a, b| a.util_pct.total_cmp(&b.util_pct)))
+                .and_then(|g| g.temp_c)
+                .map(format::temp_c)
+                .unwrap_or_default(),
             spark: spark_path(&samples.iter().map(|s| s.gpu_pct).collect::<Vec<_>>(), 100.0),
             available: t.gpu_pct.is_some(),
         },
@@ -321,6 +327,21 @@ mod tests {
             totals: SystemTotals { logical_cpus: 4, cpu_pct: cpu, memory: Some(MemoryTotals { total: 16 << 30, used: 8 << 30, ..Default::default() }), ..Default::default() },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn gpu_meter_shows_the_busiest_gpus_temperature() {
+        use negotium_snapshot::GpuSample;
+        let gpu = |key: &str, util: f32, temp: Option<f32>| GpuSample { key: key.into(), util_pct: util, temp_c: temp, ..Default::default() };
+        let mut s = snap(Some(1.0));
+        s.totals.gpu_pct = Some(80.0);
+        s.totals.gpus = Some(vec![gpu("igpu", 5.0, None), gpu("dgpu", 80.0, Some(64.6))]);
+        let mut ids = IdMap::new();
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        assert_eq!(f.meters[3].sub, "65 °C");
+        s.totals.gpus = Some(vec![gpu("dgpu", 80.0, None)]);
+        let f = build_frame(&mut ids, &s, &[], &[], &History::new(10), &opts(Metric::Cpu, true));
+        assert_eq!(f.meters[3].sub, "", "no sensor: no label");
     }
 
     #[test]

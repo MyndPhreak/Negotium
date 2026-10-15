@@ -1,6 +1,6 @@
 //! PDH counter sets, read as formatted arrays. Each counter is optional: a missing
 //! counter set (e.g. no GPU counters in a VM) yields `None` for that reading only.
-use negotium_snapshot::{DiskSample, MemoryLists};
+use negotium_snapshot::{DiskSample, GpuSample, MemoryLists};
 use std::collections::BTreeMap;
 use windows::Win32::System::Performance::{
     PDH_CSTATUS_NEW_DATA, PDH_FMT, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER,
@@ -22,6 +22,7 @@ pub struct PdhReadings {
     pub adapters: Option<Vec<(String, f64, f64)>>,
     pub gpu_pct: Option<f32>,
     pub gpu_pct_by_pid: Option<BTreeMap<u32, f32>>,
+    pub gpus: Option<Vec<GpuSample>>,
     pub errors: Vec<String>,
 }
 
@@ -45,6 +46,8 @@ pub(crate) struct Counters {
     net_sent: Counter,
     net_recv: Counter,
     gpu: Counter,
+    gpu_dedicated: Counter,
+    gpu_shared: Counter,
 }
 
 impl Counters {
@@ -65,6 +68,8 @@ impl Counters {
             net_sent: add(query, w!("\\Network Interface(*)\\Bytes Sent/sec")),
             net_recv: add(query, w!("\\Network Interface(*)\\Bytes Received/sec")),
             gpu: add(query, w!("\\GPU Engine(*)\\Utilization Percentage")),
+            gpu_dedicated: add(query, w!("\\GPU Adapter Memory(*)\\Dedicated Usage")),
+            gpu_shared: add(query, w!("\\GPU Adapter Memory(*)\\Shared Usage")),
         }
     }
 
@@ -87,6 +92,8 @@ impl Counters {
             net_sent: f,
             net_recv: f,
             gpu: f,
+            gpu_dedicated: f,
+            gpu_shared: f,
         }
     }
 }
@@ -138,12 +145,18 @@ impl PdhSources {
         let recv = get(&mut errors, "network received", c.net_recv, read_array);
         let gpu = get(&mut errors, "gpu", c.gpu, read_array);
 
-        let (gpu_pct, gpu_pct_by_pid) = match gpu {
+        let dedicated = get(&mut errors, "gpu dedicated memory", c.gpu_dedicated, read_array).map(|v| gpu_memory_from(&v));
+        let shared = get(&mut errors, "gpu shared memory", c.gpu_shared, read_array).map(|v| gpu_memory_from(&v));
+        let (gpu_pct, gpu_pct_by_pid, gpus) = match gpu {
             Some(v) => {
-                let (sys, per) = gpu_from(&v);
-                (sys, Some(per))
+                let (sys, per, mut gpus) = gpu_from(&v);
+                for g in &mut gpus {
+                    g.dedicated_used = dedicated.as_ref().and_then(|m| m.get(&g.key).copied());
+                    g.shared_used = shared.as_ref().and_then(|m| m.get(&g.key).copied());
+                }
+                (sys, Some(per), Some(gpus))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         PdhReadings {
             cpu_pct: cpu.as_deref().and_then(total_from),
@@ -161,6 +174,7 @@ impl PdhSources {
             },
             gpu_pct,
             gpu_pct_by_pid,
+            gpus,
             errors,
         }
     }
@@ -296,29 +310,76 @@ pub fn total_from(items: &[(String, f64)]) -> Option<f32> {
     items.iter().find(|(n, _)| n == "_Total").map(|(_, v)| v.clamp(0.0, 100.0) as f32)
 }
 
-pub fn parse_gpu_instance(name: &str) -> Option<(u32, String)> {
+/// Engine types shown first on a GPU page, in Task Manager's order; the rest follow alphabetically.
+const PREFERRED_ENGINES: [&str; 4] = ["3D", "Copy", "VideoEncode", "VideoDecode"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuInstance<'a> {
+    pub pid: u32,
+    /// "luid_0x…_0x…_phys_N"
+    pub adapter: &'a str,
+    /// "luid_0x…_0x…_phys_N_eng_M"
+    pub engine: &'a str,
+    pub engtype: &'a str,
+}
+
+pub fn parse_gpu_instance(name: &str) -> Option<GpuInstance<'_>> {
     let rest = name.strip_prefix("pid_")?;
     let (pid, rest) = rest.split_once('_')?;
-    let engine = rest.split("_engtype_").next()?;
+    let (engine, engtype) = rest.split_once("_engtype_").unwrap_or((rest, ""));
     if !engine.starts_with("luid_") {
         return None;
     }
-    Some((pid.parse().ok()?, engine.to_string()))
+    let adapter = engine.split("_eng_").next()?;
+    Some(GpuInstance { pid: pid.parse().ok()?, adapter, engine, engtype })
 }
 
-/// System GPU % = busiest engine (summed over processes); per-process % = its busiest engine.
-pub fn gpu_from(items: &[(String, f64)]) -> (Option<f32>, BTreeMap<u32, f32>) {
-    let mut per_engine: BTreeMap<String, f64> = BTreeMap::new();
+/// Display order of engine types: the preferred ones first, then alphabetical. Compares borrowed
+/// strings only.
+fn engine_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let rank = |t: &str| PREFERRED_ENGINES.iter().position(|p| *p == t).unwrap_or(PREFERRED_ENGINES.len());
+    rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+}
+
+/// System GPU % = busiest engine (summed over processes); per-process % = its busiest engine;
+/// per adapter: busiest engine overall and per engine type. Borrows the instance names, so the
+/// hundreds of instances a tick don't each allocate; strings are allocated only for the few
+/// adapters and engine types in the result.
+pub fn gpu_from(items: &[(String, f64)]) -> (Option<f32>, BTreeMap<u32, f32>, Vec<GpuSample>) {
+    let mut per_engine: BTreeMap<(&str, &str, &str), f64> = BTreeMap::new();
     let mut per_pid: BTreeMap<u32, f32> = BTreeMap::new();
     for (name, value) in items {
-        let Some((pid, engine)) = parse_gpu_instance(name) else { continue };
+        let Some(i) = parse_gpu_instance(name) else { continue };
         let v = value.max(0.0);
-        *per_engine.entry(engine).or_default() += v;
-        let slot = per_pid.entry(pid).or_default();
+        *per_engine.entry((i.adapter, i.engine, i.engtype)).or_default() += v;
+        let slot = per_pid.entry(i.pid).or_default();
         *slot = slot.max(v.min(100.0) as f32);
     }
     let system = per_engine.values().copied().reduce(f64::max).map(|v| v.min(100.0) as f32);
-    (system, per_pid)
+    let mut adapters: BTreeMap<&str, BTreeMap<&str, f32>> = BTreeMap::new();
+    for ((adapter, _, engtype), v) in per_engine {
+        let slot = adapters.entry(adapter).or_default().entry(engtype).or_default();
+        *slot = slot.max(v.min(100.0) as f32);
+    }
+    let gpus = adapters
+        .into_iter()
+        .map(|(adapter, types)| {
+            let mut types: Vec<(&str, f32)> = types.into_iter().collect();
+            types.sort_by(|a, b| engine_order(a.0, b.0));
+            GpuSample {
+                key: adapter.to_ascii_lowercase(),
+                util_pct: types.iter().map(|(_, v)| *v).fold(0.0, f32::max),
+                engines: types.into_iter().map(|(t, v)| (t.to_string(), v)).collect(),
+                ..Default::default()
+            }
+        })
+        .collect();
+    (system, per_pid, gpus)
+}
+
+/// "GPU Adapter Memory" bytes by lowercase adapter instance.
+pub fn gpu_memory_from(items: &[(String, f64)]) -> BTreeMap<String, u64> {
+    items.iter().map(|(n, v)| (n.to_ascii_lowercase(), v.max(0.0) as u64)).collect()
 }
 
 /// Throughput is a plain `f64`, so a read or write item that is absent (PDH omits items without
@@ -397,23 +458,52 @@ mod tests {
     }
 
     #[test]
-    fn gpu_instance_parses_pid_and_engine() {
+    fn gpu_instance_parses_pid_adapter_engine_and_type() {
         let n = "pid_1234_luid_0x00000000_0x0000D1B4_phys_0_eng_3_engtype_3D";
-        assert_eq!(parse_gpu_instance(n), Some((1234, "luid_0x00000000_0x0000D1B4_phys_0_eng_3".into())));
-        assert_eq!(parse_gpu_instance("garbage"), None);
+        let i = parse_gpu_instance(n).unwrap();
+        assert_eq!(i.pid, 1234);
+        assert_eq!(i.adapter, "luid_0x00000000_0x0000D1B4_phys_0");
+        assert_eq!(i.engine, "luid_0x00000000_0x0000D1B4_phys_0_eng_3");
+        assert_eq!(i.engtype, "3D");
+        assert!(parse_gpu_instance("garbage").is_none());
     }
 
     #[test]
-    fn gpu_system_is_busiest_engine_and_process_is_its_max_engine() {
+    fn gpu_totals_per_adapter_and_per_engine_type() {
         let v = items(&[
             ("pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 30.0),
             ("pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 25.0),
             ("pid_2_luid_0x0_0x1_phys_0_eng_5_engtype_VideoDecode", 40.0),
+            ("pid_3_luid_0x0_0x2_phys_0_eng_1_engtype_Copy", 5.0),
+            ("pid_3_luid_0x0_0x2_phys_0_eng_2_engtype_Copy", 7.0),
         ]);
-        let (system, per_pid) = gpu_from(&v);
-        assert_eq!(system, Some(55.0));
-        assert_eq!(per_pid.get(&1), Some(&30.0));
+        let (system, per_pid, gpus) = gpu_from(&v);
+        assert_eq!(system, Some(55.0), "busiest engine summed over processes");
         assert_eq!(per_pid.get(&2), Some(&40.0));
+        assert_eq!(gpus.len(), 2);
+        assert_eq!(gpus[0].key, "luid_0x0_0x1_phys_0");
+        assert_eq!(gpus[0].util_pct, 55.0);
+        assert_eq!(gpus[0].engines, vec![("3D".to_string(), 55.0), ("VideoDecode".to_string(), 40.0)]);
+        assert_eq!(gpus[1].engines, vec![("Copy".to_string(), 7.0)], "busiest engine of each type");
+    }
+
+    #[test]
+    fn engine_types_sort_preferred_first_then_alphabetically() {
+        let v = items(&[
+            ("pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_Zeta", 1.0),
+            ("pid_1_luid_0x0_0x1_phys_0_eng_1_engtype_VideoDecode", 1.0),
+            ("pid_1_luid_0x0_0x1_phys_0_eng_2_engtype_Alpha", 1.0),
+            ("pid_1_luid_0x0_0x1_phys_0_eng_3_engtype_3D", 1.0),
+            ("pid_1_luid_0x0_0x1_phys_0_eng_4_engtype_Copy", 1.0),
+        ]);
+        let names: Vec<_> = gpu_from(&v).2[0].engines.iter().map(|(t, _)| t.clone()).collect();
+        assert_eq!(names, ["3D", "Copy", "VideoDecode", "Alpha", "Zeta"]);
+    }
+
+    #[test]
+    fn gpu_adapter_memory_is_keyed_by_lowercase_adapter() {
+        let m = gpu_memory_from(&items(&[("luid_0x00000000_0x0001569B_phys_0", 3.5e9)]));
+        assert_eq!(m.get("luid_0x00000000_0x0001569b_phys_0"), Some(&3_500_000_000));
     }
 
     #[test]
@@ -496,6 +586,7 @@ mod tests {
         let mut sources = PdhSources { query, counters: Counters::failed(0xC0000BB8), groups: vec![2] };
         let r = sources.read();
         assert!(r.cpu_pct.is_none() && r.disks.is_none() && r.adapters.is_none() && r.gpu_pct.is_none());
+        assert!(r.gpus.is_none());
         assert!(r.cpu_mhz.is_none() && r.mem_lists.is_none());
         assert_eq!(r.per_core_pct, vec![None, None]);
         for label in ["cpu", "cpu frequency", "cpu performance", "memory modified", "memory free"] {

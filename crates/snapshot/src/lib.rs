@@ -86,6 +86,18 @@ pub struct MemoryTotals {
     pub compressed: Option<u64>,
 }
 
+/// One GPU (adapter instance "luid_…_phys_N", lowercase). util_pct is its busiest engine; engines
+/// holds the busiest engine of each type, in display order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GpuSample {
+    pub key: String,
+    pub util_pct: f32,
+    pub engines: Vec<(String, f32)>,
+    pub dedicated_used: Option<u64>,
+    pub shared_used: Option<u64>,
+    pub temp_c: Option<f32>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SystemTotals {
     pub logical_cpus: u32,
@@ -106,6 +118,8 @@ pub struct SystemTotals {
     pub disks: Option<Vec<DiskSample>>,
     pub gpu_pct: Option<f32>,
     pub gpu_pct_by_pid: Option<BTreeMap<u32, f32>>,
+    #[serde(default)]
+    pub gpus: Option<Vec<GpuSample>>,
     /// Physical network throughput: hardware interfaces only (a vEthernet or VPN sees the same bytes).
     pub net_bps: Option<f64>,
     #[serde(default)]

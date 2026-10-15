@@ -10,10 +10,15 @@ pub struct SystemInfo {
     pub cpu_name: Option<String>,
     /// Configured memory speed in MT/s (SMBIOS), the fastest installed module.
     pub memory_speed_mts: Option<u32>,
+    /// Hardware GPUs in DXGI order.
+    pub gpus: Vec<crate::gpu::GpuInfo>,
+    /// Why GPU enumeration was incomplete (reported as source errors on every tick).
+    pub gpu_errors: Vec<String>,
 }
 
 pub fn read_system_info() -> SystemInfo {
-    SystemInfo { cpu_name: cpu_name(), memory_speed_mts: memory_speed_mts() }
+    let (gpus, gpu_errors) = crate::gpu::enumerate_gpus();
+    SystemInfo { cpu_name: cpu_name(), memory_speed_mts: memory_speed_mts(), gpus, gpu_errors }
 }
 
 pub fn cpu_name() -> Option<String> {

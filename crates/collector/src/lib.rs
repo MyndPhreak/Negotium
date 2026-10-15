@@ -1,4 +1,5 @@
 //! Windows data sources. The only crate besides `negotium-bench` that calls Windows APIs.
+pub mod gpu;
 pub mod identity;
 pub mod memory;
 pub mod net;
