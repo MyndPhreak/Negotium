@@ -6,6 +6,7 @@ pub mod format;
 pub mod graph;
 pub mod framestats;
 pub mod log;
+pub mod perf;
 pub mod platform;
 pub mod view;
 pub mod worker;

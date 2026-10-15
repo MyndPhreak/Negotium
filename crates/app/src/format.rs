@@ -40,6 +40,25 @@ pub fn bit_rate(bytes_per_s: f64) -> String {
     format!("{v:.1} {}", UNITS[u])
 }
 
+const GIB: f64 = (1u64 << 30) as f64;
+
+pub fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / GIB)
+}
+
+pub fn gb_of(used: u64, total: u64) -> String {
+    format!("{:.1} / {:.1} GB", used as f64 / GIB, total as f64 / GIB)
+}
+
+pub fn ghz(mhz: f32) -> String {
+    if mhz.is_finite() && mhz > 0.0 { format!("{:.2} GHz", mhz / 1000.0) } else { "—".to_string() }
+}
+
+/// Task Manager's "Up time": days:hours:minutes:seconds.
+pub fn uptime(secs: u64) -> String {
+    format!("{}:{:02}:{:02}:{:02}", secs / 86_400, secs / 3_600 % 24, secs / 60 % 60, secs % 60)
+}
+
 pub fn pct(p: f32) -> String {
     // `+ 0.0` normalises negative zero so we never print "-0%".
     format!("{}%", if p.is_finite() { p.round().clamp(0.0, 100.0) + 0.0 } else { 0.0 })
@@ -60,6 +79,16 @@ pub fn hung(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_speeds_and_uptime() {
+        assert_eq!(gb(7 << 30), "7.0 GB");
+        assert_eq!(gb_of(7 << 30, 16 << 30), "7.0 / 16.0 GB");
+        assert_eq!(ghz(3420.0), "3.42 GHz");
+        assert_eq!(ghz(0.0), "—");
+        assert_eq!(uptime(93_784), "1:02:03:04");
+        assert_eq!(uptime(59), "0:00:00:59");
+    }
 
     #[test]
     fn temperatures_round_to_whole_degrees() {

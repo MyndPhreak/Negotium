@@ -135,10 +135,7 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
         MeterView {
             label: "Memory",
             value: t.memory.as_ref().map(|m| format::pct(m.used as f32 / m.total.max(1) as f32 * 100.0)).unwrap_or_default(),
-            sub: t.memory.as_ref().map(|m| {
-                let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
-                format!("{:.1} / {:.1} GB", gb(m.used), gb(m.total))
-            }).unwrap_or_default(),
+            sub: t.memory.as_ref().map(|m| format::gb_of(m.used, m.total)).unwrap_or_default(),
             spark: spark(Series::MemUsed, mem_total),
             available: t.memory.is_some(),
         },

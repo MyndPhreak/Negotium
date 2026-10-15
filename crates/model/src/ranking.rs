@@ -9,8 +9,9 @@ use std::collections::HashMap;
 pub const RESORT_INTERVAL_MS: u64 = 2000;
 
 #[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Metric {
+    #[default]
     Cpu = 0,
     Memory = 1,
     Disk = 2,
