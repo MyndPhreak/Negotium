@@ -1,11 +1,11 @@
 //! PDH counter sets, read as formatted arrays. Each counter is optional: a missing
 //! counter set (e.g. no GPU counters in a VM) yields `None` for that reading only.
-use negotium_snapshot::DiskSample;
+use negotium_snapshot::{DiskSample, MemoryLists};
 use std::collections::BTreeMap;
 use windows::Win32::System::Performance::{
-    PDH_CSTATUS_NEW_DATA, PDH_FMT, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
-    PDH_MORE_DATA, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW,
+    PDH_CSTATUS_NEW_DATA, PDH_FMT, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER,
+    PDH_HQUERY, PDH_MORE_DATA, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
+    PdhGetFormattedCounterArrayW, PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -14,7 +14,9 @@ const PDH_FMT_NOCAP100: u32 = 0x0000_8000;
 
 pub struct PdhReadings {
     pub cpu_pct: Option<f32>,
-    pub per_core_pct: Vec<f32>,
+    pub per_core_pct: Vec<Option<f32>>,
+    pub cpu_mhz: Option<f32>,
+    pub mem_lists: Option<MemoryLists>,
     pub disks: Option<Vec<DiskSample>>,
     pub net_bps: Option<f64>,
     pub gpu_pct: Option<f32>,
@@ -22,14 +24,71 @@ pub struct PdhReadings {
     pub errors: Vec<String>,
 }
 
+type Counter = Result<PDH_HCOUNTER, u32>;
+
+/// Every counter of the query. A counter that could not be added stays `Err` and its reading is
+/// `None` (with an error line) every tick; the others are unaffected.
+pub(crate) struct Counters {
+    cpu: Counter,
+    cpu_freq: Counter,
+    cpu_perf: Counter,
+    mem_modified: Counter,
+    mem_standby_core: Counter,
+    mem_standby_normal: Counter,
+    mem_standby_reserve: Counter,
+    mem_free: Counter,
+    disk_idle: Counter,
+    disk_read: Counter,
+    disk_write: Counter,
+    net: Counter,
+    gpu: Counter,
+}
+
+impl Counters {
+    fn add_all(query: PDH_HQUERY) -> Self {
+        Self {
+            cpu: add(query, w!("\\Processor Information(*)\\% Processor Utility")),
+            cpu_freq: add(query, w!("\\Processor Information(_Total)\\Processor Frequency")),
+            cpu_perf: add(query, w!("\\Processor Information(_Total)\\% Processor Performance")),
+            mem_modified: add(query, w!("\\Memory\\Modified Page List Bytes")),
+            mem_standby_core: add(query, w!("\\Memory\\Standby Cache Core Bytes")),
+            mem_standby_normal: add(query, w!("\\Memory\\Standby Cache Normal Priority Bytes")),
+            mem_standby_reserve: add(query, w!("\\Memory\\Standby Cache Reserve Bytes")),
+            mem_free: add(query, w!("\\Memory\\Free & Zero Page List Bytes")),
+            disk_idle: add(query, w!("\\PhysicalDisk(*)\\% Idle Time")),
+            disk_read: add(query, w!("\\PhysicalDisk(*)\\Disk Read Bytes/sec")),
+            disk_write: add(query, w!("\\PhysicalDisk(*)\\Disk Write Bytes/sec")),
+            net: add(query, w!("\\Network Interface(*)\\Bytes Total/sec")),
+            gpu: add(query, w!("\\GPU Engine(*)\\Utilization Percentage")),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failed(status: u32) -> Self {
+        let f = Err(status);
+        Self {
+            cpu: f,
+            cpu_freq: f,
+            cpu_perf: f,
+            mem_modified: f,
+            mem_standby_core: f,
+            mem_standby_normal: f,
+            mem_standby_reserve: f,
+            mem_free: f,
+            disk_idle: f,
+            disk_read: f,
+            disk_write: f,
+            net: f,
+            gpu: f,
+        }
+    }
+}
+
 pub struct PdhSources {
     query: PDH_HQUERY,
-    cpu: Result<PDH_HCOUNTER, u32>,
-    disk_idle: Result<PDH_HCOUNTER, u32>,
-    disk_read: Result<PDH_HCOUNTER, u32>,
-    disk_write: Result<PDH_HCOUNTER, u32>,
-    net: Result<PDH_HCOUNTER, u32>,
-    gpu: Result<PDH_HCOUNTER, u32>,
+    counters: Counters,
+    /// Active logical processors per processor group, for placing per-core instances.
+    groups: Vec<u32>,
 }
 
 impl PdhSources {
@@ -40,15 +99,7 @@ impl PdhSources {
         if status != 0 {
             return Err(status);
         }
-        let sources = Self {
-            query,
-            cpu: add(query, w!("\\Processor Information(*)\\% Processor Utility")),
-            disk_idle: add(query, w!("\\PhysicalDisk(*)\\% Idle Time")),
-            disk_read: add(query, w!("\\PhysicalDisk(*)\\Disk Read Bytes/sec")),
-            disk_write: add(query, w!("\\PhysicalDisk(*)\\Disk Write Bytes/sec")),
-            net: add(query, w!("\\Network Interface(*)\\Bytes Total/sec")),
-            gpu: add(query, w!("\\GPU Engine(*)\\Utilization Percentage")),
-        };
+        let sources = Self { query, counters: Counters::add_all(query), groups: crate::processor_groups() };
         // SAFETY: valid query; first sample primes rate counters.
         unsafe { PdhCollectQueryData(query) };
         Ok(sources)
@@ -61,28 +112,22 @@ impl PdhSources {
         if status != 0 {
             errors.push(format!("pdh collect: {status:#010x}"));
         }
-        let mut get = |label: &str, c: Result<PDH_HCOUNTER, u32>| -> Option<Vec<(String, f64)>> {
-            let c = match c {
-                Ok(c) => c,
-                Err(status) => {
-                    errors.push(format!("pdh {label}: counter unavailable (add failed {status:#010x})"));
-                    return None;
-                }
-            };
-            match read_array(c) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    errors.push(format!("pdh {label}: {e:#010x}"));
-                    None
-                }
-            }
-        };
-        let cpu = get("cpu", self.cpu);
-        let idle = get("disk idle", self.disk_idle);
-        let read = get("disk read", self.disk_read);
-        let write = get("disk write", self.disk_write);
-        let net = get("network", self.net);
-        let gpu = get("gpu", self.gpu);
+        let c = &self.counters;
+        let cpu = get(&mut errors, "cpu", c.cpu, read_array);
+        let freq = get(&mut errors, "cpu frequency", c.cpu_freq, read_value);
+        let perf = get(&mut errors, "cpu performance", c.cpu_perf, read_value);
+        let modified = get(&mut errors, "memory modified", c.mem_modified, read_value);
+        let standby = [
+            get(&mut errors, "memory standby core", c.mem_standby_core, read_value),
+            get(&mut errors, "memory standby normal", c.mem_standby_normal, read_value),
+            get(&mut errors, "memory standby reserve", c.mem_standby_reserve, read_value),
+        ];
+        let free = get(&mut errors, "memory free", c.mem_free, read_value);
+        let idle = get(&mut errors, "disk idle", c.disk_idle, read_array);
+        let read = get(&mut errors, "disk read", c.disk_read, read_array);
+        let write = get(&mut errors, "disk write", c.disk_write, read_array);
+        let net = get(&mut errors, "network", c.net, read_array);
+        let gpu = get(&mut errors, "gpu", c.gpu, read_array);
 
         let (gpu_pct, gpu_pct_by_pid) = match gpu {
             Some(v) => {
@@ -93,7 +138,9 @@ impl PdhSources {
         };
         PdhReadings {
             cpu_pct: cpu.as_deref().and_then(total_from),
-            per_core_pct: cpu.as_deref().map(per_core_from).unwrap_or_default(),
+            per_core_pct: per_core_from(cpu.as_deref().unwrap_or_default(), &self.groups),
+            cpu_mhz: cpu_mhz(freq, perf),
+            mem_lists: memory_lists(modified, standby, free),
             disks: match (idle, read, write) {
                 (Some(i), Some(r), Some(w)) => Some(disks_from(&i, &r, &w)),
                 _ => None,
@@ -104,6 +151,47 @@ impl PdhSources {
             errors,
         }
     }
+}
+
+/// Reads one counter with `read`; a counter that failed to register or to read becomes `None`
+/// with an error line, so one bad counter never affects another.
+fn get<T>(
+    errors: &mut Vec<String>,
+    label: &str,
+    c: Counter,
+    read: impl FnOnce(PDH_HCOUNTER) -> Result<T, u32>,
+) -> Option<T> {
+    let c = match c {
+        Ok(c) => c,
+        Err(status) => {
+            errors.push(format!("pdh {label}: counter unavailable (add failed {status:#010x})"));
+            return None;
+        }
+    };
+    match read(c) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            errors.push(format!("pdh {label}: {e:#010x}"));
+            None
+        }
+    }
+}
+
+/// One formatted value of a single-instance counter (the `Memory` set, `_Total` instances).
+fn read_value(counter: PDH_HCOUNTER) -> Result<f64, u32> {
+    let mut value = PDH_FMT_COUNTERVALUE::default();
+    let format = PDH_FMT(PDH_FMT_DOUBLE.0 | PDH_FMT_NOCAP100);
+    // SAFETY: valid counter; `value` is a writable PDH_FMT_COUNTERVALUE.
+    let status = unsafe { PdhGetFormattedCounterValue(counter, format, None, &mut value) };
+    if status != 0 {
+        return Err(status);
+    }
+    if value.CStatus > PDH_CSTATUS_NEW_DATA {
+        return Err(value.CStatus);
+    }
+    // SAFETY: doubleValue is the active union member because we requested PDH_FMT_DOUBLE.
+    let v = unsafe { value.Anonymous.doubleValue };
+    Ok(if v.is_finite() { v } else { 0.0 })
 }
 
 impl Drop for PdhSources {
@@ -159,13 +247,30 @@ pub fn parse_core_instance(name: &str) -> Option<(u32, u32)> {
     Some((group.parse().ok()?, core.parse().ok()?))
 }
 
-pub fn per_core_from(items: &[(String, f64)]) -> Vec<f32> {
-    let mut cores: Vec<((u32, u32), f32)> = items
-        .iter()
-        .filter_map(|(n, v)| parse_core_instance(n).map(|k| (k, v.clamp(0.0, 100.0) as f32)))
-        .collect();
-    cores.sort_by_key(|(k, _)| *k);
-    cores.into_iter().map(|(_, v)| v).collect()
+/// Places each "group,core" instance at its logical index: group bases are the running sum of
+/// `groups`. Missing instances stay `None`, so a cell never shows another processor's value.
+pub fn per_core_from(items: &[(String, f64)], groups: &[u32]) -> Vec<Option<f32>> {
+    let mut out = vec![None; groups.iter().sum::<u32>() as usize];
+    for (name, v) in items {
+        let Some((g, c)) = parse_core_instance(name) else { continue };
+        let Some(&size) = groups.get(g as usize) else { continue };
+        if c < size {
+            let base: u32 = groups[..g as usize].iter().sum();
+            out[(base + c) as usize] = Some(v.clamp(0.0, 100.0) as f32);
+        }
+    }
+    out
+}
+
+/// Task Manager's "Speed": the nominal frequency scaled by "% Processor Performance".
+pub fn cpu_mhz(freq_mhz: Option<f64>, perf_pct: Option<f64>) -> Option<f32> {
+    let (f, p) = (freq_mhz?, perf_pct?);
+    (f > 0.0).then(|| (f * p / 100.0) as f32)
+}
+
+pub fn memory_lists(modified: Option<f64>, standby: [Option<f64>; 3], free: Option<f64>) -> Option<MemoryLists> {
+    let standby: f64 = standby.into_iter().sum::<Option<f64>>()?;
+    Some(MemoryLists { modified: modified?.max(0.0) as u64, standby: standby.max(0.0) as u64, free: free?.max(0.0) as u64 })
 }
 
 pub fn total_from(items: &[(String, f64)]) -> Option<f32> {
@@ -229,10 +334,30 @@ mod tests {
     }
 
     #[test]
-    fn per_core_orders_by_group_then_core_and_clamps() {
-        let v = items(&[("1,0", 50.0), ("0,10", 10.0), ("0,2", 120.0), ("_Total", 40.0), ("0,_Total", 30.0)]);
-        assert_eq!(per_core_from(&v), vec![100.0, 10.0, 50.0]);
+    fn per_core_places_each_instance_at_its_logical_index() {
+        // Two processor groups of 4 and 2. "0,1", "0,2" and "1,0" had no valid data this tick
+        // (filtered by CStatus), "1,5" does not exist in group 1.
+        let v = items(&[("0,0", 10.0), ("0,3", 120.0), ("1,1", 50.0), ("1,5", 99.0), ("_Total", 40.0), ("0,_Total", 30.0)]);
+        assert_eq!(per_core_from(&v, &[4, 2]), vec![Some(10.0), None, None, Some(100.0), None, Some(50.0)]);
         assert_eq!(total_from(&v), Some(40.0));
+        assert_eq!(per_core_from(&[], &[2]), vec![None, None], "no data still yields one slot per processor");
+    }
+
+    #[test]
+    fn cpu_speed_is_the_nominal_frequency_scaled_by_performance() {
+        assert_eq!(cpu_mhz(Some(3000.0), Some(120.0)), Some(3600.0));
+        assert_eq!(cpu_mhz(Some(3000.0), None), None);
+        assert_eq!(cpu_mhz(Some(0.0), Some(100.0)), None);
+    }
+
+    #[test]
+    fn memory_lists_add_the_three_standby_priorities() {
+        let gb = |n: f64| Some(n * 1_073_741_824.0);
+        let l = memory_lists(gb(1.0), [gb(0.5), gb(2.0), gb(0.25)], gb(4.0)).unwrap();
+        assert_eq!(l.modified, 1 << 30);
+        assert_eq!(l.standby, (11 << 30) / 4);
+        assert_eq!(l.free, 4 << 30);
+        assert_eq!(memory_lists(gb(1.0), [gb(0.5), None, gb(0.25)], gb(4.0)), None);
     }
 
     #[test]
@@ -284,24 +409,15 @@ mod tests {
         let mut query = PDH_HQUERY::default();
         // SAFETY: opening a real-time query with no data source; owned by `sources` below.
         assert_eq!(unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) }, 0);
-        let failed = Err(0xC0000BB8u32);
         // Dropping `sources` closes the query.
-        let mut sources = PdhSources {
-            query,
-            cpu: failed,
-            disk_idle: failed,
-            disk_read: failed,
-            disk_write: failed,
-            net: failed,
-            gpu: failed,
-        };
+        let mut sources = PdhSources { query, counters: Counters::failed(0xC0000BB8), groups: vec![2] };
         let r = sources.read();
         assert!(r.cpu_pct.is_none() && r.disks.is_none() && r.net_bps.is_none() && r.gpu_pct.is_none());
-        assert!(
-            r.errors.iter().any(|e| e == "pdh cpu: counter unavailable (add failed 0xc0000bb8)"),
-            "errors: {:?}",
-            r.errors
-        );
-        assert_eq!(r.errors.iter().filter(|e| e.contains("counter unavailable")).count(), 6);
+        assert!(r.cpu_mhz.is_none() && r.mem_lists.is_none());
+        assert_eq!(r.per_core_pct, vec![None, None]);
+        for label in ["cpu", "cpu frequency", "cpu performance", "memory modified", "memory free"] {
+            let want = format!("pdh {label}: counter unavailable (add failed 0xc0000bb8)");
+            assert!(r.errors.contains(&want), "missing {want:?} in {:?}", r.errors);
+        }
     }
 }

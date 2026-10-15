@@ -40,17 +40,48 @@ pub struct DiskSample {
     pub write_bps: f64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The kernel's page lists (PDH `Memory` counter set), for the memory composition bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryLists {
+    pub modified: u64,
+    /// Standby cache, all priorities.
+    pub standby: u64,
+    /// Free and zeroed pages.
+    pub free: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryTotals {
     pub total: u64,
     pub used: u64,
+    /// Committed bytes and the commit limit (RAM + page files).
+    #[serde(default)]
+    pub commit_total: u64,
+    #[serde(default)]
+    pub commit_limit: u64,
+    #[serde(default)]
+    pub lists: Option<MemoryLists>,
+    /// Resident size of the memory compression store (the "Memory Compression" process).
+    #[serde(default)]
+    pub compressed: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SystemTotals {
     pub logical_cpus: u32,
     pub cpu_pct: Option<f32>,
-    pub per_core_pct: Vec<f32>,
+    /// Utility of each logical processor, indexed by its ordinal across processor groups (group 0's
+    /// processors first). `None` for a processor whose counter had no valid data this tick, so an
+    /// index always means the same processor.
+    pub per_core_pct: Vec<Option<f32>>,
+    /// Current speed: nominal frequency × "% Processor Performance".
+    #[serde(default)]
+    pub cpu_mhz: Option<f32>,
+    #[serde(default)]
+    pub uptime_s: u64,
+    /// Local wall-clock time when the tick was taken, milliseconds since midnight.
+    #[serde(default)]
+    pub local_time_ms: u64,
     pub memory: Option<MemoryTotals>,
     pub disks: Option<Vec<DiskSample>>,
     pub gpu_pct: Option<f32>,

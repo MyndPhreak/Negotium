@@ -12,7 +12,7 @@ pub const TOP_PER_METRIC: usize = 10;
 pub struct HistorySample {
     pub t_ms: u64,
     pub cpu_pct: Option<f32>,
-    pub per_core_pct: Vec<f32>,
+    pub per_core_pct: Vec<Option<f32>>,
     pub mem_used: Option<u64>,
     pub disk_active_pct: Option<f32>,
     pub gpu_pct: Option<f32>,
@@ -143,7 +143,7 @@ impl History {
             .iter()
             .map(|s| {
                 size_of::<HistorySample>()
-                    + s.per_core_pct.capacity() * size_of::<f32>()
+                    + s.per_core_pct.capacity() * size_of::<Option<f32>>()
                     + s.top.iter().map(|t| t.capacity() * size_of::<(u32, f32)>()).sum::<usize>()
             })
             .sum();
@@ -166,7 +166,7 @@ mod tests {
         }
     }
     fn totals(cpu: f32, cores: usize) -> SystemTotals {
-        SystemTotals { logical_cpus: cores as u32, cpu_pct: Some(cpu), per_core_pct: vec![cpu; cores], ..Default::default() }
+        SystemTotals { logical_cpus: cores as u32, cpu_pct: Some(cpu), per_core_pct: vec![Some(cpu); cores], ..Default::default() }
     }
 
     #[test]

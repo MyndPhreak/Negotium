@@ -318,7 +318,7 @@ mod tests {
     fn snap(cpu: Option<f32>) -> Snapshot {
         Snapshot {
             taken_at_ms: 60_000,
-            totals: SystemTotals { logical_cpus: 4, cpu_pct: cpu, memory: Some(MemoryTotals { total: 16 << 30, used: 8 << 30 }), ..Default::default() },
+            totals: SystemTotals { logical_cpus: 4, cpu_pct: cpu, memory: Some(MemoryTotals { total: 16 << 30, used: 8 << 30, ..Default::default() }), ..Default::default() },
             ..Default::default()
         }
     }
