@@ -121,7 +121,7 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     let span = SPARK_SECONDS * 1000;
     let now = snap.taken_at_ms;
     let since = now.saturating_sub(span);
-    let spark = |key: Series, max: f32| graph::shape(history.points(&key, since), now, span, max, SPARK_SECONDS as usize).line;
+    let spark = |key: Series, max: f32| graph::line(history.points(&key, since), now, span, max, SPARK_SECONDS as usize);
     let mem_total = t.memory.as_ref().map(|m| m.total as f32).unwrap_or(0.0);
     let net_max = history.points(&Series::NetTotal, since).filter_map(|(_, v)| v).fold(0.0f32, f32::max).max(t.net_bps.unwrap_or(0.0) as f32);
     vec![
@@ -373,7 +373,7 @@ mod tests {
         h.push(60_000, &s.totals, &[]);
         let mut ids = IdMap::new();
         let f = build_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
-        assert_eq!(f.meters[4].spark, "M 1000.0 100.0");
+        assert_eq!(f.meters[4].spark, "M 1000.0 100.0 L 1000.1 100.0");
     }
 
     #[test]
