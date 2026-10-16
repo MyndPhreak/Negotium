@@ -2,7 +2,7 @@
 //! Frames. A panic anywhere in a tick rebuilds the pipeline after a backoff (spec section 7).
 use crate::controls::{Controls, Page};
 use crate::perf::{PerfInput, build_perf};
-use crate::view::{Frame, FrameOptions, IdMap, build_frame};
+use crate::view::{Frame, FrameOptions, IdMap, IdSeed, build_frame};
 use negotium_collector::{Collector, SystemInfo};
 use negotium_history::History;
 use negotium_model::{Model, Ranker};
@@ -109,10 +109,10 @@ pub struct LiveSource {
 }
 
 impl LiveSource {
-    /// `history` and `epoch` outlive a restart after a panic, so the graphs keep their past. A
-    /// poisoned lock means a write was cut short (see `write_history`): the possibly half-written
-    /// history starts over empty.
-    pub fn new(history: SharedHistory, epoch: Instant) -> Self {
+    /// `history`, `epoch` and `ids` outlive a restart after a panic, so the graphs keep their past
+    /// and no row id the UI still holds comes to name another app. A poisoned lock means a write was
+    /// cut short (see `write_history`): the possibly half-written history starts over empty.
+    pub fn new(history: SharedHistory, epoch: Instant, ids: IdSeed) -> Self {
         if history.is_poisoned() {
             *history.lock().unwrap_or_else(|e| e.into_inner()) = History::new();
             history.clear_poison();
@@ -125,7 +125,7 @@ impl LiveSource {
             model: Model::new(),
             ranker: Ranker::new(),
             history,
-            ids: IdMap::new(),
+            ids: IdMap::with_seed(ids),
             elevated: negotium_actions::is_elevated(),
             log: crate::log::Log::new(crate::log::Log::default_path()),
         }
@@ -192,11 +192,12 @@ pub fn spawn(
     sink: impl FnMut(Frame) + Send + 'static,
 ) -> std::thread::JoinHandle<u32> {
     let epoch = Instant::now();
+    let ids = IdSeed::default();
     std::thread::Builder::new()
         .name("negotium-worker".into())
         .spawn(move || {
             let mut log = crate::log::Log::new(crate::log::Log::default_path());
-            supervise(move || LiveSource::new(history.clone(), epoch), controls, sink, move |m: &str| log.warn(m))
+            supervise(move || LiveSource::new(history.clone(), epoch, ids.clone()), controls, sink, move |m: &str| log.warn(m))
         })
         .expect("spawn worker thread")
 }
@@ -219,7 +220,7 @@ mod tests {
     #[test]
     fn only_the_visible_page_is_built_while_collection_keeps_running() {
         use crate::controls::Page;
-        let mut source = LiveSource::new(SharedHistory::default(), Instant::now());
+        let mut source = LiveSource::new(SharedHistory::default(), Instant::now(), IdSeed::default());
         let dir = std::env::temp_dir().join(format!("negotium-worker-test-{}", std::process::id()));
         source.log = crate::log::Log::new(dir.join("negotium.log"));
         let controls = Controls::default();
@@ -248,6 +249,24 @@ mod tests {
         controls.set_page(Page::Overview);
         let f = source.next_frame(&controls).expect("visible again");
         assert!(f.perf.is_none() && !f.rows.is_empty(), "switching back stops building Performance");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_restarted_worker_never_reuses_a_row_id_the_ui_may_still_hold() {
+        let (history, ids) = (SharedHistory::default(), IdSeed::default());
+        let dir = std::env::temp_dir().join(format!("negotium-worker-ids-{}", std::process::id()));
+        let controls = Controls::default();
+        let mut frame = |source: &mut LiveSource| {
+            source.log = crate::log::Log::new(dir.join("negotium.log"));
+            source.next_frame(&controls).expect("visible: a frame")
+        };
+        let a = frame(&mut LiveSource::new(history.clone(), Instant::now(), ids.clone()));
+        // The supervisor's restart: a fresh source on the same history and id seed.
+        let b = frame(&mut LiveSource::new(history.clone(), Instant::now(), ids.clone()));
+        assert!(!a.targets.is_empty() && !b.targets.is_empty());
+        let reused: Vec<&i32> = a.targets.keys().filter(|id| b.targets.contains_key(id)).collect();
+        assert!(reused.is_empty(), "ids from before the restart were handed out again: {reused:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -281,7 +300,7 @@ mod tests {
         let r = catch_unwind(|| read_history(&history, |_| -> Frame { panic!("test panic: view building") }));
         assert_eq!(panic_text(&*r.expect_err("the panic reaches the supervisor")), "test panic: view building");
         assert!(!history.is_poisoned(), "a read never poisons the lock");
-        let source = LiveSource::new(history.clone(), Instant::now());
+        let source = LiveSource::new(history.clone(), Instant::now(), IdSeed::default());
         assert_eq!(source.history.lock().unwrap().len(), 1, "the restarted worker keeps the history");
     }
 
@@ -292,7 +311,7 @@ mod tests {
         let r = catch_unwind(|| write_history(&history, |_| panic!("test panic: mid-push")));
         assert!(r.is_err());
         assert!(history.is_poisoned());
-        let _source = LiveSource::new(history.clone(), Instant::now());
+        let _source = LiveSource::new(history.clone(), Instant::now(), IdSeed::default());
         assert!(!history.is_poisoned(), "the poison is cleared");
         assert!(history.lock().expect("lockable again").is_empty(), "a possibly half-written history starts over");
     }

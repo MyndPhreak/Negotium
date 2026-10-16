@@ -59,25 +59,37 @@ enum RowKey {
     Proc(u32, i64),
 }
 
-/// Stable small ids for rows across frames; ids of rows not seen in a frame are released.
+/// The id counter shared by every IdMap of one run of the app. A worker restarted after a panic
+/// builds a fresh IdMap, while the UI still holds ids from before (frozen rows, the keyboard-current
+/// row, expanded apps, an open menu's target): drawing from the same counter, the new map never
+/// gives one of those ids to another app, so they become exited and inert.
+pub type IdSeed = std::sync::Arc<std::sync::atomic::AtomicI32>;
+
+/// Stable small ids for rows across frames; ids of rows not seen in a frame are released (and
+/// never handed out again: see [`IdSeed`]).
 #[derive(Default)]
 pub struct IdMap {
     ids: HashMap<RowKey, i32>,
-    next: i32,
+    next: IdSeed,
 }
 
 impl IdMap {
     pub fn new() -> Self {
         Self::default()
     }
+    /// A map drawing its ids from `seed`, shared with the maps before and after it.
+    pub fn with_seed(seed: IdSeed) -> Self {
+        Self { ids: HashMap::new(), next: seed }
+    }
     fn id(&mut self, key: RowKey, seen: &mut HashSet<RowKey>) -> i32 {
         seen.insert(key.clone());
         if let Some(&id) = self.ids.get(&key) {
             return id;
         }
-        self.next += 1;
-        self.ids.insert(key, self.next);
-        self.next
+        // Only the worker thread draws ids; the atomic just lets the seed outlive a restart.
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.ids.insert(key, id);
+        id
     }
     fn retain(&mut self, seen: &HashSet<RowKey>) {
         self.ids.retain(|k, _| seen.contains(k));
@@ -331,6 +343,32 @@ mod tests {
             taken_at_ms: 60_000,
             totals: SystemTotals { logical_cpus: 4, cpu_pct: cpu, memory: Some(MemoryTotals { total: 16 << 30, used: 8 << 30, ..Default::default() }), ..Default::default() },
             ..Default::default()
+        }
+    }
+
+    /// A worker restart builds a fresh IdMap while the UI still holds the old ids (frozen rows,
+    /// the current row, a menu's target): no old id may come to name another app.
+    #[test]
+    fn a_restarted_id_map_never_gives_an_old_id_to_another_row() {
+        let seed = IdSeed::default();
+        let s = snap(Some(1.0));
+        let before = vec![
+            app(1, "Chrome", 30.0, vec![proc(1, 0, 20.0, "chrome.exe"), proc(2, 1, 10.0, "chrome.exe")], None),
+            app(3, "Editor", 5.0, vec![proc(3, 0, 5.0, "code.exe")], None),
+        ];
+        let a = build_frame(&mut IdMap::with_seed(seed.clone()), &s, &before, &[0, 1], &History::new(), &opts(Metric::Cpu, true));
+        // Restarted: a fresh map, and other apps rank first now.
+        let after = vec![
+            app(5, "Mail", 50.0, vec![proc(5, 0, 50.0, "mail.exe"), proc(6, 5, 1.0, "mail.exe")], None),
+            app(3, "Editor", 5.0, vec![proc(3, 0, 5.0, "code.exe")], None),
+            app(1, "Chrome", 1.0, vec![proc(1, 0, 1.0, "chrome.exe"), proc(2, 1, 0.0, "chrome.exe")], None),
+        ];
+        let b = build_frame(&mut IdMap::with_seed(seed.clone()), &s, &after, &[0, 1, 2], &History::new(), &opts(Metric::Cpu, true));
+        assert!(!a.targets.is_empty() && !b.targets.is_empty());
+        for (id, old) in &a.targets {
+            if let Some(new) = b.targets.get(id) {
+                assert_eq!((&new.name, new.root, &new.procs), (&old.name, old.root, &old.procs), "id {id} now names another row");
+            }
         }
     }
 
