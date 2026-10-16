@@ -1,4 +1,5 @@
 import { Theme } from "theme.slint";
+import { FocusButton } from "focusbutton.slint";
 
 export struct TileData { id: int, name: string, value: string, weight: float, hung: bool }
 
@@ -14,30 +15,16 @@ export component TopStrip inherits VerticalLayout {
         height: 52px;
         max-width: 16384px; // see MetersRow: empty repeaters must not cap the window width
         spacing: 4px;
-        for t in tiles : Rectangle {
+        for t in tiles : FocusButton {
             horizontal-stretch: max(t.weight, 0.0001);
             min-width: 28px;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);
-            border-width: fs.has-focus ? 2px : 0px;
+            border-width: self.focused ? 2px : 0px;
             border-color: Theme.text;
-            accessible-role: button;
             accessible-label: t.name + " tile";
-            accessible-action-default => { root.open(t.id); }
-            fs := FocusScope {
-                enabled: root.interactive;
-                key-pressed(event) => {
-                    if (event.text == " " || event.text == Key.Return) {
-                        root.open(t.id);
-                        return accept;
-                    }
-                    return reject;
-                }
-            }
-            TouchArea {
-                enabled: root.interactive;
-                clicked => { fs.focus(); root.open(t.id); }
-            }
+            interactive: root.interactive;
+            activated => { root.open(t.id); }
             VerticalLayout {
                 padding: 6px;
                 Text { text: (t.hung ? "⚠ " : "") + t.name; color: Theme.text; font-size: 12px; overflow: elide; }

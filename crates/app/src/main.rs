@@ -121,16 +121,10 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
-        let (controls, weak, b) = (controls.clone(), weak.clone(), bridge.clone());
+        let (weak, b) = (weak.clone(), bridge.clone());
         ui.on_select_page(move |i| {
-            let page = negotium::controls::Page::from_index(i);
-            controls.set_page(page);
-            if page != negotium::controls::Page::Overview {
-                // The hidden list can't report pointer-leave: release the hover freeze here.
-                b.borrow_mut().set_hover(false);
-            }
             if let Some(ui) = weak.upgrade() {
-                ui.set_page(page.index());
+                b.borrow_mut().set_page(&ui, negotium::controls::Page::from_index(i));
             }
         });
     }
@@ -140,6 +134,16 @@ fn main() -> Result<(), slint::PlatformError> {
             controls.select_device(&id);
             if let Some(ui) = weak.upgrade() {
                 ui.set_perf_selected(id);
+            }
+        });
+    }
+    {
+        let (controls, weak) = (controls.clone(), weak.clone());
+        ui.on_select_range(move |i| {
+            let range = negotium::perf::Range::from_index(i);
+            controls.set_range(range);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_perf_range(range.index());
             }
         });
     }

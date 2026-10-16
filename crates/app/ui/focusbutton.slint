@@ -1,4 +1,4 @@
-// The one focusable button behaviour shared by meters, rail items and device buttons: button
+// The one focusable button behaviour shared by meters, tiles, rail items, device and range buttons: button
 // semantics, a click focuses and activates, Space or Return activates, and the screen reader's
 // default action activates. Each user draws its own look from `focused` and `hovered`.
 export component FocusButton inherits Rectangle {
@@ -7,7 +7,12 @@ export component FocusButton inherits Rectangle {
     out property <bool> hovered: ta.has-hover;
     callback activated();
     accessible-role: button;
-    accessible-action-default => { root.activated(); }
+    // A modal disables the controls beneath it; a screen reader must not activate them either.
+    accessible-action-default => {
+        if (root.interactive) {
+            root.activated();
+        }
+    }
     fs := FocusScope {
         enabled: root.interactive;
         key-pressed(event) => {

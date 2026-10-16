@@ -1,9 +1,9 @@
 //! UI-thread glue: applies worker Frames to Slint models in place and keeps
 //! expand/search state local so they react instantly. No Windows calls here.
 use crate::controls::{Controls, Page};
-use crate::perf::PerfFrame;
+use crate::perf::{GraphView, PerfFrame};
 use crate::view::{Frame, RowView, Target, visible_rows};
-use crate::{DeviceData, MainWindow, MeterData, RowData, TileData};
+use crate::{DeviceData, GraphData, MainWindow, MeterData, RowData, SegmentData, StatData, TileData};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -167,6 +167,10 @@ pub struct Bridge {
     tiles: Rc<VecModel<TileData>>,
     rows: Rc<VecModel<RowData>>,
     perf_devices: Rc<VecModel<DeviceData>>,
+    perf_graphs: Rc<VecModel<GraphData>>,
+    perf_cells: Rc<VecModel<GraphData>>,
+    perf_stats: Rc<VecModel<StatData>>,
+    perf_segments: Rc<VecModel<SegmentData>>,
     /// The Performance frame on screen (the scrub reads its graph window).
     pub last_perf: Option<PerfFrame>,
     expanded: HashSet<i32>,
@@ -193,6 +197,10 @@ impl Bridge {
             tiles: Rc::new(VecModel::default()),
             rows: Rc::new(VecModel::default()),
             perf_devices: Rc::new(VecModel::default()),
+            perf_graphs: Rc::new(VecModel::default()),
+            perf_cells: Rc::new(VecModel::default()),
+            perf_stats: Rc::new(VecModel::default()),
+            perf_segments: Rc::new(VecModel::default()),
             last_perf: None,
             expanded: HashSet::new(),
             auto_expanded: HashSet::new(),
@@ -211,7 +219,21 @@ impl Bridge {
         ui.set_tiles(ModelRc::from(b.tiles.clone()));
         ui.set_rows(ModelRc::from(b.rows.clone()));
         ui.set_perf_devices(ModelRc::from(b.perf_devices.clone()));
+        ui.set_perf_graphs(ModelRc::from(b.perf_graphs.clone()));
+        ui.set_perf_cells(ModelRc::from(b.perf_cells.clone()));
+        ui.set_perf_stats(ModelRc::from(b.perf_stats.clone()));
+        ui.set_perf_segments(ModelRc::from(b.perf_segments.clone()));
         Rc::new(RefCell::new(b))
+    }
+
+    /// The user picked `page` on the rail.
+    pub fn set_page(&mut self, ui: &MainWindow, page: Page) {
+        self.controls.set_page(page);
+        if page != Page::Overview {
+            // The hidden list can't report pointer-leave: release the hover freeze here.
+            self.set_hover(false);
+        }
+        ui.set_page(page.index());
     }
 
     pub fn apply(&mut self, ui: &MainWindow, frame: Frame) {
@@ -243,6 +265,18 @@ impl Bridge {
         ui.set_perf_selected(p.selected.as_str().into());
         ui.set_perf_title(p.title.as_str().into());
         ui.set_perf_subtitle(p.subtitle.as_str().into());
+        let graph = |g: &GraphView| GraphData {
+            label: g.label.as_str().into(), value: g.value.as_str().into(), scale: g.scale.as_str().into(),
+            line: g.line.as_str().into(), area: g.area.as_str().into(), line2: g.line2.as_str().into(),
+        };
+        sync_model(&*self.perf_graphs, p.graphs.iter().map(graph).collect());
+        sync_model(&*self.perf_cells, p.cells.iter().map(graph).collect());
+        sync_model(&*self.perf_stats, p.stats.iter().map(|s| StatData { label: s.label.as_str().into(), value: s.value.as_str().into() }).collect());
+        sync_model(&*self.perf_segments, p.segments.iter().map(|s| SegmentData {
+            label: s.label.as_str().into(), value: s.value.as_str().into(), fraction: s.fraction,
+        }).collect());
+        ui.set_perf_note(p.note.as_str().into());
+        ui.set_perf_range(p.range.index());
         self.last_perf = Some(p);
     }
 

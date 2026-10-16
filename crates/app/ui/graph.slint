@@ -1,0 +1,58 @@
+import { Theme } from "theme.slint";
+
+export struct GraphData { label: string, value: string, scale: string, line: string, area: string, line2: string }
+
+// A time graph: grid, translucent area, line and an optional second line (write / send). The
+// paths come from crate::graph for a 1000 × 100 view box, newest sample on the right edge.
+export component Graph inherits Rectangle {
+    in property <GraphData> data;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    background: Theme.card;
+    clip: true;
+    accessible-role: image;
+    accessible-label: root.data.label + " graph";
+    for i in 3 : Rectangle {
+        x: 0;
+        y: root.height * (i + 1) / 4;
+        width: root.width;
+        height: 1px;
+        background: Theme.card-border;
+    }
+    Path {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        viewbox-width: 1000;
+        viewbox-height: 100;
+        commands: root.data.area;
+        fill: Theme.accent.with-alpha(0.16);
+        stroke: transparent;
+    }
+    Path {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        viewbox-width: 1000;
+        viewbox-height: 100;
+        commands: root.data.line;
+        fill: transparent;
+        stroke: Theme.accent;
+        stroke-width: 1.5px;
+    }
+    Path {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        viewbox-width: 1000;
+        viewbox-height: 100;
+        commands: root.data.line2;
+        fill: transparent;
+        stroke: Theme.muted;
+        stroke-width: 1.5px;
+    }
+}

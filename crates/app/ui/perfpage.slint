@@ -1,8 +1,11 @@
-import { ListView } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
+import { Graph, GraphData } from "graph.slint";
 
 export struct DeviceData { id: string, title: string, value: string, spark: string }
+export struct StatData { label: string, value: string }
+export struct SegmentData { label: string, value: string, fraction: float }
 
 component DeviceButton inherits FocusButton {
     in property <DeviceData> data;
@@ -41,16 +44,55 @@ component DeviceButton inherits FocusButton {
     }
 }
 
+// A graph range choice ("1 min", "10 min", "1 h"); the selected one is filled with the accent.
+component RangeButton inherits FocusButton {
+    in property <string> label;
+    in property <bool> selected;
+    width: 64px;
+    height: 28px;
+    border-radius: 4px;
+    background: root.selected ? Theme.accent : (root.hovered ? Theme.card : transparent);
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.text : Theme.card-border;
+    accessible-label: root.label + " range";
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    Text {
+        text: root.label;
+        color: root.selected ? #ffffff : Theme.text;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 export component PerformancePage inherits HorizontalLayout {
     in property <[DeviceData]> devices;
     in property <string> selected;
     in property <string> title;
     in property <string> subtitle;
+    in property <string> note;
+    in property <[GraphData]> graphs;
+    in property <[GraphData]> cells;
+    in property <[StatData]> stats;
+    in property <[SegmentData]> segments;
+    in property <int> range;
     in property <bool> interactive: true;
     callback select-device(string);
+    callback select-range(int);
     max-width: 16384px; // see MetersRow: repeaters must not cap the window width
     padding: 12px;
     spacing: 12px;
+
+    // Composition segments shade from the full accent colour down.
+    pure function segment-alpha(i: int) -> float {
+        if (i == 0) { return 1.0; }
+        if (i == 1) { return 0.75; }
+        if (i == 2) { return 0.5; }
+        if (i == 3) { return 0.3; }
+        return 0.12;
+    }
+
     ListView {
         width: 220px;
         for d in root.devices : DeviceButton {
@@ -60,15 +102,100 @@ export component PerformancePage inherits HorizontalLayout {
             activated => { root.select-device(d.id); }
         }
     }
-    // The detail area takes its natural height at the top; spare height stays empty below it.
-    VerticalLayout {
+    // The detail area takes its natural height at the top and scrolls when it is taller.
+    sv := ScrollView {
         horizontal-stretch: 1;
-        alignment: start;
-        spacing: 8px;
-        HorizontalLayout {
-            spacing: 12px;
-            Text { text: root.title; color: Theme.text; font-size: 24px; font-weight: 600; }
-            Text { text: root.subtitle; color: Theme.muted; font-size: 13px; vertical-alignment: bottom; overflow: elide; horizontal-stretch: 1; }
+        content-width: self.visible-width;
+        content-height: detail.preferred-height;
+        detail := VerticalLayout {
+            width: sv.visible-width;
+            max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+            alignment: start;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 12px;
+                Text { text: root.title; color: Theme.text; font-size: 24px; font-weight: 600; }
+                Text { text: root.subtitle; color: Theme.muted; font-size: 13px; vertical-alignment: bottom; overflow: elide; horizontal-stretch: 1; }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                RangeButton { label: "1 min"; selected: root.range == 0; interactive: root.interactive; activated => { root.select-range(0); } }
+                RangeButton { label: "10 min"; selected: root.range == 1; interactive: root.interactive; activated => { root.select-range(1); } }
+                RangeButton { label: "1 h"; selected: root.range == 2; interactive: root.interactive; activated => { root.select-range(2); } }
+            }
+            for g in root.graphs : VerticalLayout {
+                spacing: 2px;
+                HorizontalLayout {
+                    Text { text: g.label; color: Theme.muted; font-size: 12px; horizontal-stretch: 1; }
+                    Text { text: g.scale; color: Theme.muted; font-size: 11px; }
+                }
+                Graph { height: 180px; data: g; }
+                Text { text: g.value; color: Theme.text; font-size: 14px; font-weight: 600; }
+            }
+            if root.segments.length > 0 : VerticalLayout {
+                spacing: 6px;
+                Text { text: "Memory composition"; color: Theme.muted; font-size: 12px; }
+                HorizontalLayout {
+                    height: 22px;
+                    spacing: 2px;
+                    max-width: 16384px;
+                    for s[i] in root.segments : Rectangle {
+                        horizontal-stretch: max(s.fraction, 0.0001);
+                        min-width: 2px;
+                        border-radius: 2px;
+                        background: Theme.accent.with-alpha(root.segment-alpha(i));
+                        accessible-role: text;
+                        accessible-label: s.label + " " + s.value;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+                    max-width: 16384px;
+                    for s[i] in root.segments : HorizontalLayout {
+                        spacing: 4px;
+                        Rectangle {
+                            width: 10px;
+                            border-radius: 2px;
+                            background: Theme.accent.with-alpha(root.segment-alpha(i));
+                        }
+                        Text { text: s.label + " " + s.value; color: Theme.text; font-size: 11px; }
+                    }
+                }
+            }
+            // Small multiples (per-core, per-engine), wrapped into as many columns as fit. Cell n
+            // always sits at grid position n, so processor n keeps its place.
+            cells-host := Rectangle {
+                property <int> cols: max(1, floor(sv.visible-width / 120px));
+                property <length> cw: (sv.visible-width - (self.cols - 1) * 6px) / self.cols;
+                height: ceil(root.cells.length / self.cols) * 70px;
+                for c[i] in root.cells : VerticalLayout {
+                    x: mod(i, cells-host.cols) * (cells-host.cw + 6px);
+                    y: floor(i / cells-host.cols) * 70px;
+                    width: cells-host.cw;
+                    height: 64px;
+                    Text { text: c.label + "  " + c.value; color: Theme.muted; font-size: 10px; overflow: elide; }
+                    Graph { data: c; vertical-stretch: 1; }
+                }
+            }
+            stats-host := Rectangle {
+                property <int> cols: max(1, floor(sv.visible-width / 180px));
+                height: ceil(root.stats.length / self.cols) * 44px;
+                for s[i] in root.stats : Rectangle {
+                    x: mod(i, stats-host.cols) * 180px;
+                    y: floor(i / stats-host.cols) * 44px;
+                    width: 172px;
+                    height: 40px;
+                    accessible-role: text;
+                    accessible-label: s.label + " " + s.value;
+                    VerticalLayout {
+                        Text { text: s.label; color: Theme.muted; font-size: 11px; }
+                        Text { text: s.value; color: Theme.text; font-size: 14px; font-weight: 600; overflow: elide; }
+                    }
+                }
+            }
+            if root.note != "" : Text { text: root.note; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
         }
     }
 }

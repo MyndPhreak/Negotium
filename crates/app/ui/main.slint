@@ -4,9 +4,10 @@ import { TopStrip, TileData } from "topstrip.slint";
 import { AppList, RowData } from "applist.slint";
 import { Banner, Toast, Modal } from "overlays.slint";
 import { Rail } from "rail.slint";
-import { PerformancePage, DeviceData } from "perfpage.slint";
+import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
+import { GraphData } from "graph.slint";
 export { NegotiumTray } from "tray.slint";
-export { Theme, MeterData, TileData, RowData, DeviceData }
+export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -36,6 +37,13 @@ export component MainWindow inherits Window {
     in-out property <string> perf-selected: "cpu";
     in property <string> perf-title;
     in property <string> perf-subtitle;
+    in property <string> perf-note;
+    in property <[GraphData]> perf-graphs;
+    in property <[GraphData]> perf-cells;
+    in property <[StatData]> perf-stats;
+    in property <[SegmentData]> perf-segments;
+    // Graph range: 0 = 1 min, 1 = 10 min, 2 = 1 h (crate::perf::Range).
+    in-out property <int> perf-range: 0;
     out property <bool> modal-open: confirm-visible || details-visible;
     out property <int> menu-target: list.menu-target;
 
@@ -55,6 +63,7 @@ export component MainWindow inherits Window {
     callback close-details();
     callback dismiss-toast();
     callback select-device(string);
+    callback select-range(int);
 
     // has-hover only re-evaluates on the next pointer event, so release the list freeze explicitly
     // when a modal opens and re-evaluate it when the modal closes.
@@ -155,8 +164,15 @@ export component MainWindow inherits Window {
                     selected: root.perf-selected;
                     title: root.perf-title;
                     subtitle: root.perf-subtitle;
+                    note: root.perf-note;
+                    graphs: root.perf-graphs;
+                    cells: root.perf-cells;
+                    stats: root.perf-stats;
+                    segments: root.perf-segments;
+                    range: root.perf-range;
                     interactive: !root.modal-open;
                     select-device(id) => { root.select-device(id); }
+                    select-range(i) => { root.select-range(i); }
                 }
             }
         }

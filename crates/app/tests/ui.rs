@@ -1,7 +1,7 @@
 use i_slint_backend_testing::ElementHandle;
-use negotium::DeviceData;
+use negotium::{DeviceData, GraphData, SegmentData, StatData};
 use negotium::controls::Page;
-use negotium::perf::{DeviceView, PerfFrame};
+use negotium::perf::{DeviceView, GraphView, PerfFrame, Range, StatView};
 use negotium::{MainWindow, MeterData, RowData};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::cell::RefCell;
@@ -616,6 +616,14 @@ fn a_frame_for_another_page_or_device_is_dropped() {
     assert_eq!(ui.get_perf_title(), "", "a stale device's frame is not shown");
     b.apply(&ui, frame(vec![row_view(1, "Editor", "")])); // an Overview frame while Performance shows
     assert!(shown_ids(&ui).is_empty());
+    controls.select_device("cpu");
+    controls.set_range(Range::TenMinutes);
+    b.apply(&ui, perf_frame("cpu", "cpu")); // built for 1 min, just before the click on 10 min
+    assert_eq!(ui.get_perf_title(), "", "a stale range's frame is not shown");
+    controls.set_range(Range::Minute);
+    controls.set_page(Page::Overview);
+    b.apply(&ui, perf_frame("cpu", "cpu")); // a Performance frame arriving after the user went back
+    assert_eq!(ui.get_perf_title(), "", "a Performance frame is not shown while the Overview shows");
 }
 
 #[test]
@@ -627,4 +635,176 @@ fn a_vanished_device_falls_back_to_cpu_and_the_fallback_sticks() {
     assert_eq!(ui.get_perf_selected(), "cpu");
     assert_eq!(ui.get_perf_title(), "CPU");
     assert_eq!(controls.perf().0, "cpu", "a re-plugged disk doesn't snatch the page back");
+}
+
+#[test]
+fn leaving_the_overview_releases_the_hover_freeze() {
+    let (ui, controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, frame(vec![row_view(1, "Editor", "")]));
+    b.set_hover(true);
+    assert!(controls.frozen());
+    // The hidden list can't report pointer-leave: switching pages must release it.
+    b.set_page(&ui, Page::Performance);
+    assert!(!controls.frozen(), "the hover freeze ends with the page switch");
+    assert_eq!(controls.page(), Page::Performance);
+    assert_eq!(ui.get_page(), 1);
+    b.set_page(&ui, Page::Overview);
+    assert_eq!((controls.page(), ui.get_page()), (Page::Overview, 0));
+}
+
+#[test]
+fn an_open_modal_blocks_the_default_action_of_rail_and_tiles() {
+    let ui = window();
+    ui.set_tiles(ModelRc::new(VecModel::from(vec![negotium::TileData {
+        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false,
+    }])));
+    let pages = Rc::new(RefCell::new(Vec::new()));
+    let p = pages.clone();
+    ui.on_select_page(move |i| p.borrow_mut().push(i));
+    let tiles = Rc::new(RefCell::new(Vec::new()));
+    let t = tiles.clone();
+    ui.on_open_tile(move |id| t.borrow_mut().push(id));
+    ui.set_confirm_visible(true);
+    El::find_by_accessible_label(&ui, "Performance page").next().expect("rail item").invoke_accessible_default_action();
+    El::find_by_accessible_label(&ui, "Chrome tile").next().expect("tile").invoke_accessible_default_action();
+    assert!(pages.borrow().is_empty(), "the rail ignores a screen reader while a modal is open");
+    assert!(tiles.borrow().is_empty(), "so does a top-strip tile");
+    ui.set_confirm_visible(false);
+    El::find_by_accessible_label(&ui, "Performance page").next().unwrap().invoke_accessible_default_action();
+    El::find_by_accessible_label(&ui, "Chrome tile").next().unwrap().invoke_accessible_default_action();
+    assert_eq!((pages.borrow().clone(), tiles.borrow().clone()), (vec![1], vec![3]));
+}
+
+#[test]
+fn a_clicked_tile_opens_and_takes_focus_so_space_opens_it_again() {
+    let ui = shown_window();
+    ui.set_tiles(ModelRc::new(VecModel::from(vec![negotium::TileData {
+        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false,
+    }])));
+    let tiles = Rc::new(RefCell::new(Vec::new()));
+    let t = tiles.clone();
+    ui.on_open_tile(move |id| t.borrow_mut().push(id));
+    let tile = El::find_by_accessible_label(&ui, "Chrome tile").next().expect("tile");
+    let (x, y) = centre(&tile);
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    assert_eq!(*tiles.borrow(), [3], "a click opens the tile");
+    key(&ui, slint::platform::Key::Space);
+    assert_eq!(*tiles.borrow(), [3, 3], "the click focused it: Space opens it again");
+}
+
+// ---- Plan 3a: Performance page ----
+
+fn graph_data(label: &str) -> GraphData {
+    GraphData {
+        label: label.into(), value: "37%".into(), scale: "100%".into(),
+        line: "M 1000.0 63.0".into(), area: "M 0 100".into(), line2: "M 0 100".into(),
+    }
+}
+
+#[test]
+fn range_buttons_pick_and_show_the_range() {
+    let ui = shown_window();
+    ui.set_page(1);
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_select_range(move |i| *p.borrow_mut() = Some(i));
+    let ten = El::find_by_accessible_label(&ui, "10 min range").next().expect("range button");
+    assert_eq!(ten.accessible_checked(), Some(false));
+    ten.invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(1));
+    ui.set_perf_range(1);
+    assert_eq!(ten.accessible_checked(), Some(true));
+    let minute = El::find_by_accessible_label(&ui, "1 min range").next().unwrap();
+    assert_eq!(minute.accessible_checked(), Some(false));
+}
+
+#[test]
+fn the_performance_page_shows_graphs_cells_details_and_composition() {
+    let ui = shown_window();
+    ui.set_page(1);
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![graph_data("% Utilization")])));
+    ui.set_perf_cells(ModelRc::new(VecModel::from(vec![graph_data("CPU 0"), graph_data("CPU 1")])));
+    ui.set_perf_stats(ModelRc::new(VecModel::from(vec![StatData { label: "Speed".into(), value: "3.42 GHz".into() }])));
+    ui.set_perf_segments(ModelRc::new(VecModel::from(vec![
+        SegmentData { label: "In use".into(), value: "6.5 GB".into(), fraction: 0.4 },
+        SegmentData { label: "Free".into(), value: "2.0 GB".into(), fraction: 0.6 },
+    ])));
+    for label in ["% Utilization graph", "CPU 0 graph", "CPU 1 graph", "Speed 3.42 GHz", "In use 6.5 GB", "Free 2.0 GB"] {
+        assert!(El::find_by_accessible_label(&ui, label).next().is_some(), "missing {label}");
+    }
+}
+
+#[test]
+fn a_performance_frame_fills_graphs_and_details_through_the_bridge() {
+    use slint::Model;
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Performance);
+    let mut f = perf_frame("cpu", "cpu");
+    let p = f.perf.as_mut().unwrap();
+    p.graphs = vec![GraphView { label: "% Utilization".into(), ..Default::default() }];
+    p.cells = vec![GraphView::default(); 4];
+    p.stats = vec![StatView { label: "Speed".into(), value: "3.42 GHz".into() }];
+    p.note = "CPU temperature needs the add-on.".into();
+    bridge.borrow_mut().apply(&ui, f);
+    assert_eq!(ui.get_perf_graphs().row_count(), 1);
+    assert_eq!(ui.get_perf_cells().row_count(), 4);
+    assert_eq!(ui.get_perf_stats().row_data(0).unwrap().value, "3.42 GHz");
+    assert_eq!(ui.get_perf_note(), "CPU temperature needs the add-on.");
+    assert_eq!(ui.get_perf_range(), 0);
+}
+
+#[test]
+fn the_performance_page_lays_out_graph_cells_details_and_ranges() {
+    // Stands in for looking at the page: every key element is on screen, inside the window, with
+    // a sane size, and the cells sit in a grid in logical-processor order.
+    let ui = shown_window();
+    ui.set_page(1);
+    ui.set_perf_devices(ModelRc::new(VecModel::from(vec![device("cpu", "CPU"), device("memory", "Memory")])));
+    ui.set_perf_title("CPU".into());
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![graph_data("% Utilization")])));
+    let cells: Vec<GraphData> = (0..16).map(|i| graph_data(&format!("CPU {i}"))).collect();
+    ui.set_perf_cells(ModelRc::new(VecModel::from(cells)));
+    let stats: Vec<StatData> = ["Utilization", "Speed", "Temperature", "Processes"]
+        .iter()
+        .map(|l| StatData { label: (*l).into(), value: "—".into() })
+        .collect();
+    ui.set_perf_stats(ModelRc::new(VecModel::from(stats)));
+    ui.set_perf_segments(ModelRc::new(VecModel::from(vec![
+        SegmentData { label: "In use".into(), value: "6.5 GB".into(), fraction: 0.4 },
+        SegmentData { label: "Free".into(), value: "2.0 GB".into(), fraction: 0.6 },
+    ])));
+    let find = |label: &str| El::find_by_accessible_label(&ui, label).next().unwrap_or_else(|| panic!("missing {label}"));
+    let inside = |label: &str| {
+        let e = find(label);
+        let (p, s) = (e.absolute_position(), e.size());
+        let (x, y, w, h) = (p.x, p.y, s.width, s.height);
+        assert!(w > 0.0 && h > 0.0, "{label} has no size: {w}x{h}");
+        assert!(x >= 0.0 && x + w <= 1000.0, "{label} sticks out sideways: x {x} w {w}");
+        (x, y, w, h)
+    };
+    let list = inside("CPU performance");
+    let (gx, gy, gw, gh) = inside("% Utilization graph");
+    assert!(gx > list.0 + list.2, "the graph sits right of the device list");
+    assert!(gw > 500.0 && gh >= 150.0, "the main graph is large: {gw}x{gh}");
+    assert!(gy + gh <= 720.0, "the main graph is in view");
+    let ranges: Vec<_> = ["1 min range", "10 min range", "1 h range"].iter().map(|l| inside(l)).collect();
+    assert!(ranges.windows(2).all(|w| w[0].1 == w[1].1 && w[0].0 + w[0].2 <= w[1].0), "range buttons in one row, in order: {ranges:?}");
+    assert!(ranges.iter().all(|r| r.3 >= 24.0 && r.1 + r.3 <= gy), "range buttons sit above the graph: {ranges:?}");
+    // Cells: cell n is processor n, laid out row by row.
+    let cell: Vec<_> = (0..16).map(|i| inside(&format!("CPU {i} graph"))).collect();
+    assert!(cell.iter().all(|c| c.2 >= 60.0 && c.3 >= 30.0), "cells are readable: {cell:?}");
+    assert!(cell[0].1 > gy + gh, "the cells come below the main graph");
+    assert!(cell[0].0 < cell[1].0 && cell[0].1 == cell[1].1, "cell 1 is right of cell 0");
+    let cols = cell.iter().take_while(|c| c.1 == cell[0].1).count();
+    assert!((2..16).contains(&cols), "the cells wrap into a grid: {cols} columns");
+    assert!(cell[cols].1 > cell[0].1 && cell[cols].0 == cell[0].0, "processor {cols} starts the second row");
+    // Composition bar: segments side by side, wider for the larger fraction.
+    let (ux, uy, uw, _) = inside("In use 6.5 GB");
+    let (fx, fy, fw, _) = inside("Free 2.0 GB");
+    assert!(uy == fy && ux < fx && fw > uw, "segments share a row, in order and in proportion");
+    // Details: below the cells.
+    let speed = inside("Speed —");
+    assert!(speed.1 > cell[15].1, "the details come after the cells");
+    assert!(El::find_by_accessible_label(&ui, "Utilization —").next().is_some());
 }
