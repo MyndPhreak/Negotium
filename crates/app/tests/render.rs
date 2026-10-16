@@ -563,9 +563,9 @@ fn a_row_change_in_the_app_list_draws_once_not_an_animation() {
     assert!(drawn <= 2, "{drawn} frames for one row change");
 }
 
-/// The Performance page's ScrollViews keep the Fluent scrollbar: a frame changes their values,
-/// never their content height while the page is idle, so its thumb has nothing to animate. A
-/// frame costs one redraw.
+/// The Performance details view scrolls under a `ScrollIndicator`, because the Fluent thumb
+/// animated for 150 ms whenever a frame re-evaluated the content height; only the device list keeps
+/// the Fluent bar (a frame never changes its content height). A frame costs one redraw.
 #[test]
 fn a_performance_frame_draws_once() {
     use negotium::{DeviceData, StatData};

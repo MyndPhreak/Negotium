@@ -1375,6 +1375,28 @@ fn the_app_lists_scroll_indicator_follows_the_wheel_and_drags_the_list() {
     assert!(text(&ui, "App60").is_some_and(|e| rect_of(&e).1 < list.1 + list.3), "the last row is in view");
 }
 
+#[test]
+fn the_performance_details_indicator_appears_on_overflow_and_follows_the_wheel() {
+    let thumbs = |ui: &MainWindow| El::find_by_element_id(ui, "ScrollIndicator::thumb").filter(|t| t.size().width > 0.0).collect::<Vec<_>>();
+    let ui = shown_window();
+    ui.set_page(1);
+    ui.set_perf_devices(ModelRc::new(VecModel::from(vec![device("cpu", "CPU")])));
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![graph_data("% Utilization")])));
+    assert!(thumbs(&ui).is_empty(), "a short page needs no indicator");
+    let cells: Vec<GraphData> = (0..64).map(|i| graph_data(&format!("CPU {i}"))).collect();
+    ui.set_perf_cells(ModelRc::new(VecModel::from(cells)));
+    slint::platform::update_timers_and_animations();
+    let found = thumbs(&ui);
+    assert_eq!(found.len(), 1, "sixty-four cells overflow the page: one indicator");
+    let (top, size) = (found[0].absolute_position(), found[0].size());
+    assert!(size.width <= 4.0 && size.height >= 24.0, "thin and sized to the visible share: {size:?}");
+    assert!(top.x > 700.0, "on the details' right edge: {top:?}");
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(600.0, 400.0), delta_x: 0.0, delta_y: -400.0 });
+    slint::platform::update_timers_and_animations();
+    let moved = thumbs(&ui)[0].absolute_position();
+    assert!(moved.y > top.y + 10.0, "the indicator follows content-y: {} then {}", top.y, moved.y);
+}
+
 // Ruling PF1: frames only sync the current row; they never scroll the list.
 #[test]
 fn a_wheel_scrolled_focused_list_is_not_pulled_back_by_frames() {

@@ -116,6 +116,8 @@ export component PerformancePage inherits HorizontalLayout {
     // for 150 ms after every frame (ScrollIndicator says why).
     Rectangle {
         horizontal-stretch: 1;
+        min-width: 50px;
+        min-height: 50px;
         sv := ScrollView {
             width: parent.width;
             height: parent.height;
