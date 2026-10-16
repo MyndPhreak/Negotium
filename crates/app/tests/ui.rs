@@ -1478,3 +1478,58 @@ fn tabbing_from_the_list_to_a_rows_force_close_never_unfreezes_the_list() {
     }
     assert_eq!(ui.get_current_id(), 7);
 }
+
+// ---- Task 11 fix round 1 ----
+
+#[test]
+fn a_key_that_reasserts_a_missed_list_focus_never_acts_on_an_unhighlighted_row() {
+    use slint::platform::Key;
+    let (ui, controls, bridge, actions) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || controls.frozen()));
+    press_key(&ui, Key::DownArrow);
+    assert_eq!(ui.get_current_id(), 9);
+    // A modal shown without parking focus: the disabled list misses its focus-out, the freeze ends.
+    ui.set_details_visible(true);
+    slint::platform::update_timers_and_animations();
+    ui.set_details_visible(false);
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen());
+    // The current app exits while the list is live: it is simply gone.
+    bridge.borrow_mut().apply(&ui, frame(vec![row_view(7, "Editor", "")]));
+    assert_eq!(shown_ids(&ui), [7]);
+    press_key(&ui, Key::Delete);
+    assert!(actions.borrow().is_empty(), "Delete ended an app the ring never showed: {:?}", actions.borrow());
+    assert!(controls.frozen(), "the key re-asserted the list focus");
+    assert_eq!((ui.get_current_row(), ui.get_current_id()), (0, 7), "the ring now shows on Editor");
+    press_key(&ui, Key::Delete);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 7)], "once shown, Delete acts on it");
+}
+
+#[test]
+fn the_menu_key_brings_a_scrolled_away_current_row_back_before_anchoring_its_menu() {
+    use slint::platform::Key;
+    let rows: Vec<RowView> = (1..=40).map(|i| row_view(i, &format!("App{i}"), "")).collect();
+    let (ui, controls, _bridge, _) = wired_list(rows);
+    assert!(tab_until(&ui, || controls.frozen()));
+    let list = El::find_by_accessible_label(&ui, "Apps").next().expect("the list");
+    let (x, y) = centre(&list);
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(x, y), delta_x: 0.0, delta_y: -400.0 });
+    slint::platform::update_timers_and_animations();
+    assert!(ui.get_list_scroll_y() < -100.0);
+    key(&ui, Key::Menu);
+    assert_eq!(ui.get_menu_target(), 1);
+    assert_eq!(ui.get_list_scroll_y(), 0.0, "the current row (the first) is back in view under its menu");
+}
+
+#[test]
+fn the_current_row_reports_selected_only_while_the_list_has_focus() {
+    use slint::platform::Key;
+    let (ui, controls, _bridge, _) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    let editor = || El::find_by_accessible_label(&ui, "Editor, CPU 1.0%, memory ").next().expect("editor row");
+    assert_eq!(editor().accessible_item_selected(), Some(false));
+    assert!(tab_until(&ui, || controls.frozen()));
+    assert_eq!(editor().accessible_item_selected(), Some(true));
+    press_key(&ui, Key::Escape);
+    assert_eq!(ui.get_current_id(), 7, "the current row is kept for Tab back");
+    assert_eq!(editor().accessible_item_selected(), Some(false), "not selected while the list is unfocused");
+}

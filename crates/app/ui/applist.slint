@@ -66,6 +66,8 @@ export component AppList inherits VerticalLayout {
     in property <bool> current-actionable;
     out property <bool> hovered: area.has-hover;
     out property <length> scroll-y: lv.content-y;
+    // Every row's height; scrolling and the keyboard menu's anchor are computed from it.
+    private property <length> row-height: 32px;
     // The row a context menu was opened on. Captured when it opens; every menu item acts on it,
     // never on whatever row data sits at that index by the time an item is chosen.
     out property <int> menu-target: -1;
@@ -84,15 +86,15 @@ export component AppList inherits VerticalLayout {
     callback list-key(string) -> bool;
     spacing: 6px;
 
-    // Scrolls so row `i` is fully visible (rows are 32px tall).
+    // Scrolls so row `i` is fully visible.
     public function ensure-visible(i: int) {
         if (i < 0) {
             return;
         }
-        if (i * 32px < -lv.content-y) {
-            lv.content-y = -(i * 32px);
-        } else if ((i + 1) * 32px > -lv.content-y + lv.visible-height) {
-            lv.content-y = -((i + 1) * 32px - lv.visible-height);
+        if (i * root.row-height < -lv.content-y) {
+            lv.content-y = -(i * root.row-height);
+        } else if ((i + 1) * root.row-height > -lv.content-y + lv.visible-height) {
+            lv.content-y = -((i + 1) * root.row-height - lv.visible-height);
         }
     }
 
@@ -102,7 +104,9 @@ export component AppList inherits VerticalLayout {
         if (root.current-id >= 0 && root.current-actionable && root.interactive) {
             root.menu-target = root.current-id;
             root.menu-open(true);
-            key-menu.open(24px, (root.current-row + 1) * 32px + lv.content-y);
+            // A wheel may have scrolled the current row away: bring it back so the menu anchors on it.
+            root.ensure-visible(root.current-row);
+            key-menu.open(24px, (root.current-row + 1) * root.row-height + lv.content-y);
             root.menu-open(false);
         }
     }
@@ -156,7 +160,7 @@ export component AppList inherits VerticalLayout {
                 changed has-hover => { root.hover(self.has-hover); }
                 lv := ListView {
                     for r[i] in root.rows : Rectangle {
-                        height: 32px;
+                        height: root.row-height;
                         background: r.hung != "" ? Theme.danger-bg : (row-touch.has-hover ? Theme.card : transparent);
                         border-radius: 4px;
                         // The keyboard-current row, while the list has focus.
@@ -165,7 +169,8 @@ export component AppList inherits VerticalLayout {
                         opacity: r.exited ? 0.5 : 1.0;
                         accessible-role: list-item;
                         accessible-item-selectable: true;
-                        accessible-item-selected: i == root.current-row;
+                        // Selected like the ring: the current row, while the list has focus.
+                        accessible-item-selected: i == root.current-row && list-keys.has-focus;
                         accessible-label: r.exited ? r.name + ", exited"
                             : r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
                         // The only way this row's menu opens: capture the row first, keep the list frozen
@@ -195,7 +200,7 @@ export component AppList inherits VerticalLayout {
                                 }
                                 key-pressed(e) => {
                                     if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
-                                        open-menu(8px, 32px);
+                                        open-menu(8px, root.row-height);
                                         return accept;
                                     }
                                     return reject;

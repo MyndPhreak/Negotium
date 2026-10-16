@@ -473,10 +473,16 @@ impl Bridge {
     pub fn list_key(&mut self, key: NavKey) -> NavOutcome {
         // The key came from the focused list: a focus edge that never arrived (a modal opened
         // without parking focus first) must not leave it acting on an unfrozen list.
-        if !self.list_focused {
+        let reasserted = !self.list_focused;
+        if reasserted {
             self.set_list_focus(true);
         }
-        let outcome = navigate(self.layout.rows(), &self.expanded, self.current, key);
+        let mut outcome = navigate(self.layout.rows(), &self.expanded, self.current, key);
+        // The ring only appears with this key (and may have moved to another app if the current
+        // one left meanwhile): never act on a row the user has not yet seen highlighted.
+        if reasserted && matches!(outcome, NavOutcome::Action(..)) {
+            outcome = NavOutcome::Nothing;
+        }
         match outcome {
             NavOutcome::Move(id) => {
                 self.current = Some(id);
