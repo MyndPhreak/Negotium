@@ -59,13 +59,15 @@ pub fn uptime(secs: u64) -> String {
     format!("{}:{:02}:{:02}:{:02}", secs / 86_400, secs / 3_600 % 24, secs / 60 % 60, secs % 60)
 }
 
+/// A whole percentage; "—" when unknown (NaN or infinite), never a made-up "0%".
 pub fn pct(p: f32) -> String {
     // `+ 0.0` normalises negative zero so we never print "-0%".
-    format!("{}%", if p.is_finite() { p.round().clamp(0.0, 100.0) + 0.0 } else { 0.0 })
+    if p.is_finite() { format!("{}%", p.round().clamp(0.0, 100.0) + 0.0) } else { "—".to_string() }
 }
 
+/// A percentage to one decimal; "—" when unknown.
 pub fn pct1(p: f32) -> String {
-    format!("{:.1}%", if p.is_finite() { p.clamp(0.0, 100.0) + 0.0 } else { 0.0 })
+    if p.is_finite() { format!("{:.1}%", p.clamp(0.0, 100.0) + 0.0) } else { "—".to_string() }
 }
 pub fn temp_c(c: f32) -> String {
     if c.is_finite() { format!("{:.0} °C", c) } else { "—".to_string() }
@@ -140,7 +142,10 @@ mod tests {
     fn percentages_and_hung_timer() {
         assert_eq!(pct(37.6), "38%");
         assert_eq!(pct1(18.24), "18.2%");
-        assert_eq!(pct1(f32::NAN), "0.0%");
+        assert_eq!(pct1(f32::NAN), "—", "unknown is not zero");
+        assert_eq!(pct(f32::NAN), "—");
+        assert_eq!(pct(f32::INFINITY), "—");
+        assert_eq!(pct1(f32::NEG_INFINITY), "—");
         assert_eq!(pct(-0.2), "0%");
         assert_eq!(pct1(-0.01), "0.0%");
         assert_eq!(hung(14_400), "Not responding · 14s");
