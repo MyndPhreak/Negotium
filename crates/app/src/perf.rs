@@ -313,6 +313,13 @@ impl PerfInput<'_> {
         graph::shape(self.history.points(key, self.end().saturating_sub(span)), self.end(), span, max, buckets)
     }
 
+    /// A small multiple's shape: the line only, since cells draw no area (Graph `filled: false`).
+    fn cell_shape(&self, key: &Series, max: f32) -> Shape {
+        let span = self.range.span_ms();
+        let line = graph::line(self.history.points(key, self.end().saturating_sub(span)), self.end(), span, max, CELL_BUCKETS);
+        Shape { line, area: EMPTY_PATH.to_string() }
+    }
+
     /// The largest value of a series within the last `span_ms`, 0 when there is none.
     fn max_over(&self, key: &Series, span_ms: u64) -> f32 {
         self.history.points(key, self.end().saturating_sub(span_ms)).filter_map(|(_, v)| v).filter(|v| v.is_finite()).fold(0.0, f32::max)
@@ -459,7 +466,7 @@ fn cpu_page(f: &mut PerfFrame, input: &PerfInput) {
     f.cells = (0..cores)
         .map(|i| {
             let value = t.per_core_pct.get(i).copied().flatten().map(format::pct).unwrap_or_else(dash);
-            graph_view(&format!("CPU {i}"), value, String::new(), input.shape(&Series::Core(i as u16), 100.0, CELL_BUCKETS))
+            graph_view(&format!("CPU {i}"), value, String::new(), input.cell_shape(&Series::Core(i as u16), 100.0))
         })
         .collect();
     // A failed process read leaves the list empty: unknown, never 0.
@@ -631,7 +638,7 @@ fn gpu_page(f: &mut PerfFrame, input: &PerfInput, g: &GpuSample, number: usize) 
     f.cells = engines
         .into_iter()
         .map(|(engtype, v)| {
-            let shape = input.shape(&Series::GpuEngine(key.into(), engtype.clone()), 100.0, CELL_BUCKETS);
+            let shape = input.cell_shape(&Series::GpuEngine(key.into(), engtype.clone()), 100.0);
             graph_view(engtype, known(*v).map(format::pct).unwrap_or_else(dash), String::new(), shape)
         })
         .collect();
@@ -715,6 +722,15 @@ pub(crate) mod tests {
         assert_eq!(f.devices[0].value, "37%");
         assert_eq!(f.devices[1].value, "7.0 / 16.0 GB (44%)");
         assert_ne!(f.devices[0].spark, EMPTY_PATH);
+    }
+
+    // The cells draw no area (Graph `filled: false`): building one every tick would be wasted.
+    #[test]
+    fn cells_carry_a_line_but_no_area_while_main_graphs_keep_theirs() {
+        let f = build(&snapshot(60_000), "cpu");
+        assert_ne!(f.graphs[0].area, EMPTY_PATH);
+        assert!(f.cells.iter().any(|c| c.line != EMPTY_PATH), "some cell has a line");
+        assert!(f.cells.iter().all(|c| c.area == EMPTY_PATH), "no cell has an area");
     }
 
     #[test]
