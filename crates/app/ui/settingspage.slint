@@ -148,9 +148,10 @@ export component SettingsPage inherits VerticalLayout {
     in property <int> theme;
     in property <bool> always-on-top;
     in property <bool> keep-in-tray;
+    // Graphs scroll continuously between samples (crate::smooth).
+    in property <bool> smooth-graphs;
     // The saved GPU choice; whether an automatic fallback to the CPU is recorded; whether this
     // instance draws with the GPU; whether SLINT_BACKEND chose the renderer (crate::settingspage).
-    in property <bool> smooth-graphs;
     in property <bool> gpu-rendering;
     in property <bool> gpu-fallback;
     in property <bool> gpu-running;

@@ -6,7 +6,7 @@
 //! the edge gets there: the newest point eases in from the right and the line always reaches the
 //! edge. Graphs scroll only while the window is on screen: hidden to the tray or minimised, the
 //! graph timer stops ([`OnScreen`]). Pure but for [`install`] and [`set_shown`] (and [`OnScreen`],
-//! which calls it); the bridge calls `install` and main.rs `set_shown`, on the UI thread.
+//! which calls it); the bridge calls `install` and main.rs `OnScreen`, on the UI thread.
 
 /// How far the view's right edge may trail a frame's newest sample. Frames draw this much history
 /// beyond their window's left edge (crate::graph::LEAD_MS), so the view never runs out of line.
@@ -96,41 +96,62 @@ pub fn set_shown(ui: &crate::MainWindow, visible: bool, minimised: bool) {
     ui.global::<crate::GraphClock>().set_shown(visible && !minimised);
 }
 
-/// Where the main window is, as main.rs hears of it, for [`set_shown`]: hidden to the tray (the
-/// close handler) or shown again (tray Open, a second launch), and minimised or not (WM_SIZE, and
-/// `platform::is_minimised` once the window hooks go in, for a launch that starts minimised).
-/// UI thread only.
-#[derive(Debug, Default)]
+/// Where the main window is, for [`set_shown`]: hidden to the tray or shown (`Controls::visible`,
+/// which also sets the worker's pace), and minimised or not (WM_SIZE through [`OnScreen::on_size`],
+/// and `platform::is_minimised` when the window hooks go in and when the window is shown). Every
+/// path that hides, shows, minimises or restores the window goes through it. UI thread only.
 pub struct OnScreen {
-    hidden: std::cell::Cell<bool>,
+    controls: std::sync::Arc<crate::controls::Controls>,
+    ui: slint::Weak<crate::MainWindow>,
     minimised: std::cell::Cell<bool>,
 }
 
 impl OnScreen {
+    pub fn new(controls: std::sync::Arc<crate::controls::Controls>, ui: &crate::MainWindow) -> std::rc::Rc<OnScreen> {
+        use slint::ComponentHandle;
+        std::rc::Rc::new(OnScreen { controls, ui: ui.as_weak(), minimised: Default::default() })
+    }
+
     /// Closed to the tray.
-    pub fn hide(&self, ui: &crate::MainWindow) {
-        self.hidden.set(true);
-        self.apply(ui);
+    pub fn hide(&self) {
+        self.controls.set_visible(false);
+        self.apply();
     }
 
-    /// Shown from the tray or by a second launch: un-hidden and restored
-    /// (`platform::bring_to_front`).
-    pub fn show(&self, ui: &crate::MainWindow) {
-        self.hidden.set(false);
-        self.minimised.set(false);
-        self.apply(ui);
+    /// Shown from the tray or by a second launch (after `platform::bring_to_front`). Whether the
+    /// window is still minimised is read from the window, not assumed: a restore that did not
+    /// happen leaves graphs still. Without a native window (tests) the recorded state stands, and
+    /// the restore's WM_SIZE updates it.
+    pub fn show(&self) {
+        self.controls.set_visible(true);
+        if let Some(hwnd) = self.ui.upgrade().and_then(|ui| crate::platform::main_hwnd(&ui)) {
+            self.minimised.set(crate::platform::is_minimised(hwnd));
+        }
+        self.apply();
     }
 
-    /// Records whether the window is minimised; true if that changed. WM_SIZE comes many times a
-    /// second during a resize, and only a change needs [`OnScreen::apply`]. Touches no window, so
-    /// the window procedure may call it.
+    /// Records whether the window is minimised; true if that changed.
     pub fn minimise(&self, minimised: bool) -> bool {
         self.minimised.replace(minimised) != minimised
     }
 
+    /// A WM_SIZE, heard inside the window procedure: it comes many times a second during a
+    /// resize, so only a change counts, and that change is applied from the event loop. True if
+    /// one was scheduled.
+    pub fn on_size(self: &std::rc::Rc<Self>, minimised: bool) -> bool {
+        if !self.minimise(minimised) {
+            return false;
+        }
+        let this = self.clone();
+        slint::Timer::single_shot(std::time::Duration::ZERO, move || this.apply());
+        true
+    }
+
     /// Sets `GraphClock.shown` from what is recorded.
-    pub fn apply(&self, ui: &crate::MainWindow) {
-        set_shown(ui, !self.hidden.get(), self.minimised.get());
+    pub fn apply(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            set_shown(&ui, self.controls.visible(), self.minimised.get());
+        }
     }
 }
 

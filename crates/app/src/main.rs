@@ -19,13 +19,12 @@ fn warn(msg: &str) {
 }
 
 /// Shows the main window from the tray or a second launch: un-hides, restores, focuses.
-fn show_main(controls: &Controls, on_screen: &OnScreen, weak: &slint::Weak<MainWindow>) {
-    controls.set_visible(true);
+fn show_main(on_screen: &OnScreen, weak: &slint::Weak<MainWindow>) {
     if let Some(ui) = weak.upgrade() {
         platform::bring_to_front(&ui);
-        // Shown and restored: graphs may scroll again (negotium::smooth).
-        on_screen.show(&ui);
     }
+    // Visible again (the worker's pace); graphs scroll unless the window is still minimised.
+    on_screen.show();
 }
 
 thread_local! {
@@ -62,8 +61,8 @@ fn make_tray(
 ) -> Result<NegotiumTray, slint::PlatformError> {
     let tray = NegotiumTray::new()?;
     {
-        let (controls, on_screen, weak) = (controls.clone(), on_screen.clone(), weak.clone());
-        tray.on_open(move || show_main(&controls, &on_screen, &weak));
+        let (on_screen, weak) = (on_screen.clone(), weak.clone());
+        tray.on_open(move || show_main(&on_screen, &weak));
     }
     {
         let (controls, weak, saver) = (controls.clone(), weak.clone(), saver.clone());
@@ -373,7 +372,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let exit_on_close = std::env::args_os().any(|a| a == "--exit-on-close");
     // Whether the window is on screen: graphs scroll only then (negotium::smooth). Every path that
     // hides, shows, minimises or restores it goes through this.
-    let on_screen: Rc<OnScreen> = Default::default();
+    let on_screen = OnScreen::new(controls.clone(), &ui);
     {
         let (controls, b, close_weak, settings) = (controls.clone(), bridge.clone(), weak.clone(), settings.clone());
         let (saver, on_screen) = (saver.clone(), on_screen.clone());
@@ -383,12 +382,10 @@ fn main() -> Result<(), slint::PlatformError> {
             match settings::close_action(keep_in_tray, exit_on_close) {
                 settings::CloseAction::Exit => begin_exit(&controls, &close_weak, &saver),
                 settings::CloseAction::HideToTray => {
-                    controls.set_visible(false);
+                    // The worker slows to the tray pace and graphs stop scrolling.
+                    on_screen.hide();
                     // A hidden window cannot report pointer-leave, so release the hover freeze here.
                     b.borrow_mut().set_hover(false);
-                    if let Some(ui) = close_weak.upgrade() {
-                        on_screen.hide(&ui);
-                    }
                 }
             }
             slint::CloseRequestResponse::HideWindow
@@ -582,10 +579,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     let (tray, controls, weak, on_screen) = (tray.clone(), controls.clone(), weak.clone(), on_screen.clone());
                     let (tray_allowed, settings, saver) = (tray_allowed.clone(), settings.clone(), saver.clone());
                     platform::install_window_hooks(hwnd, move |event| {
-                        // WM_SIZE comes many times a second during a resize: only a change matters.
-                        if let ShellEvent::Minimised(m) = event
-                            && !on_screen.minimise(m)
-                        {
+                        if let ShellEvent::Minimised(m) = event {
+                            on_screen.on_size(m);
                             return;
                         }
                         // The hook runs inside the window procedure: act from the event loop instead.
@@ -601,12 +596,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                     .ok();
                             }
                             ShellEvent::TaskbarCreated => {}
-                            ShellEvent::Activate => show_main(&controls, &on_screen, &weak),
-                            ShellEvent::Minimised(_) => {
-                                if let Some(ui) = weak.upgrade() {
-                                    on_screen.apply(&ui);
-                                }
-                            }
+                            ShellEvent::Activate => show_main(&on_screen, &weak),
+                            ShellEvent::Minimised(_) => {} // handled above
                             ShellEvent::SettingsChanged => {
                                 if let Some(ui) = weak.upgrade() {
                                     let theme = settings.borrow().theme;
@@ -623,7 +614,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 // first appeared after a watchdog stand-down, was minimised before the hooks could
                 // hear WM_SIZE: read it now.
                 on_screen.minimise(platform::is_minimised(hwnd));
-                on_screen.apply(&ui);
+                on_screen.apply();
                 platform::mark_main_window(hwnd);
                 chromed = true;
             }

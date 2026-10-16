@@ -2843,49 +2843,73 @@ fn graphs_scroll_only_while_the_window_is_on_screen() {
     negotium::smooth::set_shown(&ui, true, false);
     assert!(clock.get_live());
 }
-
 /// Every way main.rs hears of the window leaving or coming back (negotium::smooth::OnScreen):
-/// graphs scroll only while it is shown and not minimised, whatever the order.
+/// graphs scroll only while it is shown and not minimised, whatever the order, and the worker's
+/// pace (Controls::visible) follows hide and show from the same calls.
 #[test]
 fn every_way_the_window_leaves_and_comes_back_sets_whether_graphs_scroll() {
     use negotium::smooth::OnScreen;
     let ui = window();
     let clock = ui.global::<GraphClock>();
-    let on_screen = OnScreen::default();
+    let controls = Arc::new(Controls::default());
+    let on_screen = OnScreen::new(controls.clone(), &ui);
     // Started minimised (a shortcut set to "Minimized"): read once the hooks go in.
     assert!(on_screen.minimise(true), "a change");
-    on_screen.apply(&ui);
+    on_screen.apply();
     assert!(!clock.get_live(), "started minimised");
     // Restored from the taskbar (WM_SIZE), then the WM_SIZEs of a resize: only a change counts.
     assert!(on_screen.minimise(false));
     assert!(!on_screen.minimise(false), "a resize repeats WM_SIZE: no change");
-    on_screen.apply(&ui);
+    on_screen.apply();
     assert!(clock.get_live(), "restored");
     // Minimised, then closed to the tray from the taskbar while minimised.
-    assert!(on_screen.minimise(true));
-    on_screen.apply(&ui);
+    on_screen.minimise(true);
+    on_screen.apply();
     assert!(!clock.get_live(), "minimised");
-    on_screen.hide(&ui);
+    on_screen.hide();
+    assert!(!controls.visible(), "the worker slows to the tray pace");
     assert!(!clock.get_live(), "hidden to the tray");
     // A WM_SIZE while hidden does not bring motion back.
     on_screen.minimise(false);
-    on_screen.apply(&ui);
+    on_screen.apply();
     assert!(!clock.get_live(), "still hidden");
-    // Tray Open: shown and restored (platform::bring_to_front).
-    on_screen.show(&ui);
+    // Tray Open: shown (and restored by platform::bring_to_front).
+    on_screen.show();
+    assert!(controls.visible());
     assert!(clock.get_live(), "tray Open");
-    // Minimised again, then a second launch activates it (show_main): shown and restored.
+    // Minimised again, then a second launch activates it. Until the restore's WM_SIZE says so,
+    // the window is not assumed restored (here there is no native window to ask).
     on_screen.minimise(true);
-    on_screen.apply(&ui);
-    assert!(!clock.get_live());
-    on_screen.show(&ui);
-    assert!(clock.get_live(), "second-instance activation");
-    assert!(!on_screen.minimise(false), "the WM_SIZE that follows the restore changes nothing");
+    on_screen.apply();
+    on_screen.show();
+    assert!(!clock.get_live(), "a restore that did not happen leaves graphs still");
+    on_screen.minimise(false);
+    on_screen.apply();
+    assert!(clock.get_live(), "second-instance activation, restored");
     // Closed to the tray, then a second launch while hidden.
-    on_screen.hide(&ui);
+    on_screen.hide();
     assert!(!clock.get_live());
-    on_screen.show(&ui);
+    on_screen.show();
     assert!(clock.get_live());
+}
+
+/// WM_SIZE, as the window hook hands it over: repeats are dropped, a change is applied from the
+/// event loop (never inside the window procedure).
+#[test]
+fn a_size_message_applies_a_change_once_from_the_event_loop() {
+    use negotium::smooth::OnScreen;
+    let ui = window();
+    let clock = ui.global::<GraphClock>();
+    let on_screen = OnScreen::new(Arc::new(Controls::default()), &ui);
+    assert!(!on_screen.on_size(false), "restored, as recorded: nothing to do");
+    assert!(on_screen.on_size(true), "minimised: a change");
+    assert!(clock.get_live(), "not applied inside the window procedure");
+    assert!(!on_screen.on_size(true), "a repeat is dropped");
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    assert!(!clock.get_live(), "applied from the event loop");
+    assert!(on_screen.on_size(false));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    assert!(clock.get_live(), "restored");
 }
 
 /// Hidden or minimised, the graph timer stops: nothing is redrawn for motion.
@@ -2898,6 +2922,9 @@ fn the_graph_timer_stands_still_while_the_window_is_hidden_or_minimised() {
         negotium::smooth::set_shown(&ui, true, false);
         ui.invoke_scroll_from(-5_000.0, 1.0);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+        let (now, offset) = (clock.get_now(), clock.get_offset_ms());
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+        assert!(clock.get_now() > now && clock.get_offset_ms() > offset, "on screen, the timer runs");
         negotium::smooth::set_shown(&ui, visible, minimised);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
         let now = clock.get_now();
