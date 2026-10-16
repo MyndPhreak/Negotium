@@ -5,7 +5,6 @@ mod memmap;
 mod stats;
 
 use anyhow::{Context, Result, bail};
-use childenv::Renderer;
 use negotium_collector::{ProcessReader, logical_cpus};
 use serde::Serialize;
 use stats::{Summary, summary};
@@ -42,12 +41,75 @@ struct Report {
     responsiveness_timeouts: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     frame_stats: Option<serde_json::Value>,
-    /// Which renderer a Negotium run used (`--renderer`).
+    /// How a Negotium run was started (renderer, switches, page, hidden).
     #[serde(skip_serializing_if = "Option::is_none")]
-    renderer: Option<Renderer>,
+    run: Option<NegotiumRun>,
+    /// `cpu_pct` x logical processors: the share of one core, spec section 8's unit.
+    cpu_one_core_pct: Summary,
+    /// The busiest GPU engine's utilisation attributed to the process, %.
+    gpu_pct: Summary,
     /// Where Negotium's memory went at the end of sampling (crate::memmap).
     #[serde(skip_serializing_if = "Option::is_none")]
     memory: Option<memmap::MemoryReport>,
+}
+
+/// What a Negotium run starts with (ignored for other targets): its renderer, its own settings
+/// file (never the user's), its page, and whether it sits hidden in the tray while measured.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct NegotiumRun {
+    /// "gpu" (FemtoVG, Negotium's own choice) or "software"; None means gpu.
+    renderer: Option<String>,
+    smooth_graphs: bool,
+    tray_cpu: bool,
+    /// `--page=<name>` (overview, performance, ...).
+    page: Option<String>,
+    /// Close the window to the tray after it appears and measure the hidden process (no
+    /// responsiveness probe: waking a hidden window would add to the cost being measured).
+    hidden: bool,
+}
+
+impl Default for NegotiumRun {
+    fn default() -> Self {
+        Self { renderer: None, smooth_graphs: true, tray_cpu: true, page: None, hidden: false }
+    }
+}
+
+impl NegotiumRun {
+    /// SLINT_BACKEND for the chosen renderer. GPU is left to Negotium itself (None), which keeps
+    /// its watchdog; software overrides it.
+    fn backend(&self) -> Result<Option<&'static str>> {
+        match self.renderer.as_deref() {
+            None | Some("gpu") => Ok(None),
+            Some("software") => Ok(Some("winit-software")),
+            Some(other) => bail!("--renderer gpu|software, got {other}"),
+        }
+    }
+
+    /// The run's settings file: defaults but for the switches.
+    fn settings_json(&self) -> String {
+        let mut v = serde_json::json!({ "smooth_graphs": self.smooth_graphs, "tray_cpu": self.tray_cpu });
+        if self.hidden {
+            // Closing must hide to the tray (the default, stated so the run does not depend on it).
+            v["keep_in_tray"] = true.into();
+        }
+        v.to_string()
+    }
+
+    /// `--exit-on-close` makes closing exit, which is how a visible run ends; a hidden run needs
+    /// closing to hide instead and is ended by the bench.
+    fn args(&self) -> String {
+        let mut args = if self.hidden { vec![] } else { vec!["--exit-on-close".to_string()] };
+        args.extend(self.page.as_ref().map(|p| format!("--page={p}")));
+        args.join(" ")
+    }
+}
+
+fn on_off(v: &str) -> Result<bool> {
+    match v {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => bail!("expected on or off, got {other}"),
+    }
 }
 
 /// Negotium itself, by keyword or by the file name of an explicit path: either way it gets the
@@ -99,23 +161,23 @@ fn memory_command(mut args: impl Iterator<Item = String>) -> Result<()> {
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let target = args.next().context("usage: negotium-bench <taskmgr|negotium|PATH> [--runs N] [--sample-secs S] [--warmup-secs S] [--renderer gpu|software] [--out FILE]
+    let target = args.next().context("usage: negotium-bench <taskmgr|negotium|PATH> [--runs N] [--sample-secs S] [--warmup-secs S] [--renderer gpu|software] [--smooth on|off] [--tray-cpu on|off] [--page NAME] [--hidden] [--out FILE]
        negotium-bench memory (--pid N | --name EXE) [--top N] [--out FILE]")?;
     if target == "memory" {
         return memory_command(args);
     }
     let (mut runs, mut sample_secs, mut warmup_secs, mut out) = (5u32, 60u64, 5u64, None::<String>);
-    let mut renderer = Renderer::default();
-    let mut renderer_given = false;
+    let mut run = NegotiumRun::default();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--runs" => runs = args.next().context("--runs N")?.parse()?,
             "--sample-secs" => sample_secs = args.next().context("--sample-secs S")?.parse()?,
             "--warmup-secs" => warmup_secs = args.next().context("--warmup-secs S")?.parse()?,
-            "--renderer" => {
-                renderer = Renderer::parse(&args.next().context("--renderer gpu|software")?)?;
-                renderer_given = true;
-            }
+            "--renderer" => run.renderer = Some(args.next().context("--renderer gpu|software")?),
+            "--smooth" => run.smooth_graphs = on_off(&args.next().context("--smooth on|off")?)?,
+            "--tray-cpu" => run.tray_cpu = on_off(&args.next().context("--tray-cpu on|off")?)?,
+            "--page" => run.page = Some(args.next().context("--page NAME")?),
+            "--hidden" => run.hidden = true,
             "--out" => out = Some(args.next().context("--out FILE")?),
             other => bail!("unknown argument {other}"),
         }
@@ -125,9 +187,11 @@ fn main() -> Result<()> {
         bail!("run from an elevated terminal: Task Manager auto-elevates and UIPI blocks probing higher-integrity windows");
     }
     let is_negotium = is_negotium_target(&target);
-    if renderer_given && !is_negotium {
-        eprintln!("warning: --renderer only applies to Negotium; ignored for {target}");
+    if run != NegotiumRun::default() && !is_negotium {
+        eprintln!("warning: --renderer, --smooth, --tray-cpu, --page and --hidden only apply to Negotium; ignored for {target}");
     }
+    let backend = run.backend()?;
+    run.renderer.get_or_insert_with(|| "gpu".to_string());
     let path = if target.eq_ignore_ascii_case("taskmgr") {
         PathBuf::from(r"C:\Windows\System32\Taskmgr.exe")
     } else if target.eq_ignore_ascii_case("negotium") {
@@ -141,13 +205,13 @@ fn main() -> Result<()> {
     let real_local_app_data = std::env::var_os("LOCALAPPDATA");
     // Declared before `last`, so a launched child is cleaned up before its scratch directory goes.
     let mut scratch: Option<childenv::ScratchDir> = None;
-    let launch_args = is_negotium.then_some("--exit-on-close");
+    let launch_args = is_negotium.then(|| run.args());
 
     let mut startup_ms = Vec::new();
     let mut last: Option<Launched> = None;
-    for run in 0..runs {
+    for run_index in 0..runs {
         if let Some(prev) = last.take() {
-            prev.close()?;
+            prev.finish(run.hidden)?;
         }
         if running_pid(&exe_name)?.is_some() {
             bail!("{}", already_running_message(&exe_name, is_negotium));
@@ -158,36 +222,44 @@ fn main() -> Result<()> {
             // A fresh LOCALAPPDATA per run: its own settings.json, renderer marker and log, so the
             // user's real files are never read or written (and a fallback marker cannot leak into
             // the next run).
-            let dir = childenv::scratch_local_appdata(&std::env::temp_dir(), real_local_app_data.as_deref(), std::process::id(), run)?;
+            let dir = childenv::scratch_local_appdata(&std::env::temp_dir(), real_local_app_data.as_deref(), std::process::id(), run_index)?;
             let dir = childenv::ScratchDir::create(dir)?;
-            childenv::negotium_child_env(dir.path(), &stats_path, renderer).apply_to_process();
+            let settings_path = dir.path().join("settings.json");
+            std::fs::write(&settings_path, run.settings_json()).context("write the run's settings")?;
+            childenv::negotium_child_env(dir.path(), &settings_path, &stats_path, backend).apply_to_process();
             // Assigning drops the previous run's directory; its child was closed above.
             scratch = Some(dir);
         }
         let t0 = Instant::now();
         // An early return below drops `target`, which cleans the launched process up.
-        let mut target = launch(&path, launch_args)?;
+        let mut target = launch(&path, launch_args.as_deref())?;
         let hwnd = wait_for_window(target.pid)?;
         target.hwnd = Some(hwnd.0 as usize);
         target.appeared = Some(Instant::now());
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        println!("run {}: first window after {ms:.0} ms", run + 1);
+        println!("run {}: first window after {ms:.0} ms", run_index + 1);
         startup_ms.push(ms);
         last = Some(target);
     }
     let target = last.context("--runs must be at least 1")?;
     println!("warming up pid {} for {warmup_secs} s, then sampling for {sample_secs} s …", target.pid);
-    let (cpu, ws, resp, timeouts) =
-        sample(&target, Duration::from_secs(warmup_secs), Duration::from_secs(sample_secs))?;
+    let mut target = target;
+    if run.hidden {
+        target.hide_to_tray()?;
+        println!("the window is hidden in the tray; measuring the hidden process");
+    }
+    let (cpu, ws, gpu, resp, timeouts) =
+        sample(&target, Duration::from_secs(warmup_secs), Duration::from_secs(sample_secs), !run.hidden)?;
     let memory = if is_negotium {
         memmap::measure(target.pid, 12).map_err(|e| eprintln!("memory breakdown unavailable: {e:#}")).ok()
     } else {
         None
     };
-    target.close()?;
+    target.finish(run.hidden)?;
     drop(scratch);
 
-    let frame_stats = if is_negotium {
+    // A hidden run is ended by the bench, so Negotium writes no frame stats.
+    let frame_stats = if is_negotium && !run.hidden {
         let read = std::fs::read_to_string(&stats_path)
             .map_err(|e| e.to_string())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string()));
@@ -212,7 +284,9 @@ fn main() -> Result<()> {
         responsiveness_ms: summary(&resp),
         responsiveness_timeouts: timeouts,
         frame_stats,
-        renderer: is_negotium.then_some(renderer),
+        run: is_negotium.then(|| run.clone()),
+        cpu_one_core_pct: summary(&cpu.iter().map(|c| c * logical_cpus() as f64).collect::<Vec<_>>()),
+        gpu_pct: summary(&gpu),
         memory,
     };
     let json = serde_json::to_string_pretty(&report)?;
@@ -260,6 +334,43 @@ impl Launched {
     fn wait_exited(&self, timeout_ms: u32) -> bool {
         // SAFETY: `handle` is a valid process handle owned by `self` until Drop.
         unsafe { WaitForSingleObject(self.handle, timeout_ms) == WAIT_OBJECT_0 }
+    }
+
+    /// Closes the window to the tray (Negotium hides instead of exiting when `--exit-on-close` is
+    /// absent) and checks that it did: the window is gone and the process still runs.
+    fn hide_to_tray(&mut self) -> Result<()> {
+        if let Some(appeared) = self.appeared {
+            std::thread::sleep(CLOSE_SETTLE.saturating_sub(appeared.elapsed()));
+        }
+        self.post_close().context("PostMessageW WM_CLOSE")?;
+        let hwnd = self.hwnd().context("target window not found")?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // SAFETY: a read-only query on a window handle; a destroyed window just reports not visible.
+        while unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            if Instant::now() > deadline {
+                bail!("the window did not hide after WM_CLOSE");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if self.wait_exited(500) {
+            bail!("pid {} exited instead of hiding to the tray (is the tray unavailable?)", self.pid);
+        }
+        Ok(())
+    }
+
+    /// Ends the run: a visible one is closed (it exits on close); a hidden one is terminated, as
+    /// closing only hides it. Either way this is a process the bench itself launched.
+    fn finish(mut self, hidden: bool) -> Result<()> {
+        if !hidden {
+            return self.close();
+        }
+        // SAFETY: `handle` is the valid process handle owned by `self`, opened with terminate access.
+        unsafe { TerminateProcess(self.handle, 0) }.context("TerminateProcess")?;
+        if !self.wait_exited(5_000) {
+            bail!("pid {} did not exit after TerminateProcess", self.pid);
+        }
+        self.armed = false;
+        Ok(())
     }
 
     /// Waits (if needed) until the window has been open for `CLOSE_SETTLE`, asks it to close and
@@ -389,16 +500,18 @@ fn wait_for_window(pid: u32) -> Result<HWND> {
 
 /// Waits `warmup` (excluded from the samples, so the launch burst does not skew them), then
 /// samples for `duration`.
-/// Three sample series plus a count (see `sample`).
-type Samples = (Vec<f64>, Vec<f64>, Vec<f64>, usize);
+/// CPU %, private working set MB, GPU %, responsiveness ms, and the probe's timeouts (see `sample`).
+type Samples = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, usize);
 
-fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<Samples> {
+/// With `probe` false no responsiveness series is taken: waking a hidden window would add to the
+/// cost being measured.
+fn sample(target: &Launched, warmup: Duration, duration: Duration, probe: bool) -> Result<Samples> {
     let pid = target.pid;
     let hwnd_bits = target.hwnd.context("target window not found")?;
     std::thread::sleep(warmup);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_probe = stop.clone();
-    let prober = std::thread::spawn(move || -> std::result::Result<(Vec<f64>, usize), String> {
+    let prober = probe.then(|| std::thread::spawn(move || -> std::result::Result<(Vec<f64>, usize), String> {
         let hwnd = HWND(hwnd_bits as *mut c_void);
         let (mut times, mut timeouts) = (Vec::new(), 0usize);
         while !stop_probe.load(Ordering::Relaxed) {
@@ -421,15 +534,17 @@ fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<Sam
             std::thread::sleep(Duration::from_millis(100));
         }
         Ok((times, timeouts))
-    });
+    }));
 
     let cpus = logical_cpus() as f64;
     let mut reader = ProcessReader::new();
-    let (mut cpu, mut ws) = (Vec::new(), Vec::new());
+    // The busiest GPU engine the process uses (PDH "GPU Engine", as Task Manager shows it).
+    let mut pdh = negotium_collector::PdhSources::open().ok();
+    let (mut cpu, mut ws, mut gpu) = (Vec::new(), Vec::new(), Vec::new());
     let mut prev: Option<(Instant, u64)> = None;
     let end = Instant::now() + duration;
     let sampled: Result<()> = (|| {
-        while Instant::now() < end && !prober.is_finished() {
+        while Instant::now() < end && !prober.as_ref().is_some_and(|p| p.is_finished()) {
             let now = Instant::now();
             let p = read_processes(&mut reader)?
                 .into_iter()
@@ -438,6 +553,9 @@ fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<Sam
             if let Some((t0, c0)) = prev {
                 let capacity = now.duration_since(t0).as_secs_f64() * 10_000_000.0 * cpus;
                 cpu.push((p.cpu_time_100ns.saturating_sub(c0) as f64 / capacity * 100.0).clamp(0.0, 100.0));
+                if let Some(by_pid) = pdh.as_mut().and_then(|p| p.read().gpu_pct_by_pid) {
+                    gpu.push(by_pid.get(&pid).copied().unwrap_or(0.0) as f64);
+                }
             }
             ws.push(p.private_working_set as f64 / (1024.0 * 1024.0));
             prev = Some((now, p.cpu_time_100ns));
@@ -446,11 +564,11 @@ fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<Sam
         Ok(())
     })();
     stop.store(true, Ordering::Relaxed);
-    let probed = prober.join().expect("prober thread");
+    let probed = prober.map(|p| p.join().expect("prober thread")).unwrap_or(Ok((Vec::new(), 0)));
     // A probe failure is the root cause when the target vanished or was unreachable, so report it first.
     let (resp, timeouts) = probed.map_err(|e| anyhow::anyhow!("responsiveness probe failed: {e}"))?;
     sampled?;
-    Ok((cpu, ws, resp, timeouts))
+    Ok((cpu, ws, gpu, resp, timeouts))
 }
 
 #[cfg(test)]
@@ -472,6 +590,32 @@ mod tests {
         for t in ["taskmgr", r"C:\Windows\System32\Taskmgr.exe", r"C:\negotium\other.exe", "negotium-bench.exe"] {
             assert!(!is_negotium_target(t), "{t}");
         }
+    }
+
+    #[test]
+    fn a_negotium_run_starts_with_its_own_settings_renderer_and_page() {
+        let mut run = NegotiumRun::default();
+        assert_eq!(run.args(), "--exit-on-close");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&run.settings_json()).unwrap(), serde_json::json!({ "smooth_graphs": true, "tray_cpu": true }));
+        assert_eq!(run.backend().unwrap(), None);
+        run.renderer = Some("software".into());
+        run.smooth_graphs = false;
+        run.page = Some("performance".into());
+        assert_eq!(run.backend().unwrap(), Some("winit-software"));
+        assert_eq!(run.args(), "--exit-on-close --page=performance");
+        assert!(run.settings_json().contains("\"smooth_graphs\":false"));
+        run.renderer = Some("vulkan".into());
+        assert!(run.backend().is_err());
+        assert!(on_off("on").unwrap() && !on_off("off").unwrap() && on_off("yes").is_err());
+    }
+
+    #[test]
+    fn a_hidden_run_keeps_the_window_hidden_in_the_tray_and_does_not_exit_on_close() {
+        let run = NegotiumRun { hidden: true, page: Some("performance".into()), ..NegotiumRun::default() };
+        assert_eq!(run.args(), "--page=performance", "closing must hide to the tray, not exit");
+        let v: serde_json::Value = serde_json::from_str(&run.settings_json()).unwrap();
+        assert_eq!(v["keep_in_tray"], true);
+        assert_eq!(v["tray_cpu"], true);
     }
 
     #[test]

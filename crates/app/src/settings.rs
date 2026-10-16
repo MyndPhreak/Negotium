@@ -92,9 +92,22 @@ pub fn close_action(keep_in_tray: bool, exit_on_close: bool) -> CloseAction {
     if keep_in_tray && !exit_on_close { CloseAction::HideToTray } else { CloseAction::Exit }
 }
 
+/// Names a settings file to use instead of the user's: the benchmark starts Negotium with settings
+/// of its own that way, never reading or changing the user's.
+pub const SETTINGS_ENV: &str = "NEGOTIUM_SETTINGS";
+
+/// The settings file: `%LOCALAPPDATA%\Negotium\settings.json` (the temp directory if
+/// `LOCALAPPDATA` is unset), or the file [`SETTINGS_ENV`] names.
 pub fn default_path() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("Negotium").join("settings.json")
+    path_from(std::env::var_os(SETTINGS_ENV), std::env::var_os("LOCALAPPDATA"))
+}
+
+/// [`default_path`] from the two variables' values.
+pub fn path_from(settings: Option<std::ffi::OsString>, local_app_data: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(p) = settings.filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
+    local_app_data.map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Negotium").join("settings.json")
 }
 
 #[derive(Debug, PartialEq)]
@@ -255,6 +268,15 @@ impl Saver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_benchmark_can_name_its_own_settings_file() {
+        use std::ffi::OsString;
+        let local = || Some(OsString::from(r"C:\L"));
+        assert_eq!(path_from(Some(r"C:\bench\s.json".into()), local()), PathBuf::from(r"C:\bench\s.json"));
+        assert_eq!(path_from(None, local()), PathBuf::from(r"C:\L\Negotium\settings.json"));
+        assert_eq!(path_from(Some(OsString::new()), local()), PathBuf::from(r"C:\L\Negotium\settings.json"), "an empty value is no value");
+    }
 
     /// A fresh directory under the temp dir, removed when dropped (also when a test fails).
     struct TempDir(PathBuf);

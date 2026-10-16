@@ -1,32 +1,12 @@
 //! The environment a benchmarked Negotium runs in. It never shares the user's real
 //! `%LOCALAPPDATA%\Negotium` (settings.json, renderer-fallback marker, log): each run gets a fresh
-//! scratch directory, and the renderer is chosen explicitly (GPU by default). Pure: computes what
+//! scratch directory, with its own settings file and an explicit renderer. Pure: computes what
 //! to change; `apply_to_process` is the only side effect.
 use anyhow::{Result, bail};
 #[cfg(test)]
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Renderer {
-    /// Negotium's own default: winit + FemtoVG.
-    #[default]
-    Gpu,
-    /// winit + software.
-    Software,
-}
-
-impl Renderer {
-    pub fn parse(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "gpu" => Ok(Self::Gpu),
-            "software" => Ok(Self::Software),
-            other => bail!("--renderer takes gpu or software, not {other}"),
-        }
-    }
-}
 
 /// Environment variables to set and to remove for a Negotium child.
 #[derive(Debug, PartialEq)]
@@ -49,17 +29,20 @@ fn same_path(a: &OsStr, b: &OsStr) -> bool {
     norm(a) == norm(b)
 }
 
-/// What a Negotium child needs: its own LOCALAPPDATA, the frame-stats file, and the renderer.
-pub fn negotium_child_env(scratch_local_appdata: &Path, stats: &Path, renderer: Renderer) -> ChildEnv {
+/// What a Negotium child needs: its own LOCALAPPDATA, its own settings file, the frame-stats file
+/// and, unless it is left to Negotium's own GPU choice (`None`, which keeps the watchdog), the
+/// `SLINT_BACKEND` of the renderer under test.
+pub fn negotium_child_env(scratch_local_appdata: &Path, settings: &Path, stats: &Path, backend: Option<&'static str>) -> ChildEnv {
     let mut set = vec![
         ("LOCALAPPDATA", scratch_local_appdata.as_os_str().to_owned()),
+        ("NEGOTIUM_SETTINGS", settings.as_os_str().to_owned()),
         ("NEGOTIUM_FRAME_STATS", stats.as_os_str().to_owned()),
     ];
     let mut remove = vec!["NEGOTIUM_SIMULATE_STALL"];
-    match renderer {
+    match backend {
         // No SLINT_BACKEND: Negotium selects GPU itself (and keeps its watchdog), with fresh settings.
-        Renderer::Gpu => remove.push("SLINT_BACKEND"),
-        Renderer::Software => set.push(("SLINT_BACKEND", "winit-software".into())),
+        None => remove.push("SLINT_BACKEND"),
+        Some(b) => set.push(("SLINT_BACKEND", b.into())),
     }
     ChildEnv { set, remove }
 }
@@ -133,7 +116,8 @@ mod tests {
         let real = r"C:\Users\someone\AppData\Local";
         let scratch = scratch_local_appdata(Path::new(r"C:\Temp"), Some(OsStr::new(real)), 7, 2).unwrap();
         let mut env = parent_env(real);
-        negotium_child_env(&scratch, Path::new(r"C:\Temp\stats.json"), Renderer::Gpu).apply_to(&mut env);
+        negotium_child_env(&scratch, Path::new(r"C:\Temp\s.json"), Path::new(r"C:\Temp\stats.json"), None).apply_to(&mut env);
+        assert_eq!(env["NEGOTIUM_SETTINGS"], r"C:\Temp\s.json");
         assert_eq!(env["LOCALAPPDATA"], scratch.as_os_str());
         assert_ne!(env["LOCALAPPDATA"], OsString::from(real));
         assert!(scratch.starts_with(r"C:\Temp"), "{scratch:?}");
@@ -173,15 +157,12 @@ mod tests {
     }
 
     #[test]
-    fn gpu_is_the_default_and_leaves_slint_backend_unset_and_software_selects_it() {
-        assert_eq!(Renderer::default(), Renderer::Gpu);
-        let (dir, stats) = (Path::new(r"C:\S"), Path::new(r"C:\s.json"));
+    fn no_backend_leaves_slint_backend_unset_and_a_backend_selects_it() {
+        let (dir, settings, stats) = (Path::new(r"C:\S"), Path::new(r"C:\S\settings.json"), Path::new(r"C:\s.json"));
         let mut env = parent_env(r"C:\Real");
-        negotium_child_env(dir, stats, Renderer::Gpu).apply_to(&mut env);
+        negotium_child_env(dir, settings, stats, None).apply_to(&mut env);
         assert!(!env.contains_key("SLINT_BACKEND"), "an inherited SLINT_BACKEND must not leak into the GPU run");
-        negotium_child_env(dir, stats, Renderer::Software).apply_to(&mut env);
+        negotium_child_env(dir, settings, stats, Some("winit-software")).apply_to(&mut env);
         assert_eq!(env["SLINT_BACKEND"], "winit-software");
-        assert_eq!(Renderer::parse("Software").unwrap(), Renderer::Software);
-        assert!(Renderer::parse("vulkan").is_err());
     }
 }

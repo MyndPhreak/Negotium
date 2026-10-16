@@ -432,3 +432,58 @@ fn performance_page_resize_frames_fit_in_16_ms() {
     p25_frame(Load::Noise); // reported, not gated
     assert!(smooth <= 16.0, "25th-percentile frame {smooth:.2} ms on load-like data is over 16 ms");
 }
+
+/// Software-renderer cost of one scroll step (GraphClock moves, nothing else changes) at
+/// 1920 x 1080, scale 1.5: partial repaint (the window's real mode). Reported, not gated. The
+/// full-repaint figure is `performance_page_resize_frames_fit_in_16_ms`. Release only:
+/// `cargo test --release -p negotium --test render -- --ignored scroll_step --nocapture`.
+#[test]
+#[ignore = "bench: run in release with --ignored"]
+fn scroll_step_cost_under_the_software_renderer() {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType};
+    use slint::platform::{Platform, WindowAdapter, WindowEvent};
+    use std::rc::Rc;
+    use std::time::Instant;
+    if cfg!(debug_assertions) {
+        panic!("frame times only mean something in a release build");
+    }
+    struct Software(Rc<MinimalSoftwareWindow>);
+    impl Platform for Software {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    slint::platform::set_platform(Box::new(Software(window.clone()))).expect("one backend per test thread");
+    let ui = MainWindow::new().unwrap();
+    ui.show().unwrap();
+    window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.5 });
+    let (w, h) = (1920u32, 1080u32);
+    ui.window().set_size(PhysicalSize::new(w, h));
+    let mut buffer = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+    let spark = negotium::graph::line(samples(82, 3, Load::Smooth), 81_000, 60_000, 100.0, 60);
+    let meters: Vec<negotium::MeterData> = ["CPU", "Memory", "Disk", "GPU", "Network"]
+        .into_iter()
+        .map(|l| negotium::MeterData { label: l.into(), value: "12%".into(), sub: "".into(), spark: spark.clone().into(), available: true })
+        .collect();
+    ui.set_meters(ModelRc::new(VecModel::from(meters)));
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![busy_graph("% Utilization", 300, 1, Load::Smooth)])));
+    let cells: Vec<GraphData> = (0..32).map(|i| busy_graph(&format!("CPU {i}"), 60, i + 7, Load::Smooth)).collect();
+    ui.set_perf_cells(ModelRc::new(VecModel::from(cells)));
+    for (page, name) in [(0, "Overview"), (1, "Performance, 32 cells")] {
+        ui.set_page(page);
+        let mut step = |i: u32| {
+            ui.invoke_scroll_from(-1_000.0 + i as f32 * 20.0, 1.0);
+            window.request_redraw();
+            let start = Instant::now();
+            window.draw_if_needed(|r| {
+                r.render(&mut buffer, w as usize);
+            });
+            start.elapsed().as_secs_f64() * 1e3
+        };
+        step(0); // first paint
+        let mut frames: Vec<f64> = (1..40).map(&mut step).collect();
+        frames.sort_by(f64::total_cmp);
+        println!("{name}: scroll step, partial repaint: median {:.2} ms, p95 {:.2} ms", frames[frames.len() / 2], frames[frames.len() * 95 / 100]);
+    }
+}
