@@ -336,6 +336,11 @@ impl Bridge {
         self.startup = entries;
     }
 
+    /// The startup entries as last listed.
+    pub fn startup_entries(&self) -> &[StartupEntry] {
+        &self.startup
+    }
+
     /// The entry behind a Startup row id, as last listed.
     pub fn startup_entry(&self, id: i32) -> Option<StartupEntry> {
         usize::try_from(id).ok().and_then(|i| self.startup.get(i)).cloned()

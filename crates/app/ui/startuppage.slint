@@ -29,6 +29,10 @@ export component StartupPage inherits VerticalLayout {
     in property <[StartupData]> rows;
     in property <bool> loading;
     in property <bool> admin-banner;
+    // Some list, folder or key couldn't be read: the list may be incomplete or show a wrong state.
+    in property <bool> read-note;
+    // Room kept free at the bottom (the floating toast), so the last row can be scrolled clear.
+    in property <length> bottom-inset;
     in property <bool> interactive: true;
     callback toggle(int, bool);
     callback refresh();
@@ -43,6 +47,7 @@ export component StartupPage inherits VerticalLayout {
     property <length> gutter: 14px;
     max-width: 16384px; // see MetersRow: repeaters must not cap the window width
     padding: 12px;
+    padding-bottom: 12px + root.bottom-inset;
     spacing: 10px;
 
     HorizontalLayout {
@@ -58,6 +63,13 @@ export component StartupPage inherits VerticalLayout {
         }
         // Always offered: a refresh asked for while a job runs is refused in Rust (that job's
         // re-read lands anyway); a Button disabled under its focus would keep a stale focus.
+        // A job runs over a shown list: clicks wait (they are refused until it lands), so say so.
+        if root.loading && root.rows.length > 0 : Text {
+            text: "Updating…";
+            color: Theme.muted;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
         Button { text: "Refresh"; enabled: root.interactive; clicked => { root.refresh(); } }
     }
     // Inline, never a dialog (spec 7).
@@ -77,6 +89,13 @@ export component StartupPage inherits VerticalLayout {
         HeaderText { text: "Status"; width: root.status-w; }
         HeaderText { text: "Location"; width: root.location-w; }
         Rectangle { width: root.switch-w; }
+    }
+    if root.read-note : Text {
+        text: "Some startup apps couldn't be read; details are in the log.";
+        color: Theme.muted;
+        font-size: 12px;
+        wrap: word-wrap;
+        vertical-stretch: 0;
     }
     if root.loading && root.rows.length == 0 : Text {
         text: "Reading startup apps…";

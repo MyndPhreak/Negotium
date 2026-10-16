@@ -2259,10 +2259,109 @@ fn a_job_result_lands_through_the_bridge_with_its_failure_inline() {
     let (ui, _controls, bridge) = bridged();
     negotium::bridge::set_current(bridge.clone());
     ui.set_startup_loading(true);
-    negotium::startup::deliver(&ui, startup_entries(), Some("Couldn't change Zoom: access denied.".into()), false);
+    let outcome = |read_error, failure: Option<&str>| JobOutcome {
+        entries: Some(startup_entries()), read_error, failure: failure.map(Into::into),
+    };
+    negotium::startup::deliver(&ui, outcome(false, Some("Couldn't change Zoom: access denied.")), false);
     assert_eq!(ui.get_startup_rows().row_count(), 1);
     assert!(!ui.get_startup_loading());
+    assert!(!ui.get_startup_read_note());
     assert_eq!(ui.get_toast(), "Couldn't change Zoom: access denied.");
+    negotium::startup::deliver(&ui, outcome(true, None), false);
+    assert!(ui.get_startup_read_note(), "an unreadable list is noted");
+    negotium::startup::deliver(&ui, outcome(false, None), false);
+    assert!(!ui.get_startup_read_note(), "and the note goes once everything reads");
+}
+
+use negotium::startup::JobOutcome;
+
+// Fix round 1 (2a): a job that failed outright still clears the loading state, undoes the
+// pending switch and says so.
+#[test]
+fn a_failed_job_restores_the_listed_state_and_frees_the_page() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    negotium::bridge::set_current(bridge.clone());
+    bridge.borrow_mut().set_startup(&ui, startup_entries(), false);
+    negotium::startup::begin_toggle(&bridge.borrow(), &ui, 0, false).expect("a toggle starts");
+    assert!(!ui.get_startup_rows().row_data(0).unwrap().enabled);
+    let failed = JobOutcome { entries: None, read_error: false, failure: Some(negotium::startup::JOB_FAILED.into()) };
+    negotium::startup::deliver(&ui, failed, false);
+    assert!(!ui.get_startup_loading(), "the next job may start");
+    let row = ui.get_startup_rows().row_data(0).unwrap();
+    assert!(row.enabled && row.status == "Enabled", "the switch shows the last listed state again");
+    assert_eq!(ui.get_toast(), negotium::startup::JOB_FAILED);
+}
+
+const READ_NOTE: &str = "Some startup apps couldn't be read; details are in the log.";
+
+// Fix round 1 (1, 2b): an unreadable list is noted on the page; a running job over a shown list
+// says "Updating…".
+#[test]
+fn the_page_notes_unreadable_lists_and_a_running_update() {
+    let ui = startup_window(1000, 720, 3);
+    assert!(text(&ui, READ_NOTE).is_none());
+    ui.set_startup_read_note(true);
+    let note = rect_of(&text(&ui, READ_NOTE).expect("the read note"));
+    let header = rect_of(&text(&ui, "Name").expect("header"));
+    let first = rect_of(&El::find_by_accessible_label(&ui, "App00, Enabled, Registry (you)").next().expect("row"));
+    assert!(note.1 >= header.1 + header.3 && note.1 + note.3 <= first.1, "under the header, above the list: {note:?}");
+    assert!(text(&ui, "Updating…").is_none());
+    ui.set_startup_loading(true);
+    assert!(text(&ui, "Updating…").is_some(), "a job runs over the shown list");
+    ui.set_startup_rows(ModelRc::new(VecModel::from(Vec::<StartupData>::new())));
+    assert!(text(&ui, "Updating…").is_none(), "with nothing shown the empty state says it instead");
+    assert!(text(&ui, "Reading startup apps…").is_some());
+}
+
+/// The Overview's list of apps (below its search box and header).
+fn apps_list(ui: &MainWindow) -> Rect {
+    rect_of(&El::find_by_accessible_label(ui, "Apps").next().expect("apps list"))
+}
+
+/// The rect of the element with id `id` ("Component::id").
+fn by_id(ui: &MainWindow, id: &str) -> Rect {
+    use i_slint_backend_testing::ElementRoot;
+    let found = ui.root_element().query_descendants().match_id(id).find_all();
+    rect_of(found.first().unwrap_or_else(|| panic!("no element {id}")))
+}
+
+// Fix round 1 (2d): the toast never hides the end of a list, and the keyboard reaches its OK.
+#[test]
+fn the_toast_leaves_the_lists_clear_and_takes_tab_and_space() {
+    use slint::platform::Key;
+    let ui = startup_window(1000, 720, 20);
+    let dismissed = Rc::new(RefCell::new(0));
+    let d = dismissed.clone();
+    ui.on_dismiss_toast(move || *d.borrow_mut() += 1);
+    // Hidden pages are left out of the accessibility tree: measure each while it shows.
+    ui.set_page(0);
+    let full_apps = apps_list(&ui);
+    ui.set_page(2);
+    let full = (by_id(&ui, "StartupPage::sv"), full_apps);
+    ui.set_toast("Couldn't change App19: access denied.".into());
+    for (n, page) in [0, 2].into_iter().enumerate() {
+        ui.set_page(page);
+        let ok = rect_of(&El::find_by_accessible_label(&ui, "OK").next().expect("the toast's OK"));
+        let toast = by_id(&ui, "MainWindow::toast-host");
+        assert!(toast.3 > 30.0 && ok.1 >= toast.1);
+        let list = if page == 0 { apps_list(&ui) } else { by_id(&ui, "StartupPage::sv") };
+        assert!(list.1 + list.3 <= toast.1, "page {page}: the list ends above the toast: {list:?} {toast:?}");
+        let before = if page == 0 { full.1 } else { full.0 };
+        assert_eq!(before.3 - list.3, toast.3 + 12.0, "page {page}: the list gives up exactly the toast's room");
+        let mut reached = false;
+        for _ in 0..80 {
+            press_key(&ui, Key::Tab);
+            press_key(&ui, Key::Space);
+            if *dismissed.borrow() == n + 1 {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "page {page}: Tab reaches the toast's OK and Space dismisses");
+    }
+    ui.set_toast("".into());
+    assert_eq!(by_id(&ui, "StartupPage::sv"), full.0, "no toast, no room kept");
 }
 
 // PF12: nothing on the Startup page changes per tick; a frame meant for it touches nothing.
@@ -2333,13 +2432,20 @@ fn a_tall_window_leaves_the_startup_header_and_banner_their_size() {
         ];
         if n == 0 {
             out.push(rect_of(&text(&ui, "No apps start with Windows.").expect("empty state")));
+            ui.set_startup_loading(true);
+            out.push(rect_of(&text(&ui, "Reading startup apps…").expect("loading state")));
+        } else {
+            out.push(rect_of(&switch(&ui, "Start App01 with Windows")));
+            out.push(rect_of(&El::find_by_accessible_label(&ui, "App00, Enabled, Registry (you)").next().expect("first row")));
         }
-        out
+        (out, by_id(&ui, "StartupPage::sv"))
     };
     for n in [0, 3] {
-        assert_eq!(measure(720, n), measure(1100, n), "with {n} rows nothing above the list moves or grows");
+        let ((short, short_list), (tall, tall_list)) = (measure(720, n), measure(1100, n));
+        assert_eq!(short, tall, "with {n} rows nothing above the list, nor the rows, moves or grows");
+        assert_eq!(tall_list.3 - short_list.3, 380.0, "with {n} rows the list takes all the spare height");
     }
-    let header = measure(1100, 3)[3];
+    let header = measure(1100, 3).0[3];
     assert!(header.3 < 20.0, "the header keeps its text height: {header:?}");
     let ui = startup_window(1000, 1100, 3);
     let first = rect_of(&switch(&ui, "Start App01 with Windows"));

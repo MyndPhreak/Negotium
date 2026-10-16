@@ -3,7 +3,7 @@
 //! and WinRT, so they run on action threads; results come back through the bridge.
 use crate::MainWindow;
 use crate::bridge::Bridge;
-use negotium_actions::startup::{StartupEntry, StartupRoots, list_startup, set_startup_enabled};
+use negotium_actions::startup::{StartupEntry, StartupRoots, is_read_error, list_startup, set_startup_enabled};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StartupRow {
@@ -105,30 +105,75 @@ pub fn begin_toggle(bridge: &Bridge, ui: &MainWindow, id: i32, enabled: bool) ->
     Some(entry)
 }
 
-/// Runs `job` on an action thread and hands its result to `deliver` on the UI thread. The one
-/// path every list and toggle takes.
+/// What lands on the UI thread after a job: the entries (`None`: the job failed outright, the
+/// last listed state stays), whether some list, folder or key couldn't be read, and the inline
+/// failure message.
+#[derive(Debug, PartialEq)]
+pub struct JobOutcome {
+    pub entries: Option<Vec<StartupEntry>>,
+    pub read_error: bool,
+    pub failure: Option<String>,
+}
+
+/// Shown when a job panicked: nothing changed on screen, and the log has the details.
+pub const JOB_FAILED: &str = "Couldn't read the startup apps; details are in the log.";
+
+/// Turns a job's result (or its panic) into what the page shows, logging what it must: each
+/// read error (a "Skipped" line is informational and not logged) and a panic's message.
+pub fn finish(result: std::thread::Result<JobResult>) -> JobOutcome {
+    match result {
+        Ok((entries, errors, failure)) => {
+            let read_errors: Vec<&String> = errors.iter().filter(|e| is_read_error(e)).collect();
+            for e in &read_errors {
+                warn(&format!("startup list: {e}"));
+            }
+            JobOutcome { entries: Some(entries), read_error: !read_errors.is_empty(), failure }
+        }
+        Err(panic) => {
+            let why = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            warn(&format!("startup job panicked: {why}"));
+            JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.to_string()) }
+        }
+    }
+}
+
+/// One log for every startup job, so a line already written isn't written again on each open.
+fn warn(msg: &str) {
+    static LOG: std::sync::OnceLock<std::sync::Mutex<crate::log::Log>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| std::sync::Mutex::new(crate::log::Log::new(crate::log::Log::default_path())));
+    log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).warn(msg);
+}
+
+/// Runs `job` on an action thread and hands its outcome to `deliver` on the UI thread. The one
+/// path every list and toggle takes; a panicking job still delivers, so the page never stays
+/// stuck in `startup-loading`.
 pub fn spawn_job(weak: slint::Weak<MainWindow>, elevated: bool, job: impl FnOnce() -> JobResult + Send + 'static) {
     std::thread::spawn(move || {
-        let (entries, errors, failure) = job();
-        if !errors.is_empty() {
-            let mut log = crate::log::Log::new(crate::log::Log::default_path());
-            for e in &errors {
-                log.warn(&format!("startup list: {e}"));
-            }
-        }
+        let outcome = finish(std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)));
         // Fails only once the event loop is gone (the app is quitting): nothing left to show.
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                deliver(&ui, entries, failure, elevated);
+                deliver(&ui, outcome, elevated);
             }
         });
     });
 }
 
-/// UI thread: a job's result lands. The list shows the real state; a failed toggle says why inline.
-pub fn deliver(ui: &MainWindow, entries: Vec<StartupEntry>, failure: Option<String>, elevated: bool) {
-    crate::bridge::with_bridge(|b| b.set_startup(ui, entries, elevated));
-    if let Some(message) = failure {
+/// UI thread: a job's outcome lands and the next job may start. The list shows the real state
+/// (after an outright failure, the last listed one again, undoing a pending switch); what couldn't
+/// be read is noted on the page; a failure says why inline.
+pub fn deliver(ui: &MainWindow, outcome: JobOutcome, elevated: bool) {
+    crate::bridge::with_bridge(|b| {
+        let entries = outcome.entries.unwrap_or_else(|| b.startup_entries().to_vec());
+        b.set_startup(ui, entries, elevated);
+    });
+    ui.set_startup_loading(false);
+    ui.set_startup_read_note(outcome.read_error);
+    if let Some(message) = outcome.failure {
         ui.set_toast(message.into());
     }
 }
@@ -206,5 +251,17 @@ mod tests {
         let (after, _, failure) = toggle_job(&roots, &tool, false, false);
         assert_eq!(failure, None);
         assert!(!after.iter().find(|e| e.key == "Tool").unwrap().enabled);
+    }
+
+    #[test]
+    fn only_read_errors_are_noted_and_a_panic_still_delivers() {
+        let skipped = format!("{}Bad in HKCU Run: it isn't a command", negotium_actions::startup::SKIPPED);
+        let ok = finish(Ok((vec![], vec![skipped.clone()], None)));
+        assert_eq!(ok, JobOutcome { entries: Some(vec![]), read_error: false, failure: None }, "a skipped value is no read error");
+        let unread = finish(Ok((vec![], vec![skipped, "HKLM Run: access denied".into()], Some("x".into()))));
+        assert!(unread.read_error);
+        assert_eq!(unread.failure.as_deref(), Some("x"));
+        let panicked = finish(std::panic::catch_unwind(|| -> JobResult { std::panic::panic_any("boom".to_string()) }));
+        assert_eq!(panicked, JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.into()) });
     }
 }

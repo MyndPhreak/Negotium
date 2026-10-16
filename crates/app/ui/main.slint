@@ -53,6 +53,9 @@ export component MainWindow inherits Window {
     in property <string> scrub-empty;
     in property <[ScrubRow]> scrub-rows;
     out property <bool> modal-open: confirm-visible || details-visible;
+    // The room the floating toast takes at the bottom of a page (its height and its gap), so the
+    // last rows of the Overview and Startup lists can still be scrolled clear of it.
+    property <length> toast-inset: toast-host.preferred-height > 0 ? toast-host.preferred-height + 12px : 0px;
     out property <int> menu-target: list.menu-target;
     // Keyboard navigation through the app list (ruling P3-7): set by the bridge.
     in property <int> current-row: -1;
@@ -86,6 +89,8 @@ export component MainWindow inherits Window {
     in property <[StartupData]> startup-rows;
     in-out property <bool> startup-loading;
     in property <bool> startup-admin-banner;
+    // Some list, folder or key couldn't be read (crate::startup::JobOutcome::read_error).
+    in property <bool> startup-read-note;
     callback toggle-startup(int, bool);
     callback refresh-startup();
 
@@ -190,6 +195,7 @@ export component MainWindow inherits Window {
                 visible: root.page == 0;
                 VerticalLayout {
                     padding: 12px;
+                    padding-bottom: 12px + root.toast-inset;
                     spacing: 10px;
                     if root.show-admin-banner : Banner {
                         interactive: !root.modal-open;
@@ -267,6 +273,8 @@ export component MainWindow inherits Window {
                     rows: root.startup-rows;
                     loading: root.startup-loading;
                     admin-banner: root.startup-admin-banner;
+                    read-note: root.startup-read-note;
+                    bottom-inset: root.toast-inset;
                     interactive: !root.modal-open;
                     toggle(id, on) => { root.toggle-startup(id, on); }
                     refresh => { root.refresh-startup(); }
@@ -297,15 +305,17 @@ export component MainWindow inherits Window {
                 }
             }
             // Over every page: a result (a failed startup toggle, an action's message) shows
-            // wherever the user is.
-            if root.toast != "" : Toast {
+            // wherever the user is. Its host is empty (zero height) without a toast.
+            toast-host := VerticalLayout {
                 x: 12px;
                 width: parent.width - 24px;
                 height: self.preferred-height;
                 y: parent.height - self.height - 12px;
-                text: root.toast;
-                interactive: !root.modal-open;
-                dismiss => { root.dismiss-toast(); }
+                if root.toast != "" : Toast {
+                    text: root.toast;
+                    interactive: !root.modal-open;
+                    dismiss => { root.dismiss-toast(); }
+                }
             }
         }
     }
