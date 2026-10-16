@@ -56,29 +56,30 @@ export component Graph inherits Rectangle {
         height: 1px;
         background: Theme.card-border;
     }
+    // Inset vertically: the card's own clip would trim a stroke on the 0% or 100% line in half.
     DataPath {
         x: 0;
-        y: 0;
+        y: 2px;
         width: root.width;
-        height: root.height;
+        height: root.height - 4px;
         visible: root.filled;
         commands: root.data.area;
         paint: Theme.accent.with-alpha(0.16);
     }
     DataPath {
         x: 0;
-        y: 0;
+        y: 2px;
         width: root.width;
-        height: root.height;
+        height: root.height - 4px;
         commands: root.data.line;
         stroke: Theme.accent;
         stroke-width: 1.5px;
     }
     DataPath {
         x: 0;
-        y: 0;
+        y: 2px;
         width: root.width;
-        height: root.height;
+        height: root.height - 4px;
         commands: root.data.line2;
         stroke: Theme.muted;
         stroke-width: 1.5px;

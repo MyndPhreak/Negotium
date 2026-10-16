@@ -44,9 +44,35 @@ fn a_graphs_data_fills_its_whole_height() {
             .filter(|&(x, y)| accent_tinted(shot.as_slice()[(y * shot.width() + x) as usize]))
             .count()
     };
-    let (top, bottom) = (tinted_in(y0..y0 + 2), tinted_in(y0 + h - 2..y0 + h));
+    let (top, bottom) = (tinted_in(y0..y0 + 4), tinted_in(y0 + h - 4..y0 + h));
     assert!(top > 0, "the 100% sample reaches the graph's top rows");
     assert!(bottom > 0, "the area reaches the graph's bottom rows");
+}
+
+/// A large graph's line along the floor or the ceiling keeps its full stroke inside the card: the
+/// data is inset from the card's clip, which would otherwise trim it to half.
+#[test]
+fn a_graphs_floor_and_ceiling_lines_keep_their_full_stroke_inside_the_card() {
+    software_backend();
+    let ui = MainWindow::new().unwrap();
+    ui.global::<Theme>().set_accent(slint::Color::from_rgb_u8(255, 0, 0));
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.set_page(1);
+    let line = |label: &str, path: &str| GraphData { label: label.into(), value: "".into(), scale: "".into(), line: path.into(), line2: "".into(), area: "".into() };
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![line("Floor", "M 0 100 L 1000 100"), line("Ceiling", "M 0 0 L 1000 0")])));
+    ui.show().unwrap();
+    let shot = ui.window().take_snapshot().expect("snapshot");
+    let rows = |label: &str| -> Vec<u32> {
+        let e = ElementHandle::find_by_accessible_label(&ui, label).next().unwrap_or_else(|| panic!("missing {label}"));
+        let (p, s) = (e.absolute_position(), e.size());
+        let (x0, w) = (p.x.round() as u32 + 20, s.width.round() as u32 - 40);
+        (p.y.round() as u32 + 1..(p.y + s.height).round() as u32 - 1)
+            .filter(|&y| (x0..x0 + w).any(|x| accent_tinted(shot.as_slice()[(y * shot.width() + x) as usize])))
+            .collect()
+    };
+    let (floor, ceiling) = (rows("Floor graph"), rows("Ceiling graph"));
+    assert!(floor.len() >= 2, "floor rows {floor:?}");
+    assert!(ceiling.len() >= 2, "ceiling rows {ceiling:?}");
 }
 
 /// The small multiples draw only their line: the area fill, under every cell, made each resize
