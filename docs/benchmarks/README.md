@@ -131,6 +131,10 @@ Same machine and commands as above (`tick_breakdown --ticks 60`, `negotium-probe
 
 Plan 3a's history preallocates one hour of columns (budget about 2 MB, spec §4.4) and does not grow per tick, so its figure is capacity and is not comparable with Plan 1's much smaller one.
 
+The probe's own headline for the same run: tick median 15.47 ms, p95 23.26 ms (Plan 1 headline: median 18.73 ms). Neither `pdh` (+3 ms limit) nor `tick` (+4 ms limit) grew against Plan 1.
+
+Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter send/receive, GPU adapter memory), one interface-table read every 10 s, and one D3DKMT temperature query per GPU per tick.
+
 ### History memory budget
 
 The history preallocates 3601 one-second samples (one hour) for everything it keeps, so its size depends on the machine's devices, not on how long Negotium runs. Figures are from `History::approx_bytes` after one sample:
@@ -148,9 +152,6 @@ The history preallocates 3601 one-second samples (one hour) for everything it ke
 | Per GPU (utilization %, dedicated, shared, temperature), plus per engine type (one percent column) | ≈47 200, plus ≈3 700 |
 
 The top lists dominate. A typical machine (16 logical processors, 2 disks, 2 adapters, 1 GPU with 8 engine types) comes to about 1.52 MB. A 64-processor machine with 4 disks, 8 adapters (virtual switches, VPNs) and 2 GPUs with 10 engine types each comes to 2 063 325 bytes, over the ≈2 MB budget of spec §4.4. That is accepted rather than restructured: it is a fixed size, set by the device count, and it does not grow with time.
-The probe's own headline for the same run: tick median 15.47 ms, p95 23.26 ms (Plan 1 headline: median 18.73 ms). Neither `pdh` (+3 ms limit) nor `tick` (+4 ms limit) grew against Plan 1.
-
-Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter send/receive, GPU adapter memory), one interface-table read every 10 s, and one D3DKMT temperature query per GPU per tick.
 
 ## Manual checks: Plan 3a
 
@@ -165,3 +166,19 @@ Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter
 9. Narrator on the keyboard-navigated list: note what it announces for the list itself and for the current row.
 10. Shift+F10 and the Menu key: the native context menu opens anchored at the highlighted row, not at the pointer or a window corner.
 11. Meters do not change height when the window opens: open the window from the tray and from a cold start and watch the Overview meters.
+
+## Manual checks: Plan 3b
+
+1. Startup (not elevated): the list matches Task Manager → Startup apps (names, publishers, Enabled/Disabled). Toggling a per-user entry in either app shows the same state in the other after a refresh.
+2. Packaged startup task (e.g. Windows Terminal → Settings → Launch on machine startup): Negotium lists it; disabling it in Negotium shows it disabled in Settings → Apps → Startup, and enabling it there shows it enabled after Refresh in Negotium.
+3. All-users entries without admin: switches disabled with "Needs admin" and the inline banner; "Restart as admin" reopens Negotium on Startup with those switches enabled.
+4. Settings: each refresh rate visibly changes the update pace; Theme System/Light/Dark switch content, title bar and Mica; with System, flipping Windows' mode follows within a second; Always on top holds above Explorer; with "Keep running in the tray" off, closing the window exits.
+5. Settings persist across restarts; replacing `%LOCALAPPDATA%\Negotium\settings.json` with `{` starts Negotium with defaults and leaves `settings.json.bad`.
+6. GPU renderer: it is the default and resizing is smooth. The debug build with `NEGOTIUM_SIMULATE_STALL=1` relaunches into software once and creates `%LOCALAPPDATA%\Negotium\renderer-fallback`. Settings → "Use GPU rendering" then shows off with its explanation; turning it on clears the marker after a restart. A minimised start must not trigger the fallback; the tray appears after about 10 s.
+7. Graphs fill their boxes top to bottom.
+8. Shift+F10 / the Menu key with nothing focused highlights a row first, and a second press opens the menu.
+9. Task Manager's `StartupApproved\StartupFolder` value name matches Negotium's, which is the shortcut file name including `.lnk`.
+10. A hidden (+h) shortcut in the Startup folder: does Task Manager list it, and does it run at sign-in? Negotium skips hidden and system files.
+11. After disabling a packaged task in Settings or Task Manager, check whether `LastDisabledTime` is written. Negotium writes only `State`.
+12. The UAC prompt for "Restart as admin" appears in front, not as a flashing taskbar button.
+13. Theme change: the title bar repaints at once, and the Settings Tab order scrolls each focused row into view.
