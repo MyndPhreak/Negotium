@@ -4,8 +4,8 @@
 use negotium_actions::ActionError;
 use negotium_actions::startup::registry::{self, Hive, RegKey};
 use negotium_actions::startup::{
-    StartupEntry, StartupRoots, StartupSource, is_read_error, list_startup, set_startup_enabled,
-    write_shortcut,
+    ComApartment, StartupEntry, StartupRoots, StartupSource, is_read_error, list_startup,
+    set_startup_enabled, write_shortcut,
 };
 use negotium_collector::VersionInfo;
 
@@ -577,4 +577,209 @@ fn the_cleanup_helper_refuses_anything_outside_the_test_root() {
         ))
         .is_err()
     );
+}
+
+#[test]
+fn packaged_tasks_are_listed_from_their_state_and_toggle_it() {
+    let sb = Sandbox::new("packaged");
+    let r = &sb.roots;
+    registry::set_dword(
+        &r.packaged.child(r"Contoso.App_8wekyb3d8bbwe\StartTask"),
+        "State",
+        2,
+    )
+    .unwrap();
+    registry::set_dword(&r.packaged.child(r"Contoso.Locked_abc\Boot"), "State", 3).unwrap();
+    registry::set_string(
+        &r.packaged.child(r"Contoso.NoTasks_xyz\Schemas"),
+        "Version",
+        "1",
+    )
+    .unwrap();
+
+    let (entries, errors) = list_startup(r);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(
+        entries.len(),
+        2,
+        "a family without a State is no startup task: {entries:?}"
+    );
+    let app = find(&entries, r"Contoso.App_8wekyb3d8bbwe\StartTask").clone();
+    assert_eq!(app.source, StartupSource::Packaged);
+    assert!(app.enabled && app.changeable && !app.source.needs_admin());
+    assert_eq!(
+        (
+            app.name.as_str(),
+            app.publisher.as_deref(),
+            app.location.as_str()
+        ),
+        ("Contoso.App", None, "Packaged app")
+    );
+    assert_eq!(app.command, "StartTask");
+    let locked = find(&entries, r"Contoso.Locked_abc\Boot").clone();
+    assert!(!locked.enabled && !locked.changeable, "disabled by policy");
+
+    set_startup_enabled(r, &app, false).unwrap();
+    let state =
+        |key: &str| registry::value(&r.packaged.child(key), "State").and_then(|v| v.dword());
+    assert_eq!(state(r"Contoso.App_8wekyb3d8bbwe\StartTask"), Some(1));
+    assert!(!find(&list_startup(r).0, r"Contoso.App_8wekyb3d8bbwe\StartTask").enabled);
+    set_startup_enabled(r, &app, true).unwrap();
+    assert_eq!(state(r"Contoso.App_8wekyb3d8bbwe\StartTask"), Some(2));
+    let refused = set_startup_enabled(r, &locked, true).unwrap_err();
+    assert_eq!(
+        refused.message("Contoso.Locked", false),
+        "Couldn't change Contoso.Locked: its state is set by a policy."
+    );
+    assert_eq!(state(r"Contoso.Locked_abc\Boot"), Some(3), "untouched");
+}
+
+/// A policy that fixes a task after it was listed still wins: the toggle reads the state again.
+#[test]
+fn a_task_fixed_by_policy_after_listing_is_not_written() {
+    let sb = Sandbox::new("latepolicy");
+    let r = &sb.roots;
+    let key = r.packaged.child(r"Contoso.App_abc\Task");
+    registry::set_dword(&key, "State", 1).unwrap();
+    let task = find(&list_startup(r).0, r"Contoso.App_abc\Task").clone();
+    assert!(task.changeable);
+    registry::set_dword(&key, "State", 4).unwrap();
+    assert!(set_startup_enabled(r, &task, false).is_err());
+    assert_eq!(
+        registry::value(&key, "State").and_then(|v| v.dword()),
+        Some(4)
+    );
+}
+
+/// A task removed since it was listed (its app uninstalled) isn't written back into being.
+#[test]
+fn a_task_gone_since_listing_is_not_recreated() {
+    let sb = Sandbox::new("gonetask");
+    let r = &sb.roots;
+    let family = r.packaged.child("Contoso.App_abc");
+    registry::set_dword(&family.child("Task"), "State", 2).unwrap();
+    let task = find(&list_startup(r).0, r"Contoso.App_abc\Task").clone();
+    registry::delete_test_tree(&family).unwrap();
+    let refused = set_startup_enabled(r, &task, false).unwrap_err();
+    assert_eq!(
+        refused.message("Contoso.App", false),
+        "Couldn't change Contoso.App: it is no longer installed."
+    );
+    assert!(registry::subkeys(&r.packaged).unwrap().is_empty());
+}
+
+/// The name and publisher of an installed package come from PackageManager (current user, no
+/// admin). Only the sandbox is written: a real family name is borrowed for a fake task key.
+#[test]
+fn an_installed_package_is_named_after_its_display_name() {
+    use windows::Management::Deployment::PackageManager;
+    use windows::core::HSTRING;
+    let _com = ComApartment::enter();
+    let manager = PackageManager::new().unwrap();
+    let package = manager
+        .FindPackagesByUserSecurityId(&HSTRING::new())
+        .unwrap()
+        .into_iter()
+        .find(|p| {
+            !p.IsFramework().unwrap_or(true)
+                && p.DisplayName().is_ok_and(|n| !n.is_empty())
+                && p.PublisherDisplayName().is_ok_and(|n| !n.is_empty())
+        })
+        .expect("Windows 11 has installed packages");
+    let family = package.Id().unwrap().FamilyName().unwrap().to_string();
+    let sb = Sandbox::new("installed");
+    let r = &sb.roots;
+    registry::set_dword(&r.packaged.child(&format!(r"{family}\Task")), "State", 2).unwrap();
+    let (entries, errors) = list_startup(r);
+    assert!(errors.is_empty(), "{errors:?}");
+    let e = find(&entries, &format!(r"{family}\Task"));
+    assert_eq!(e.name, package.DisplayName().unwrap().to_string());
+    assert_eq!(
+        e.publisher.as_deref(),
+        Some(package.PublisherDisplayName().unwrap().to_string().as_str())
+    );
+}
+
+#[test]
+fn hidden_and_system_files_in_startup_folders_are_skipped() {
+    let sb = Sandbox::new("hidden");
+    let user = sb.roots.user_folder.clone().unwrap();
+    for (file, flag) in [("hidden.bat", "+h"), ("system.bat", "+s")] {
+        let path = user.join(file);
+        std::fs::write(&path, "@echo off").unwrap();
+        let status = std::process::Command::new("attrib")
+            .arg(flag)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    std::fs::write(user.join("shown.bat"), "@echo off").unwrap();
+    let (entries, errors) = list_startup(&sb.roots);
+    assert!(errors.is_empty(), "{errors:?}");
+    let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+    assert_eq!(keys, ["shown.bat"]);
+}
+
+#[test]
+fn folder_commands_quote_targets_with_spaces() {
+    let sb = Sandbox::new("spaces");
+    let r = &sb.roots;
+    let user = r.user_folder.clone().unwrap();
+    let target = sb.dir.join("Some App").join("ping copy.exe");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::copy(PING, &target).unwrap();
+    write_shortcut(&user.join("Spaced.lnk"), &target.to_string_lossy(), "-n 1").unwrap();
+    write_shortcut(&user.join("Bare.lnk"), &target.to_string_lossy(), "").unwrap();
+    std::fs::write(user.join("my notes.bat"), "@echo off").unwrap();
+    let (entries, errors) = list_startup(r);
+    assert!(errors.is_empty(), "{errors:?}");
+    let t = target.display();
+    assert_eq!(
+        find(&entries, "Spaced.lnk").command,
+        format!("\"{t}\" -n 1")
+    );
+    assert_eq!(find(&entries, "Bare.lnk").command, format!("\"{t}\""));
+    assert_eq!(
+        find(&entries, "my notes.bat").command,
+        format!("\"{}\"", user.join("my notes.bat").display())
+    );
+    assert_eq!(
+        find(&entries, "Spaced.lnk").name,
+        "TCP/IP Ping Command",
+        "still read through the quotes"
+    );
+}
+
+/// A caller already in the multithreaded apartment: shortcuts and package names still resolve.
+#[test]
+fn listing_works_on_a_thread_already_in_the_mta() {
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+    let sb = Sandbox::new("mta");
+    let r = sb.roots.clone();
+    write_shortcut(
+        &r.user_folder.clone().unwrap().join("Ping test.lnk"),
+        PING,
+        "-n 1",
+    )
+    .unwrap();
+    registry::set_dword(&r.packaged.child(r"Contoso.App_abc\Task"), "State", 2).unwrap();
+    std::thread::spawn(move || {
+        // SAFETY: this thread's own apartment, balanced below on the same thread.
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.unwrap();
+        let (entries, errors) = list_startup(&r);
+        // SAFETY: balances the CoInitializeEx above.
+        unsafe { CoUninitialize() };
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        let ping = find(&entries, "Ping test.lnk");
+        assert!(
+            ping.command.to_ascii_uppercase().contains("PING.EXE"),
+            "{ping:?}"
+        );
+        assert!(ping.publisher.is_some(), "{ping:?}");
+        find(&entries, r"Contoso.App_abc\Task");
+    })
+    .join()
+    .unwrap();
 }

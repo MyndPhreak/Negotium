@@ -1,10 +1,10 @@
-//! Startup apps (spec §5.3): Run-key entries (this task), the Startup folders (Task 5) and packaged
-//! startup tasks (Task 6), with the enabled state Task Manager uses. Listing and toggling call
+//! Startup apps (spec §5.3): Run-key entries, the Startup folders and packaged startup tasks, with the enabled state Task Manager uses. Listing and toggling call
 //! Windows: run them on an action thread. Only StartupApproved values (and packaged task states)
 //! are ever written; Run values and shortcuts are never edited or deleted.
 mod approved;
 mod command;
 mod folders;
+pub mod packaged;
 pub mod registry;
 
 pub use approved::{APPROVED_LEN, encode_approved, filetime_now, is_enabled};
@@ -12,7 +12,7 @@ pub use command::{exe_from_command, expand_env};
 pub use folders::{ComApartment, resolve_shortcut, write_shortcut};
 
 use crate::ActionError;
-use command::is_host_program;
+use command::{is_host_program, is_remote};
 use negotium_collector::VersionInfo;
 use registry::{Hive, RegKey, RegValue};
 use std::path::PathBuf;
@@ -31,6 +31,8 @@ pub enum StartupSource {
     UserFolder,
     /// The all-users Startup folder (state under HKLM …\StartupApproved\StartupFolder).
     MachineFolder,
+    /// A packaged app's startup task (state under HKCU …\AppModel\SystemAppData).
+    Packaged,
 }
 
 impl StartupSource {
@@ -49,6 +51,7 @@ impl StartupSource {
             StartupSource::MachineRun32 => "Registry (all users, 32-bit)",
             StartupSource::UserFolder => "Startup folder (you)",
             StartupSource::MachineFolder => "Startup folder (all users)",
+            StartupSource::Packaged => "Packaged app",
         }
     }
 }
@@ -82,6 +85,8 @@ pub struct StartupRoots {
     /// The per-user and all-users Startup folders; `None` skips a folder.
     pub user_folder: Option<PathBuf>,
     pub machine_folder: Option<PathBuf>,
+    /// The packaged apps' task states: `<PackageFamilyName>\<TaskId>` keys with a `State`.
+    pub packaged: RegKey,
 }
 
 fn system_root() -> String {
@@ -101,6 +106,7 @@ impl StartupRoots {
             system_root: system_root(),
             user_folder,
             machine_folder,
+            packaged: RegKey::new(Hive::CurrentUser, packaged::SYSTEM_APP_DATA),
         }
     }
 
@@ -117,6 +123,7 @@ impl StartupRoots {
             system_root: system_root(),
             user_folder: None,
             machine_folder: None,
+            packaged: key("Packaged"),
         }
     }
 
@@ -127,14 +134,17 @@ impl StartupRoots {
         self
     }
 
-    fn approved_key(&self, source: StartupSource) -> RegKey {
-        match source {
+    /// The StartupApproved key holding `source`'s states; `None` for packaged tasks, whose state
+    /// is their own `State` value.
+    fn approved_key(&self, source: StartupSource) -> Option<RegKey> {
+        Some(match source {
             StartupSource::UserRun => self.user_approved.child("Run"),
             StartupSource::MachineRun => self.machine_approved.child("Run"),
             StartupSource::MachineRun32 => self.machine_approved.child("Run32"),
             StartupSource::UserFolder => self.user_approved.child("StartupFolder"),
             StartupSource::MachineFolder => self.machine_approved.child("StartupFolder"),
-        }
+            StartupSource::Packaged => return None,
+        })
     }
 }
 
@@ -142,10 +152,11 @@ impl StartupRoots {
 /// CompanyName (one read of the resource), else `fallback` and no publisher. Shared by every
 /// source that starts a program file (the Run keys and the Startup folders).
 /// A host program (`rundll32`, `cmd`, `powershell`, …) counts as unknown: its own name and
-/// publisher would hide what it runs.
+/// publisher would hide what it runs. So does a program on a network share or mapped drive: its
+/// resource isn't read, so a share that doesn't answer can't hold up the list.
 fn describe_program(exe: Option<&str>, fallback: &str) -> (String, Option<String>) {
     let info = exe
-        .filter(|e| !is_host_program(e))
+        .filter(|e| !is_host_program(e) && !is_remote(e))
         .and_then(VersionInfo::read);
     let info = info.as_ref();
     let name = info
@@ -181,14 +192,17 @@ fn enabled_in(states: &[(String, RegValue)], name: &str) -> bool {
         .is_none_or(is_enabled)
 }
 
-/// The StartupApproved values of `source`'s list. A key that can't be read adds a line to
-/// `errors` and reads as empty (every entry enabled); a value over 1 MB adds a "Skipped" line.
+/// The StartupApproved values of `source`'s list (none for packaged tasks). A key that can't be
+/// read adds a line to `errors` and reads as empty (every entry enabled); a value over 1 MB adds a
+/// "Skipped" line.
 fn approved_states(
     roots: &StartupRoots,
     source: StartupSource,
     errors: &mut Vec<String>,
 ) -> Vec<(String, RegValue)> {
-    let key = roots.approved_key(source);
+    let Some(key) = roots.approved_key(source) else {
+        return Vec::new();
+    };
     match registry::values(&key) {
         Ok(states) => {
             for (name, value) in &states {
@@ -205,27 +219,33 @@ fn approved_states(
     }
 }
 
-/// The entry for something that starts a program file (a Run value, a file in a Startup folder):
-/// named and published after `exe` (see `describe_program`), its state from `states` by `key`.
-fn program_entry(
+/// Something that starts a program file (a Run value, a file in a Startup folder).
+struct ProgramEntry<'a> {
     source: StartupSource,
+    /// The value or file name: what a toggle writes.
     key: String,
-    fallback: &str,
-    exe: Option<&str>,
+    /// The name shown when `exe` has none.
+    fallback: &'a str,
+    exe: Option<&'a str>,
     command: String,
     location: String,
-    states: &[(String, RegValue)],
-) -> StartupEntry {
-    let (name, publisher) = describe_program(exe, fallback);
-    StartupEntry {
-        source,
-        name,
-        publisher,
-        enabled: enabled_in(states, &key),
-        changeable: true,
-        command,
-        location,
-        key,
+}
+
+impl ProgramEntry<'_> {
+    /// The entry, named and published after `exe` (see `describe_program`), its state from
+    /// `states` by `key`.
+    fn into_entry(self, states: &[(String, RegValue)]) -> StartupEntry {
+        let (name, publisher) = describe_program(self.exe, self.fallback);
+        StartupEntry {
+            source: self.source,
+            name,
+            publisher,
+            enabled: enabled_in(states, &self.key),
+            changeable: true,
+            command: self.command,
+            location: self.location,
+            key: self.key,
+        }
     }
 }
 
@@ -256,22 +276,22 @@ fn run_entries(
             continue;
         };
         let exe = exe_from_command(&command, &roots.system_root);
-        entries.push(program_entry(
+        let entry = ProgramEntry {
             source,
-            name.clone(),
-            &name,
-            exe.as_deref(),
+            key: name.clone(),
+            fallback: &name,
+            exe: exe.as_deref(),
             command,
-            run.display(),
-            &states,
-        ));
+            location: run.display(),
+        };
+        entries.push(entry.into_entry(&states));
     }
     entries
 }
 
 /// Every startup entry, and a readable line for each list, folder or value that couldn't be read
 /// (`is_read_error` tells a read error from a skipped value). Holds a COM apartment on this thread
-/// for the shortcuts.
+/// for the shortcuts and the package names (a thread already in the MTA keeps it).
 pub fn list_startup(roots: &StartupRoots) -> (Vec<StartupEntry>, Vec<String>) {
     let _com = ComApartment::enter();
     let mut entries = Vec::new();
@@ -296,18 +316,22 @@ pub fn list_startup(roots: &StartupRoots) -> (Vec<StartupEntry>, Vec<String>) {
             entries.extend(folders::folder_entries(roots, source, dir, &mut errors));
         }
     }
+    entries.extend(packaged::packaged_entries(&roots.packaged, &mut errors));
     (entries, errors)
 }
 
 /// Enables or disables an entry the way Task Manager does. Writing an HKLM value without admin
-/// fails with `ActionError::AccessDenied` (shown inline with the restart-as-admin hint); any other
-/// write failure is an `ActionError::Other` with Windows' message.
+/// fails with `ActionError::AccessDenied` (shown inline with the restart-as-admin hint); a packaged
+/// task whose state a policy sets is refused ("its state is set by a policy"); any other write
+/// failure is an `ActionError::Other` with Windows' message.
 pub fn set_startup_enabled(
     roots: &StartupRoots,
     entry: &StartupEntry,
     enabled: bool,
 ) -> Result<(), ActionError> {
-    let key = roots.approved_key(entry.source);
+    let Some(key) = roots.approved_key(entry.source) else {
+        return packaged::set_enabled(&roots.packaged, entry, enabled);
+    };
     let previous = registry::value(&key, &entry.key);
     let bytes = encode_approved(
         previous.as_ref().and_then(RegValue::binary),

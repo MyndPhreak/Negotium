@@ -1,10 +1,13 @@
-//! The per-user and all-users Startup folders: one entry per file (desktop.ini excepted). A
-//! shortcut is resolved through IShellLink to its target, which names it and gives its publisher.
-use super::{StartupEntry, StartupRoots, StartupSource, approved_states, program_entry};
+//! The per-user and all-users Startup folders: one entry per file (desktop.ini and hidden or
+//! system files excepted). A shortcut is resolved through IShellLink to its target, which names it
+//! and gives its publisher.
+use super::{ProgramEntry, StartupEntry, StartupRoots, StartupSource, approved_states};
 use crate::ActionError;
 use std::ffi::c_void;
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::E_ACCESSDENIED;
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoTaskMemFree, CoUninitialize, IPersistFile, STGM_READ,
@@ -54,6 +57,27 @@ pub(super) fn startup_folders() -> (Option<PathBuf>, Option<PathBuf>) {
         known_folder(&FOLDERID_Startup),
         known_folder(&FOLDERID_CommonStartup),
     )
+}
+
+/// Hidden and system files in a Startup folder (desktop.ini, thumbnail caches) aren't entries.
+fn is_hidden(item: &std::fs::DirEntry) -> bool {
+    let hidden = (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM).0;
+    item.metadata()
+        .is_ok_and(|m| m.file_attributes() & hidden != 0)
+}
+
+/// `target` and its arguments as one command line, the target quoted when it holds a space.
+fn command_line(target: &str, args: &str) -> String {
+    let target = if target.contains(' ') && !target.starts_with('"') {
+        format!("\"{target}\"")
+    } else {
+        target.to_string()
+    };
+    if args.is_empty() {
+        target
+    } else {
+        format!("{target} {args}")
+    }
 }
 
 fn wide(units: &[u16]) -> String {
@@ -135,7 +159,7 @@ pub(super) fn folder_entries(
         };
         let path = item.path();
         let file = item.file_name().to_string_lossy().into_owned();
-        if !path.is_file() || file.eq_ignore_ascii_case("desktop.ini") {
+        if !path.is_file() || file.eq_ignore_ascii_case("desktop.ini") || is_hidden(&item) {
             continue;
         }
         let shortcut = path
@@ -149,21 +173,15 @@ pub(super) fn folder_entries(
         let stem = path
             .file_stem()
             .map_or_else(|| file.clone(), |s| s.to_string_lossy().into_owned());
-        let command = if args.is_empty() {
-            target.clone()
-        } else {
-            format!("{target} {args}")
-        };
-        let exe = (!target.is_empty()).then_some(target.as_str());
-        out.push(program_entry(
+        let entry = ProgramEntry {
             source,
-            file,
-            &stem,
-            exe,
-            command,
-            location.clone(),
-            &states,
-        ));
+            key: file,
+            fallback: &stem,
+            exe: (!target.is_empty()).then_some(target.as_str()),
+            command: command_line(&target, &args),
+            location: location.clone(),
+        };
+        out.push(entry.into_entry(&states));
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));
     out

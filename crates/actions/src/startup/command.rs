@@ -1,4 +1,6 @@
 //! The program a Run command starts, for its name and publisher.
+use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+use windows::core::HSTRING;
 
 /// Windows programs that run something else (a DLL, a script, a document, a package): their own
 /// name and publisher would hide the real program and lend it Microsoft's name.
@@ -65,6 +67,42 @@ pub(super) fn is_host_program(exe: &str) -> bool {
         .map_or(file, |(s, _)| s);
     HOSTS.iter().any(|h| h.eq_ignore_ascii_case(stem))
 }
+
+/// Whether `path` is on another machine: a UNC path (`\\server\share\…`, `\\?\UNC\…`, a
+/// device path) or a drive that `drive_is_remote` says is a network drive. Other paths, relative
+/// ones included, are local.
+pub(super) fn is_remote_path(path: &str, drive_is_remote: impl Fn(char) -> bool) -> bool {
+    let path = path.replace('/', "\\");
+    let path = path.strip_prefix(r"\\?\").map_or(path.as_str(), |rest| {
+        if rest.get(..4).is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\")) {
+            r"\\" // `\\?\UNC\server\…`
+        } else {
+            rest
+        }
+    });
+    if path.starts_with(r"\\") {
+        return true;
+    }
+    let mut chars = path.chars();
+    match (chars.next(), chars.next()) {
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => drive_is_remote(drive),
+        _ => false,
+    }
+}
+
+/// `is_remote_path`, asking Windows whether a drive letter is a network drive (that reads the
+/// drive mapping; the share itself isn't contacted).
+pub(super) fn is_remote(path: &str) -> bool {
+    is_remote_path(path, |drive| {
+        let root = HSTRING::from(format!("{drive}:\\"));
+        // SAFETY: a NUL-terminated root path that outlives the call.
+        unsafe { GetDriveTypeW(&root) == DRIVE_REMOTE }
+    })
+}
+
+/// `GetDriveTypeW`'s network drive (`DRIVE_REMOTE` lives in a windows feature this crate doesn't
+/// otherwise need).
+const DRIVE_REMOTE: u32 = 4;
 
 /// Expands `%NAME%` through `lookup`; unknown or empty names stay as written.
 pub fn expand_env(s: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
@@ -248,5 +286,37 @@ mod tests {
             !real.contains('%') && real.ends_with(r"\system32\SecurityHealthSystray.exe"),
             "{real}"
         );
+    }
+
+    #[test]
+    fn network_paths_are_remote_and_local_ones_are_not() {
+        let mapped = |d: char| d.eq_ignore_ascii_case(&'Z');
+        for path in [
+            r"\\server\share\app.exe",
+            "//server/share/app.exe",
+            r"\\?\UNC\server\share\app.exe",
+            r"\\?\unc\server\share\app.exe",
+            r"\\.\pipe\x",
+            r"Z:\Apps\app.exe",
+            r"z:\app.exe",
+            r"\\?\Z:\app.exe",
+        ] {
+            assert!(is_remote_path(path, mapped), "{path}");
+        }
+        for path in [
+            r"C:\Windows\System32\PING.EXE",
+            r"\\?\C:\Apps\app.exe",
+            r"\Apps\app.exe",
+            r"Apps\app.exe",
+            r"\\?\é\app.exe",
+            "",
+        ] {
+            assert!(!is_remote_path(path, mapped), "{path}");
+        }
+        assert!(
+            !is_remote(r"C:\Windows\System32\PING.EXE"),
+            "the system drive is local"
+        );
+        assert!(is_remote(r"\\server\share\app.exe"));
     }
 }
