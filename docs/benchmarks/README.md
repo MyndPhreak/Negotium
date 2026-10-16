@@ -114,14 +114,16 @@ No launch stalled in these runs (the stall is intermittent), and software opened
 
 ## Collector tick after Plan 3a
 
-Same machine and commands as above (`tick_breakdown --ticks 60`, `negotium-probe --ticks 60 --timing`). This run saw 486 processes (Plan 1: 674), so the process-dependent columns are not strictly comparable; `pdh` does not depend on the process count.
+Same machine and commands as above (`tick_breakdown --ticks 60`, `negotium-probe --ticks 60 --timing`). This run saw 486 processes (Plan 1: 674), so the process-dependent columns are not strictly comparable; `pdh` does not depend on the process count. Figures are from a single run, as medians of 60 ticks.
 
 | Column | Plan 1 median (ms) | Plan 3a median (ms) |
 |---|---|---|
 | pdh | 6.11 | 5.78 |
 | tick | 22.35 | 13.19 |
-| history after 60 ticks (bytes, probe) | — | 1827389 |
+| history after 60 ticks (bytes, probe) | 41783 | 1827389 |
 
+
+Plan 3a's history preallocates one hour of columns (budget about 2 MB, spec §4.4) and does not grow per tick, so its figure is capacity and is not comparable with Plan 1's much smaller one.
 The probe's own headline for the same run: tick median 15.47 ms, p95 23.26 ms (Plan 1 headline: median 18.73 ms). Neither `pdh` (+3 ms limit) nor `tick` (+4 ms limit) grew against Plan 1.
 
 Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter send/receive, GPU adapter memory), one interface-table read every 10 s, and one D3DKMT temperature query per GPU per tick.
@@ -133,10 +135,9 @@ Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter
 3. Performance → CPU: one cell per logical processor in Task Manager's order; Speed within a few percent of Task Manager's.
 4. Performance → Memory: composition matches Task Manager's In use / Modified / Standby / Free within rounding.
 5. 1 min / 10 min / 1 h: right after start the 1 h graph only fills its right edge; scrubbing its empty part says "No history for this moment."; a scrub card follows the pointer and shows the right time.
-6. Keyboard: Tab into the list, arrows, Right/Left, Delete, Menu key, Esc (see Task 11 Step 5); repeat with Narrator.
-7. Light and dark, 100 / 150 / 200 % scale: rail icons, graphs, cards and focus rings readable.
-8. Rail and Performance page in light and dark at 100 / 150 / 200 % scale (these were not checked live during the plan).
-9. Scrub card: it flips to the other side of the pointer near the graph's edge, is not clipped at the smallest window size, and reads correctly in light and dark.
-10. Narrator on the keyboard-navigated list: note what it announces for the list itself and for the current row.
-11. Shift+F10 and the Menu key: the native context menu opens anchored at the highlighted row, not at the pointer or a window corner.
-12. Meters do not change height when the window opens (user-reported earlier, now fixed): open the window from the tray and from a cold start and watch the Overview meters.
+6. Keyboard: Tab into the list, arrows, Right/Left, Delete, Menu key, Esc: Tab into the list, Up/Down moves the highlight, Right/Left expands/collapses a group, Delete asks to end the highlighted app, the Menu key opens its menu, Esc closes the menu or modal; repeat with Narrator.
+7. Light and dark at 100 / 150 / 200 % scale: rail icons, graphs, cards, focus rings and the Performance page readable.
+8. Scrub card: it flips to the other side of the pointer near the graph's edge, is not clipped at the smallest window size, and reads correctly in light and dark.
+9. Narrator on the keyboard-navigated list: note what it announces for the list itself and for the current row.
+10. Shift+F10 and the Menu key: the native context menu opens anchored at the highlighted row, not at the pointer or a window corner.
+11. Meters do not change height when the window opens: open the window from the tray and from a cold start and watch the Overview meters.
