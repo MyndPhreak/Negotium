@@ -7,7 +7,7 @@ use negotium_history::History;
 use negotium_model::Metric;
 
 pub const DAY_MS: u64 = 86_400_000;
-/// A sample is "at" the pointer when it is this close, or within one graph column if wider.
+/// Where graph columns are narrower than this, an empty column takes the nearest sample this close.
 pub const MIN_GAP_MS: u64 = 2_500;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -22,9 +22,7 @@ pub struct ScrubView {
 pub fn scrub(history: &History, perf: &PerfFrame, fraction: f32) -> ScrubView {
     // The same x -> time mapping the graph is drawn with (absolute columns, newest at x = 1000).
     let t = graph::fraction_to_time(fraction, perf.window_end_ms, perf.span_ms);
-    let gap = MIN_GAP_MS.max(perf.span_ms / MAIN_BUCKETS as u64);
-    // Before the collector started there is no history, however close the first sample is.
-    let found = u64::try_from(t).ok().and_then(|t| history.top_at(t, perf.scrub_metric, gap));
+    let found = at_column(history, perf, t);
     let at = found.as_ref().map_or(t, |(sample_t, _)| *sample_t as i64);
     let title = format!("Top apps at {}", format::clock(clock_at(perf, at)));
     let (rows, empty) = match (&found, perf.scrub_metric) {
@@ -36,6 +34,25 @@ pub fn scrub(history: &History, perf: &PerfFrame, fraction: f32) -> ScrubView {
         ),
     };
     ScrubView { title, rows, empty: empty.to_string() }
+}
+
+/// The sample the main graph draws at time `t`: the one where the page's main series peaks in the
+/// column holding `t` (a column shows its largest value, ruling P3-5), on the graph's own grid.
+/// Columns narrower than MIN_GAP_MS (the 1 min and 10 min ranges) are often empty between samples,
+/// and the line joins across them: there the nearest sample within MIN_GAP_MS stands in. A wider
+/// empty column is a real gap with no history. Before the collector started there is none.
+fn at_column(history: &History, perf: &PerfFrame, t: i64) -> Option<(u64, Vec<(String, f32)>)> {
+    let k = graph::column_of(t, perf.span_ms, MAIN_BUCKETS);
+    let (first, last) = graph::column_bounds(k, perf.span_ms, MAIN_BUCKETS);
+    let found = match u64::try_from(last.min(perf.window_end_ms as i64)) {
+        Ok(last) => history.top_at_max(perf.scrub_series.as_ref(), first.max(0) as u64, last, perf.scrub_metric),
+        Err(_) => return None,
+    };
+    let narrow = perf.span_ms / (MAIN_BUCKETS as u64) < MIN_GAP_MS;
+    match found {
+        None if narrow => u64::try_from(t).ok().and_then(|t| history.top_at(t, perf.scrub_metric, MIN_GAP_MS)),
+        found => found,
+    }
 }
 
 /// Local wall-clock time (ms since midnight) of collector time `t_ms`, counted back from the
@@ -113,6 +130,28 @@ mod tests {
         assert_eq!(mid.empty, "No history for this moment.");
         assert_eq!(mid.title, "Top apps at 13:55:00");
         assert_eq!(scrub(&h, &p, 1.0).rows[0].0, "late");
+    }
+
+    /// The 1 h graph draws each 12 s column at its end with the column's largest value: the scrub
+    /// over that column names the spike's moment and apps, not the sample nearest the column end.
+    #[test]
+    fn an_hour_column_reports_its_spike_not_the_sample_at_its_end() {
+        let mut h = History::new();
+        for s in 1_790..=1_830u64 {
+            let spike = s == 1_806;
+            let totals = SystemTotals { cpu_pct: Some(if spike { 90.0 } else { 2.0 }), ..Default::default() };
+            let apps = if spike { vec![app("spike", 85.0, 1 << 20)] } else { vec![app("idle", 1.0, 1 << 20)] };
+            h.push(s * 1_000, &totals, &apps);
+        }
+        let mut p = perf(3_600_000, 3_600_000, TWO_PM, Metric::Cpu);
+        p.scrub_series = Some(negotium_history::Series::Cpu);
+        // Column 150 covers (1 800 s, 1 812 s] and is drawn at its end, 1 812 s.
+        let at_column_end = 1_812_000.0 / 3_600_000.0;
+        let v = scrub(&h, &p, at_column_end);
+        assert_eq!(v.rows.first().map(|r| r.0.as_str()), Some("spike"), "{v:?}");
+        assert_eq!(v.title, format!("Top apps at {}", format::clock(clock_at(&p, 1_806_000))));
+        // Anywhere in the same column gives the same moment.
+        assert_eq!(scrub(&h, &p, 1_800_500.0 / 3_600_000.0), v);
     }
 
     #[test]

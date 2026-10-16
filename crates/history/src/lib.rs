@@ -492,13 +492,35 @@ impl History {
 
     pub fn top_at(&self, t_ms: u64, metric: Metric, max_gap_ms: u64) -> Option<(u64, Vec<(String, f32)>)> {
         let i = self.nearest(t_ms)?;
-        let t = self.times[i];
-        if t.abs_diff(t_ms) > max_gap_ms {
+        if self.times[i].abs_diff(t_ms) > max_gap_ms {
             return None;
         }
+        Some(self.top_of(i, metric))
+    }
+
+    /// Among the samples from `from_ms` to `to_ms` (inclusive), the one where `key` peaks (the
+    /// earliest on a tie; the newest when there is no key or it has no value in any of them), with
+    /// its top apps for `metric`. `None` when no sample lies in the range.
+    pub fn top_at_max(&self, key: Option<&Series>, from_ms: u64, to_ms: u64, metric: Metric) -> Option<(u64, Vec<(String, f32)>)> {
+        let (start, end) = (self.times.partition_point(|&t| t < from_ms), self.times.partition_point(|&t| t <= to_ms));
+        if start >= end {
+            return None;
+        }
+        let col = key.and_then(|k| self.columns.get(k));
+        let mut best: Option<(usize, f32)> = None;
+        for i in start..end {
+            if let Some(v) = col.and_then(|c| c.get(i)).filter(|v| v.is_finite()) {
+                if best.is_none_or(|(_, b)| v > b) {
+                    best = Some((i, v));
+                }
+            }
+        }
+        Some(self.top_of(best.map_or(end - 1, |(i, _)| i), metric))
+    }
+
+    fn top_of(&self, i: usize, metric: Metric) -> (u64, Vec<(String, f32)>) {
         let top = &self.tops[i][metric as usize];
-        let apps = (0..top.len as usize).map(|k| (self.name(top.ids[k]).to_string(), top.values[k])).collect();
-        Some((t, apps))
+        (self.times[i], (0..top.len as usize).map(|k| (self.name(top.ids[k]).to_string(), top.values[k])).collect())
     }
 
     pub fn approx_bytes(&self) -> usize {
@@ -641,6 +663,20 @@ mod tests {
         assert_eq!(values(&h, &Series::Committed), [Some((12u64 << 30) as f32)]);
         assert_eq!(values(&h, &Series::NetTotal), [Some(1e6)]);
         assert_eq!(values(&h, &Series::Gpu), [Some(30.0)]);
+    }
+
+    #[test]
+    fn top_at_max_picks_the_peak_of_the_series_within_the_range() {
+        let mut h = History::new();
+        for (pid, (t, cpu, name)) in [(1_000u64, 5.0f32, "a"), (2_000, 70.0, "peak"), (3_000, 70.0, "tie"), (4_000, 10.0, "d")].into_iter().enumerate() {
+            h.push(t, &totals(cpu, 1), &[row(pid as u32, name, 1.0)]);
+        }
+        let cpu = Some(&Series::Cpu);
+        assert_eq!(h.top_at_max(cpu, 1_000, 4_000, Metric::Cpu), Some((2_000, vec![("peak".to_string(), 1.0)])), "earliest on a tie");
+        assert_eq!(h.top_at_max(cpu, 3_001, 4_000, Metric::Cpu).unwrap().0, 4_000, "bounds are inclusive");
+        assert_eq!(h.top_at_max(Some(&Series::Core(9)), 1_000, 3_500, Metric::Cpu).unwrap().0, 3_000, "no values: the newest sample");
+        assert_eq!(h.top_at_max(None, 1_000, 3_500, Metric::Cpu).unwrap().0, 3_000, "no series: the newest sample");
+        assert_eq!(h.top_at_max(cpu, 4_001, 9_000, Metric::Cpu), None, "no sample in the range");
     }
 
     #[test]

@@ -257,7 +257,7 @@ mod tests {
         let (history, ids) = (SharedHistory::default(), IdSeed::default());
         let dir = std::env::temp_dir().join(format!("negotium-worker-ids-{}", std::process::id()));
         let controls = Controls::default();
-        let mut frame = |source: &mut LiveSource| {
+        let frame = |source: &mut LiveSource| {
             source.log = crate::log::Log::new(dir.join("negotium.log"));
             source.next_frame(&controls).expect("visible: a frame")
         };

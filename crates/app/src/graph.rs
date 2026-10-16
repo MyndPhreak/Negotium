@@ -126,7 +126,7 @@ fn trace(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u
             pen.gap();
         }
         prev_t = Some(t);
-        let k = (t as u64 * buckets as u64).div_ceil(span) as i64 - 1;
+        let k = column_of(t, span, buckets);
         let v = v.filter(|v| v.is_finite());
         match &mut current {
             Some((cur, best)) if *cur == k => {
@@ -146,6 +146,20 @@ fn trace(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u
         emit(&mut pen, cur, best);
     }
     pen.finish()
+}
+
+/// The column of the absolute grid [`shape`] draws on that holds collector time `t`: column k
+/// covers `(k·w, (k+1)·w]` with `w = span / buckets`.
+pub fn column_of(t: i64, span: u64, buckets: usize) -> i64 {
+    let (n, d) = (t * buckets.max(1) as i64, span.max(1) as i64);
+    // ceil(n / d) - 1, for a `t` before collector time 0 too.
+    n.div_euclid(d) - i64::from(n.rem_euclid(d) == 0)
+}
+
+/// The first and last whole millisecond of column `k` (see [`column_of`]), inclusive.
+pub fn column_bounds(k: i64, span: u64, buckets: usize) -> (i64, i64) {
+    let (span, buckets) = (span.max(1) as i64, buckets.max(1) as i64);
+    ((k * span).div_euclid(buckets) + 1, ((k + 1) * span).div_euclid(buckets))
 }
 
 /// Where collector time `t` is drawn on a graph of `[end - span, end]`: x in the view box, the
@@ -179,6 +193,19 @@ mod tests {
     fn xs(path: &str) -> Vec<f64> {
         let t: Vec<&str> = path.split_whitespace().collect();
         t.chunks(3).filter(|c| c.len() == 3).map(|c| c[1].parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn column_bounds_are_exactly_the_times_column_of_maps_to_the_column() {
+        for (span, buckets) in [(60_000u64, 300usize), (600_000, 300), (3_600_000, 300), (60_000, 60), (1_000, 3)] {
+            for k in [-2i64, -1, 0, 1, 7, 150, 299] {
+                let (first, last) = column_bounds(k, span, buckets);
+                assert!(first <= last, "{span}/{buckets} column {k}: {first}..{last}");
+                assert_eq!((column_of(first, span, buckets), column_of(last, span, buckets)), (k, k));
+                assert_eq!((column_of(first - 1, span, buckets), column_of(last + 1, span, buckets)), (k - 1, k + 1));
+            }
+        }
+        assert_eq!(column_bounds(150, 3_600_000, 300), (1_800_001, 1_812_000));
     }
 
     #[test]

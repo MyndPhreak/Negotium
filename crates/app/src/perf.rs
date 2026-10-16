@@ -231,6 +231,9 @@ pub struct PerfFrame {
     pub end_clock_ms: u64,
     /// Which app ranking the scrub shows on this page (ruling P3-4).
     pub scrub_metric: Metric,
+    /// The page's main series: within a graph column the scrub shows the sample where it peaks,
+    /// the one that column draws (ruling P3-5).
+    pub scrub_series: Option<Series>,
 }
 
 pub struct PerfInput<'a> {
@@ -365,6 +368,7 @@ fn cpu_page(f: &mut PerfFrame, input: &PerfInput) {
     f.title = "CPU".into();
     f.subtitle = input.info.cpu_name.clone().unwrap_or_default();
     f.scrub_metric = Metric::Cpu;
+    f.scrub_series = Some(Series::Cpu);
     let util = t.cpu_pct.map(format::pct).unwrap_or_else(dash);
     f.graphs = vec![graph_view("% Utilization", util.clone(), "100%".into(), input.shape(&Series::Cpu, 100.0, MAIN_BUCKETS))];
     // One cell per logical processor even when the per-core vector is empty (PDH failed to open).
@@ -395,6 +399,7 @@ fn cpu_page(f: &mut PerfFrame, input: &PerfInput) {
 fn memory_page(f: &mut PerfFrame, input: &PerfInput) {
     f.title = "Memory".into();
     f.scrub_metric = Metric::Memory;
+    f.scrub_series = Some(Series::MemUsed);
     let Some(m) = input.snap.totals.memory.as_ref().filter(|m| m.total > 0) else {
         f.graphs = vec![graph_view("Memory usage", dash(), String::new(), empty_shape())];
         f.stats = vec![stat("In use", dash())];
@@ -442,6 +447,7 @@ fn disk_page(f: &mut PerfFrame, input: &PerfInput, d: &DiskSample) {
     let name = d.name.as_str();
     f.title = disk_title(name);
     f.scrub_metric = Metric::Disk;
+    f.scrub_series = Some(Series::DiskActive(name.into()));
     f.note = "Top apps show each app's disk use across all disks.".into();
     let (read_key, write_key) = (Series::DiskRead(name.into()), Series::DiskWrite(name.into()));
     let span = input.range.span_ms();
@@ -472,6 +478,7 @@ fn net_page(f: &mut PerfFrame, input: &PerfInput, a: &AdapterSample) {
     f.title = adapter_title(a);
     f.subtitle = a.description.clone().unwrap_or_else(|| name.to_string());
     f.scrub_metric = Metric::Network;
+    f.scrub_series = Some(Series::NetRecv(name.into()));
     f.note = "Per-app network use arrives in a later version.".into();
     let (sent_key, recv_key) = (Series::NetSent(name.into()), Series::NetRecv(name.into()));
     let span = input.range.span_ms();
@@ -515,6 +522,7 @@ fn gpu_page(f: &mut PerfFrame, input: &PerfInput, g: &GpuSample, number: usize) 
     f.title = format!("GPU {number}");
     f.subtitle = info.map(|i| i.name.clone()).unwrap_or_default();
     f.scrub_metric = Metric::Gpu;
+    f.scrub_series = Some(Series::GpuUtil(key.into()));
     let util = known(g.util_pct).map(format::pct).unwrap_or_else(dash);
     let memory = |used: Option<u64>, total: Option<u64>| match (used, total) {
         (Some(u), Some(t)) => format::gb_of(u, t),
@@ -652,6 +660,7 @@ pub(crate) mod tests {
         assert_eq!(stat(&f, "Up time"), "1:02:03:04");
         assert_eq!(f.note, CPU_TEMP_NOTE);
         assert_eq!(f.scrub_metric, Metric::Cpu);
+        assert_eq!(f.scrub_series, Some(Series::Cpu), "the scrub follows the main graph");
         assert_eq!((f.window_end_ms, f.span_ms, f.end_clock_ms), (60_000, 60_000, 12 * 3_600_000));
     }
 
@@ -669,6 +678,7 @@ pub(crate) mod tests {
         assert_eq!(stat(&f, "Compressed"), "512.0 MB");
         assert_eq!(stat(&f, "Speed"), "6000 MT/s");
         assert_eq!(f.scrub_metric, Metric::Memory);
+        assert_eq!(f.scrub_series, Some(Series::MemUsed));
     }
 
     #[test]
@@ -787,6 +797,7 @@ pub(crate) mod tests {
         assert_eq!(stat(&f, "Read speed"), "1.0 MB/s");
         assert_eq!(stat(&f, "Average response time"), "0.4 ms");
         assert_eq!(f.scrub_metric, Metric::Disk);
+        assert_eq!(f.scrub_series, Some(Series::DiskActive("0 C:".into())));
     }
 
     #[test]
@@ -812,6 +823,7 @@ pub(crate) mod tests {
         assert_eq!(stat(&f, "IPv4 address"), "192.168.1.20");
         assert_eq!(stat(&f, "IPv6 address"), "2001:db8::5");
         assert_eq!(f.scrub_metric, Metric::Network);
+        assert_eq!(f.scrub_series, Some(Series::NetRecv("Intel[R] Ethernet".into())));
     }
 
     #[test]
@@ -834,6 +846,7 @@ pub(crate) mod tests {
         assert_eq!(stat(&f, "Temperature"), "64 °C");
         assert_eq!(stat(&f, "Dedicated GPU memory"), "3.0 / 24.0 GB");
         assert_eq!(f.scrub_metric, Metric::Gpu);
+        assert_eq!(f.scrub_series, Some(Series::GpuUtil("luid_b".into())));
         let igpu = devices_build("gpu:luid_a");
         assert_eq!(igpu.title, "GPU 1");
         assert_eq!(stat(&igpu, "Temperature"), "—", "no sensor: a dash, not 0 °C");
