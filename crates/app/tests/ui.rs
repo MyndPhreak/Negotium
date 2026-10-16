@@ -876,14 +876,8 @@ fn cell(label: &str, value: &str) -> GraphData {
 
 /// A Performance page at `w` × `h` with the given main graphs and cells, four stats and a note.
 fn perf_window(w: u32, h: u32, graphs: &[&str], cells: Vec<GraphData>) -> MainWindow {
-    // One testing backend per test thread; a test may build several windows.
-    thread_local! { static BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-    if !BACKEND.with(|b| b.replace(true)) {
-        i_slint_backend_testing::init_no_event_loop();
-    }
-    let ui = MainWindow::new().unwrap();
-    ui.window().set_size(PhysicalSize::new(w, h));
-    ui.set_page(1);
+    // One testing backend per test thread (`page_window`); a test may build several windows.
+    let ui = page_window(1, w, h);
     ui.set_perf_devices(ModelRc::new(VecModel::from(vec![device("cpu", "CPU"), device("gpu:0", "GPU 0")])));
     ui.set_perf_title("CPU".into());
     ui.set_perf_graphs(ModelRc::new(VecModel::from(graphs.iter().map(|g| graph_data(g)).collect::<Vec<_>>())));
@@ -894,7 +888,6 @@ fn perf_window(w: u32, h: u32, graphs: &[&str], cells: Vec<GraphData>) -> MainWi
         .collect();
     ui.set_perf_stats(ModelRc::new(VecModel::from(stats)));
     ui.set_perf_note("A note.".into());
-    ui.show().unwrap();
     ui
 }
 
@@ -2362,6 +2355,19 @@ fn the_toast_leaves_the_lists_clear_and_takes_tab_and_space() {
     }
     ui.set_toast("".into());
     assert_eq!(by_id(&ui, "StartupPage::sv"), full.0, "no toast, no room kept");
+
+    // The Performance and Settings pages scroll too: in a short window, scrolled to the end, their
+    // last item clears the toast.
+    let ui = perf_window(1000, 480, &["% Utilization"], cores(16));
+    ui.set_toast("Couldn't change App19: access denied.".into());
+    for (page, last) in [(1, "A note."), (3, "SettingsPage::temp-row")] {
+        ui.set_page(page);
+        scroll_detail(&ui, -100_000.0); // to the end
+        let toast = by_id(&ui, "MainWindow::toast-host");
+        assert!(toast.3 > 30.0, "page {page}: the toast shows");
+        let end = if page == 1 { rect(&ui, last) } else { by_id(&ui, last) };
+        assert!(end.1 + end.3 <= toast.1, "page {page}: the end scrolls clear of the toast: {end:?} {toast:?}");
+    }
 }
 
 // PF12: nothing on the Startup page changes per tick; a frame meant for it touches nothing.

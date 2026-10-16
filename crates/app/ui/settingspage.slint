@@ -155,6 +155,8 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> gpu-running;
     in property <bool> gpu-env-override;
     in property <bool> interactive: true;
+    // Room kept free below the last row (the floating toast), so it can be scrolled clear.
+    in property <length> bottom-inset;
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback always-on-top-toggled(bool);
@@ -176,6 +178,7 @@ export component SettingsPage inherits VerticalLayout {
             width: sv.content-w;
             height: sv.content-height;
             padding: 24px;
+            padding-bottom: 24px + root.bottom-inset;
             spacing: 10px;
             // Spare height stays empty below the last row.
             alignment: start;

@@ -79,6 +79,8 @@ export component PerformancePage inherits HorizontalLayout {
     in property <[SegmentData]> segments;
     in property <int> range;
     in property <bool> interactive: true;
+    // Room kept free below the detail (the floating toast), so its end can be scrolled clear.
+    in property <length> bottom-inset;
     in property <float> scrub-x: -1;
     in property <string> scrub-title;
     in property <string> scrub-empty;
@@ -122,6 +124,7 @@ export component PerformancePage inherits HorizontalLayout {
             width: sv.content-w;
             height: sv.content-height;
             max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+            padding-bottom: root.bottom-inset;
             spacing: 10px;
             HorizontalLayout {
                 vertical-stretch: 0;

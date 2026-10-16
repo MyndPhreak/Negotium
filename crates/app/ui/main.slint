@@ -54,7 +54,8 @@ export component MainWindow inherits Window {
     in property <[ScrubRow]> scrub-rows;
     out property <bool> modal-open: confirm-visible || details-visible;
     // The room the floating toast takes at the bottom of a page (its height and its gap), so the
-    // last rows of the Overview and Startup lists can still be scrolled clear of it.
+    // end of every page (the Overview and Startup lists, the Performance and Settings scroll
+    // content) can still be scrolled clear of it.
     property <length> toast-inset: toast-host.preferred-height > 0 ? toast-host.preferred-height + 12px : 0px;
     out property <int> menu-target: list.menu-target;
     // Keyboard navigation through the app list (ruling P3-7): set by the bridge.
@@ -253,6 +254,7 @@ export component MainWindow inherits Window {
                     stats: root.perf-stats;
                     segments: root.perf-segments;
                     range: root.perf-range;
+                    bottom-inset: root.toast-inset;
                     interactive: !root.modal-open;
                     select-device(id) => { root.select-device(id); }
                     select-range(i) => { root.select-range(i); }
@@ -296,6 +298,7 @@ export component MainWindow inherits Window {
                     gpu-fallback: root.settings-gpu-fallback;
                     gpu-running: root.settings-gpu-running;
                     gpu-env-override: root.settings-gpu-env-override;
+                    bottom-inset: root.toast-inset;
                     interactive: !root.modal-open;
                     refresh-chosen(i) => { root.refresh-chosen(i); }
                     theme-chosen(i) => { root.theme-chosen(i); }
