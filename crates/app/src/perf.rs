@@ -332,10 +332,9 @@ impl PerfInput<'_> {
         Shape { line, area: EMPTY_PATH.to_string() }
     }
 
-    /// The largest value of a series a graph of the last `span_ms` draws, 0 when there is none:
-    /// the window and the history before it a scrolling view shows ([`graph::since`]).
+    /// The largest value of a series within the last `span_ms`, 0 when there is none.
     fn max_over(&self, key: &Series, span_ms: u64) -> f32 {
-        self.history.points(key, graph::since(self.anchor(), span_ms)).filter_map(|(_, v)| v).filter(|v| v.is_finite()).fold(0.0, f32::max)
+        self.history.points(key, self.anchor().saturating_sub(span_ms)).filter_map(|(_, v)| v).filter(|v| v.is_finite()).fold(0.0, f32::max)
     }
 
     fn spark(&self, key: &Series, max: f32) -> String {
@@ -1125,23 +1124,6 @@ pub(crate) mod tests {
         let input = PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute, last_seen: None };
         assert_eq!(input.max_over(&Series::GpuUtil("k".into()), 30_000), 3.0);
         assert_eq!(input.max_over(&Series::GpuUtil("none".into()), 30_000), 0.0);
-    }
-
-    /// While graphs scroll, the view trails the newest sample and shows history from before the
-    /// window's left edge (graph::LEAD_MS): a peak there must fit under the scale too.
-    #[test]
-    fn max_over_takes_in_the_history_a_scrolling_view_shows() {
-        let mut h = History::new();
-        let (end, span) = (60_000u64, 30_000u64);
-        for (t, v) in [(end - span - 5_000, 9.0f32), (end - span + 1_000, 3.0), (end, 1.0)] {
-            let mut s = snapshot(t);
-            s.totals.gpus = Some(vec![GpuSample { key: "k".into(), util_pct: v, ..Default::default() }]);
-            h.push(t, &s.totals, &[]);
-        }
-        let s = snapshot(end);
-        let info = info();
-        let input = PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute, last_seen: None };
-        assert_eq!(input.max_over(&Series::GpuUtil("k".into()), span), 9.0, "the peak 5 s before the window is in view while scrolling");
     }
 
     /// A path's x coordinates.

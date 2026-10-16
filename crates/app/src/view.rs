@@ -142,8 +142,7 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     // A zero total is no reading (as on the Memory page): "Unavailable", never 100% in use.
     let memory = t.memory.as_ref().filter(|m| m.total > 0);
     let mem_total = memory.map(|m| m.total as f32).unwrap_or(0.0);
-    // Over all the history the sparkline draws, which a scrolling view shows (graph::since).
-    let net_max = history.points(&Series::NetTotal, since).filter_map(|(_, v)| v).fold(0.0f32, f32::max).max(t.net_bps.unwrap_or(0.0) as f32);
+    let net_max = history.points(&Series::NetTotal, end.saturating_sub(span)).filter_map(|(_, v)| v).fold(0.0f32, f32::max).max(t.net_bps.unwrap_or(0.0) as f32);
     vec![
         MeterView {
             label: "CPU",
@@ -425,26 +424,6 @@ mod tests {
         let mut ids = IdMap::new();
         let f = build_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
         assert_eq!(f.meters[0].spark, "M 966.7 100.0 L 983.3 50.0 L 1000.0 0.0");
-    }
-
-    /// While graphs scroll, the sparkline shows history from before its minute (graph::LEAD_MS):
-    /// a peak there is under the scale too, not clipped flat at the top of the card with the rest
-    /// of the line pressed up against it.
-    #[test]
-    fn the_network_sparkline_scale_takes_in_the_history_a_scrolling_view_shows() {
-        let mut h = History::new();
-        let mut s = snap(Some(1.0));
-        let end = 120_000u64;
-        let peak_at = end - SPARK_SECONDS * 1000 - 5_000;
-        for t in (peak_at..=end).step_by(1_000) {
-            s.taken_at_ms = t;
-            s.totals.net_bps = Some(if t == peak_at { 10_000.0 } else { 100.0 });
-            h.push(t, &s.totals, &[]);
-        }
-        let f = build_frame(&mut IdMap::new(), &s, &[], &[], &h, &opts(Metric::Cpu, true));
-        let t: Vec<&str> = f.meters[4].spark.split_whitespace().collect();
-        let ys: Vec<f64> = t.chunks(3).filter(|c| c.len() == 3).map(|c| c[2].parse().unwrap()).collect();
-        assert_eq!(ys.iter().filter(|&&y| y < 50.0).count(), 1, "only the peak is high: {}", f.meters[4].spark);
     }
 
     #[test]
