@@ -2668,6 +2668,23 @@ fn the_graph_clock_stands_still_with_smooth_graphs_off_hidden_or_on_pages_withou
     assert_eq!(clock.get_offset_ms(), -1_000.0, "the Startup page has no graphs: the timer doesn't run");
 }
 
+/// Setting a running Timer's interval re-arms it from now, and a run's speed changes with nearly
+/// every frame: the interval must not follow it, or a slow graph moves only when frames land.
+#[test]
+fn the_graph_timers_interval_does_not_follow_the_runs_speed() {
+    let ui = shown_window();
+    negotium::smooth::install(&ui, mocked_clock);
+    for page in [0, 1] {
+        ui.set_page(page);
+        ui.invoke_scroll_from(-1_000.0, 1.0);
+        let interval = ui.get_scroll_interval();
+        for speed in [0.5, 0.73, 1.2, 1.9, 2.0] {
+            ui.invoke_scroll_from(-1_000.0, speed);
+            assert_eq!(ui.get_scroll_interval(), interval, "page {page}, speed {speed}");
+        }
+    }
+}
+
 /// PF3: a run cut short (smoothing off, the window hidden or minimised) rests on the newest sample,
 /// and stays there if the graphs may scroll again before the next frame lands: no jump back.
 #[test]

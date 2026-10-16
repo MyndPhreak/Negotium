@@ -26,9 +26,9 @@ export global GraphClock {
     // reading that marks an animation as running, and the backend then draws a second, identical
     // frame for every timer tick.
     callback clock() -> duration;
-    // Redraws a second for a graph this many physical pixels wide over this many ms
-    // (crate::smooth::redraw_hz; Rust implements it, crate::smooth::install).
-    pure callback redraw-hz(width-px: float, span-ms: float, speed: float) -> float;
+    // Redraws a second for a graph this many physical pixels wide over this many ms, at the
+    // nominal speed of 1 (crate::smooth::redraw_hz; Rust implements it, crate::smooth::install).
+    pure callback redraw-hz(width-px: float, span-ms: float) -> float;
     // A run cut short (smoothing turned off, the window hidden or minimised) rests on the newest
     // sample, so the view stays there if graphs scroll again before the next frame lands (PF3).
     changed live => {

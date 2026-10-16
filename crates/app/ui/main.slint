@@ -62,7 +62,10 @@ export component MainWindow inherits Window {
     property <length> scroll-width: root.page == 0 ? meters-row.spark-width : perf.graph-width;
     property <float> scroll-span-ms: root.page == 0 ? 60000 : root.perf-span-ms;
     // max(1, …): before Rust installs redraw-hz it answers 0, and the timer then runs once a second.
-    out property <duration> scroll-interval: 1000ms / max(1, GraphClock.redraw-hz(root.scroll-width / 1phx, root.scroll-span-ms, GraphClock.speed));
+    // Not the run's speed: setting a running Timer's interval re-arms it from now, and the speed
+    // changes with nearly every frame, so a slow graph would move only when frames land. The rate
+    // depends on the width, the span and the page alone (crate::smooth::install).
+    out property <duration> scroll-interval: 1000ms / max(1, GraphClock.redraw-hz(root.scroll-width / 1phx, root.scroll-span-ms));
     Timer {
         interval: root.scroll-interval;
         running: GraphClock.live && root.page <= 1 && GraphClock.offset-ms < 0;
