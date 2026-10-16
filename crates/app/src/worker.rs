@@ -1,7 +1,7 @@
 //! The supervised worker: one thread owns Collector -> Model -> Ranker -> History and emits
 //! Frames. A panic anywhere in a tick rebuilds the pipeline after a backoff (spec section 7).
 use crate::controls::{Controls, Page};
-use crate::perf::{PerfInput, build_perf};
+use crate::perf::{LastSeen, PerfInput, build_perf};
 use crate::view::{Frame, FrameOptions, IdMap, IdSeed, build_frame};
 use negotium_collector::{Collector, SystemInfo};
 use negotium_history::History;
@@ -104,6 +104,8 @@ pub struct LiveSource {
     ranker: Ranker,
     history: SharedHistory,
     ids: IdMap,
+    /// The selected Performance device as last seen, for its page's grace period.
+    seen: Option<LastSeen>,
     elevated: bool,
     log: crate::log::Log,
 }
@@ -126,6 +128,7 @@ impl LiveSource {
             ranker: Ranker::new(),
             history,
             ids: IdMap::with_seed(ids),
+            seen: None,
             elevated: negotium_actions::is_elevated(),
             log: crate::log::Log::new(crate::log::Log::default_path()),
         }
@@ -155,8 +158,9 @@ impl Source for LiveSource {
             }
             Page::Performance => {
                 let (device, range) = controls.perf();
+                self.seen = LastSeen::track(self.seen.take(), &snap, &device);
                 let perf = read_history(&self.history, |h| {
-                    build_perf(&PerfInput { snap: &snap, history: h, info: &self.info, device: &device, range })
+                    build_perf(&PerfInput { snap: &snap, history: h, info: &self.info, device: &device, range, last_seen: self.seen.as_ref() })
                 });
                 Some(Frame { page: Page::Performance, perf: Some(perf), ..Default::default() })
             }

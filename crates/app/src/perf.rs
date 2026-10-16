@@ -113,6 +113,17 @@ impl Entry<'_> {
         }
     }
 
+    /// Position of this kind of device in the list.
+    fn rank(&self) -> u8 {
+        match self {
+            Entry::Cpu => 0,
+            Entry::Memory => 1,
+            Entry::Disk(_) => 2,
+            Entry::Network(_) => 3,
+            Entry::Gpu(_) => 4,
+        }
+    }
+
     fn device(&self) -> Device {
         match self {
             Entry::Cpu => Device::Cpu,
@@ -242,6 +253,54 @@ pub struct PerfInput<'a> {
     pub info: &'a SystemInfo,
     pub device: &'a str,
     pub range: Range,
+    /// The requested device as last seen (see [`LastSeen::track`]): keeps its page through a
+    /// brief absence.
+    pub last_seen: Option<&'a LastSeen>,
+}
+
+/// How long a selected device's page outlives the device: a counter that misses a tick or
+/// re-enumerates must not throw the user back to the CPU page.
+pub const DEVICE_GRACE_MS: u64 = 5_000;
+
+/// A disk, adapter or GPU as last seen in a snapshot, kept by the worker across ticks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LastSeen {
+    at_ms: u64,
+    sample: Seen,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Seen {
+    Disk(DiskSample),
+    Network(AdapterSample),
+    Gpu(GpuSample),
+}
+
+impl LastSeen {
+    /// This tick's record for `device`: its sample if the snapshot has it, else `prev` if that is
+    /// the same device (it keeps the time it was last seen). CPU and memory are always present.
+    pub fn track(prev: Option<LastSeen>, snap: &Snapshot, device: &str) -> Option<LastSeen> {
+        let t = &snap.totals;
+        let at_ms = snap.taken_at_ms;
+        let now = match Device::parse(device)? {
+            Device::Cpu | Device::Memory => return None,
+            Device::Disk(n) => t.disks.iter().flatten().find(|d| d.name == n).map(|d| Seen::Disk(d.clone())),
+            Device::Network(n) => t.adapters.iter().flatten().find(|a| a.name == n).map(|a| Seen::Network(a.clone())),
+            Device::Gpu(k) => t.gpus.iter().flatten().find(|g| g.key == k).map(|g| Seen::Gpu(g.clone())),
+        };
+        match now {
+            Some(sample) => Some(LastSeen { at_ms, sample }),
+            None => prev.filter(|p| p.entry().id() == device),
+        }
+    }
+
+    fn entry(&self) -> Entry<'_> {
+        match &self.sample {
+            Seen::Disk(d) => Entry::Disk(d),
+            Seen::Network(a) => Entry::Network(a),
+            Seen::Gpu(g) => Entry::Gpu(g),
+        }
+    }
 }
 
 impl PerfInput<'_> {
@@ -322,10 +381,24 @@ fn device_view(e: &Entry, gpu_number: usize, input: &PerfInput) -> DeviceView {
 }
 
 pub fn build_perf(input: &PerfInput) -> PerfFrame {
-    let list = entries(input.snap, input.info);
-    // The requested device, or the CPU when it is gone: never stale numbers.
+    let mut list = entries(input.snap, input.info);
+    // The requested device; while it is briefly missing, its last-seen self with every value
+    // unknown; after DEVICE_GRACE_MS the CPU. Never stale numbers.
     let wanted = Device::parse(input.device);
-    let selected = wanted.and_then(|d| list.iter().position(|e| e.is(&d))).unwrap_or(0);
+    let mut held = false;
+    let selected = match wanted.and_then(|d| list.iter().position(|e| e.is(&d))) {
+        Some(i) => i,
+        None => match input.last_seen.filter(|s| s.entry().id() == input.device && input.end().saturating_sub(s.at_ms) <= DEVICE_GRACE_MS) {
+            Some(seen) => {
+                let ghost = seen.entry();
+                let i = list.iter().position(|e| e.rank() > ghost.rank()).unwrap_or(list.len());
+                list.insert(i, ghost);
+                held = true;
+                i
+            }
+            None => 0,
+        },
+    };
     let mut gpus = 0;
     let mut selected_gpu = 0;
     let devices = list
@@ -358,6 +431,16 @@ pub fn build_perf(input: &PerfInput) -> PerfFrame {
         Entry::Disk(d) => disk_page(&mut f, input, d),
         Entry::Network(a) => net_page(&mut f, input, a),
         Entry::Gpu(g) => gpu_page(&mut f, input, g, selected_gpu),
+    }
+    if held {
+        // Built from the last-seen sample for its names and history; none of its values is current.
+        f.devices[selected].value = dash();
+        for v in f.graphs.iter_mut().chain(f.cells.iter_mut()).map(|g| &mut g.value) {
+            *v = dash();
+        }
+        for s in &mut f.stats {
+            s.value = dash();
+        }
     }
     f
 }
@@ -602,7 +685,7 @@ pub(crate) mod tests {
     pub(crate) fn build_with(s: &Snapshot, info: &SystemInfo, device: &str, range: Range) -> PerfFrame {
         let mut h = History::new();
         h.push(s.taken_at_ms, &s.totals, &[]);
-        build_perf(&PerfInput { snap: s, history: &h, info, device, range })
+        build_perf(&PerfInput { snap: s, history: &h, info, device, range, last_seen: None })
     }
 
     fn build(s: &Snapshot, device: &str) -> PerfFrame {
@@ -895,6 +978,63 @@ pub(crate) mod tests {
         assert_eq!(devices_build("disk:2 F:").selected, "cpu");
     }
 
+    /// Builds the page for `device` at each snapshot in turn, tracking it the way the worker does.
+    fn build_over(snaps: &[Snapshot], device: &str) -> PerfFrame {
+        let (mut h, info, mut seen) = (History::new(), devices_info(), None);
+        let mut last = None;
+        for s in snaps {
+            h.push(s.taken_at_ms, &s.totals, &[]);
+            seen = LastSeen::track(seen, s, device);
+            last = Some(build_perf(&PerfInput { snap: s, history: &h, info: &info, device, range: Range::Minute, last_seen: seen.as_ref() }));
+        }
+        last.expect("at least one snapshot")
+    }
+
+    fn without_devices(t_ms: u64) -> Snapshot {
+        let mut s = devices_snapshot();
+        s.taken_at_ms = t_ms;
+        s.totals.disks = Some(Vec::new());
+        s.totals.adapters = None;
+        s.totals.gpus = None;
+        s
+    }
+
+    fn with_devices(t_ms: u64) -> Snapshot {
+        let mut s = devices_snapshot();
+        s.taken_at_ms = t_ms;
+        s
+    }
+
+    #[test]
+    fn a_device_missing_for_a_tick_keeps_its_page_with_unknown_values_and_its_history() {
+        for id in ["disk:0 C:", "net:Intel[R] Ethernet", "gpu:luid_b"] {
+            let f = build_over(&[with_devices(58_000), with_devices(59_000), without_devices(60_000)], id);
+            assert_eq!((f.selected.as_str(), f.requested.as_str()), (id, id), "kept through one missed tick: {id}");
+            let row = f.devices.iter().find(|d| d.id == id).expect("still listed");
+            assert_eq!(row.value, "—", "{id}");
+            assert!(f.graphs.iter().all(|g| g.value == "—"), "{id}: {:?}", f.graphs);
+            assert!(f.stats.iter().all(|s| s.value == "—"), "{id}: {:?}", f.stats);
+            assert!(f.cells.iter().all(|c| c.value == "—"), "{id}");
+            assert_ne!(f.graphs[0].line, EMPTY_PATH, "{id}: its history is still drawn");
+        }
+        let f = build_over(&[with_devices(58_000), without_devices(60_000)], "disk:0 C:");
+        assert_eq!(f.title, "Disk 0 (C:)");
+        let ids: Vec<&str> = f.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["cpu", "memory", "disk:0 C:"], "listed where its kind goes");
+    }
+
+    #[test]
+    fn a_device_gone_for_longer_falls_back_to_cpu() {
+        for id in ["disk:0 C:", "net:Intel[R] Ethernet", "gpu:luid_b"] {
+            let gone: Vec<Snapshot> = (60..=66).map(|s| without_devices(s * 1_000)).collect();
+            let f = build_over(&[&[with_devices(59_000)][..], &gone].concat(), id);
+            assert_eq!(f.selected, "cpu", "gone for 7 s: {id}");
+            let back = build_over(&[&[with_devices(59_000)][..], &gone, &[with_devices(67_000)]].concat(), id);
+            assert_eq!(back.selected, id, "and shown again once it is back: {id}");
+        }
+        assert_eq!(build_over(&[without_devices(60_000)], "disk:0 C:").selected, "cpu", "never seen: no grace");
+    }
+
     #[test]
     fn memory_numbers_come_from_one_source_and_add_up() {
         let s = snapshot(60_000);
@@ -924,7 +1064,7 @@ pub(crate) mod tests {
         gone.totals.memory = None;
         h.push(2_000, &gone.totals, &[]);
         let info = info();
-        let f = build_perf(&PerfInput { snap: &gone, history: &h, info: &info, device: "memory", range: Range::Minute });
+        let f = build_perf(&PerfInput { snap: &gone, history: &h, info: &info, device: "memory", range: Range::Minute, last_seen: None });
         assert_eq!((f.graphs[0].line.as_str(), f.graphs[0].area.as_str()), (EMPTY_PATH, EMPTY_PATH));
         assert_eq!(f.devices[1].spark, EMPTY_PATH);
         assert_eq!(f.devices[1].value, "—");
@@ -952,7 +1092,7 @@ pub(crate) mod tests {
         }
         let s = snapshot(60_000);
         let info = info();
-        let input = PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute };
+        let input = PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute, last_seen: None };
         assert_eq!(input.max_over(&Series::GpuUtil("k".into()), 30_000), 3.0);
         assert_eq!(input.max_over(&Series::GpuUtil("none".into()), 30_000), 0.0);
     }
