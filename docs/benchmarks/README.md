@@ -111,3 +111,32 @@ No launch stalled in these runs (the stall is intermittent), and software opened
 2. In another terminal: `cargo run -p negotium-probe --release -- --ticks 30`
 3. After ~8 s the window title shows "Not Responding"; click inside it once.
 4. Expected: the probe lists `negotium-hang` with `NOT RESPONDING` on every tick after that, and no `dwm` app row appears.
+
+## Collector tick after Plan 3a
+
+Same machine and commands as above (`tick_breakdown --ticks 60`, `negotium-probe --ticks 60 --timing`). This run saw 486 processes (Plan 1: 674), so the process-dependent columns are not strictly comparable; `pdh` does not depend on the process count.
+
+| Column | Plan 1 median (ms) | Plan 3a median (ms) |
+|---|---|---|
+| pdh | 6.11 | 5.78 |
+| tick | 22.35 | 13.19 |
+| history after 60 ticks (bytes, probe) | — | 1827389 |
+
+The probe's own headline for the same run: tick median 15.47 ms, p95 23.26 ms (Plan 1 headline: median 18.73 ms). Neither `pdh` (+3 ms limit) nor `tick` (+4 ms limit) grew against Plan 1.
+
+Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter send/receive, GPU adapter memory), one interface-table read every 10 s, and one D3DKMT temperature query per GPU per tick.
+
+## Manual checks: Plan 3a
+
+1. Performance → each GPU: the discrete GPU shows a temperature that tracks a load (e.g. a game or `dxdiag` 3D test); an integrated GPU or one without a sensor shows "—". The Overview GPU meter shows the busiest GPU's temperature.
+2. On a Hyper-V host (Default Switch present): download a large file; the Overview network meter matches the physical adapter's page, not double.
+3. Performance → CPU: one cell per logical processor in Task Manager's order; Speed within a few percent of Task Manager's.
+4. Performance → Memory: composition matches Task Manager's In use / Modified / Standby / Free within rounding.
+5. 1 min / 10 min / 1 h: right after start the 1 h graph only fills its right edge; scrubbing its empty part says "No history for this moment."; a scrub card follows the pointer and shows the right time.
+6. Keyboard: Tab into the list, arrows, Right/Left, Delete, Menu key, Esc (see Task 11 Step 5); repeat with Narrator.
+7. Light and dark, 100 / 150 / 200 % scale: rail icons, graphs, cards and focus rings readable.
+8. Rail and Performance page in light and dark at 100 / 150 / 200 % scale (these were not checked live during the plan).
+9. Scrub card: it flips to the other side of the pointer near the graph's edge, is not clipped at the smallest window size, and reads correctly in light and dark.
+10. Narrator on the keyboard-navigated list: note what it announces for the list itself and for the current row.
+11. Shift+F10 and the Menu key: the native context menu opens anchored at the highlighted row, not at the pointer or a window corner.
+12. Meters do not change height when the window opens (user-reported earlier, now fixed): open the window from the tray and from a cold start and watch the Overview meters.
