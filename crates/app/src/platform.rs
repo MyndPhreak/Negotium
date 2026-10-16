@@ -15,7 +15,9 @@ use windows::Win32::Graphics::Dwm::{
     DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
 };
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcess, ReleaseMutex, TerminateProcess, WaitForSingleObject,
+};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, GetPropW, GetWindowThreadProcessId, IsIconic,
@@ -301,6 +303,26 @@ pub fn claim_instance(name: &str, wait: Duration) -> Option<InstanceLock> {
             Err(_) => return None,
         }
     }
+}
+
+/// Ends this process at once, from any thread, without running DLL detach code. The renderer
+/// watchdog uses it: on a wedged GL driver an orderly exit (`std::process::exit`) takes the loader
+/// lock and runs opengl32's and the driver's DLL_PROCESS_DETACH, which can hang with the
+/// single-instance lock still held. Anything that must survive (files) has to be closed first.
+pub fn terminate_self() -> ! {
+    // SAFETY: the pseudo-handle of the current process is always valid; terminating ourselves is
+    // the intent, and the kernel releases our handles (the instance mutex) as the process ends.
+    let _ = unsafe { TerminateProcess(GetCurrentProcess(), 0) };
+    // TerminateProcess on the current process does not return; if it ever did, exit normally.
+    std::process::exit(0)
+}
+
+/// Removes an environment variable from this process, so processes it starts don't inherit it.
+/// Call it only while no other thread can be reading the environment (early in `main`).
+pub fn remove_env_var(name: &str) {
+    // SAFETY: called from `main` before any other thread is started; on Windows the environment
+    // block is also guarded by the process environment lock.
+    unsafe { std::env::remove_var(name) };
 }
 
 #[cfg(test)]

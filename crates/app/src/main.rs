@@ -7,7 +7,7 @@ use negotium::renderer;
 use negotium::{MainWindow, NegotiumTray, worker};
 use negotium_model::Metric;
 use slint::ComponentHandle;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,23 +76,34 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // GPU (FemtoVG) by default, software once a stall has been recorded, SLINT_BACKEND over both
     // (crate::renderer; docs/benchmarks/README.md, "Renderer").
-    let relaunched = std::env::args().any(|a| a == renderer::FALLBACK_ARG);
+    let relaunched = std::env::args_os().any(|a| a == renderer::FALLBACK_ARG);
     let decision =
         renderer::decide(std::env::var_os("SLINT_BACKEND").is_some(), renderer::fallback_recorded(), relaunched);
-    let name = match decision.renderer {
-        renderer::Renderer::FromEnv => None,
-        renderer::Renderer::Gpu => Some("femtovg"),
-        renderer::Renderer::Software => Some("software"),
+    let selector = slint::BackendSelector::new();
+    let (selector, name) = match decision.renderer {
+        // Selected now, while SLINT_BACKEND is still set: the selector reads it.
+        renderer::Renderer::FromEnv => (selector, "SLINT_BACKEND"),
+        renderer::Renderer::Gpu => (selector.backend_name("winit".into()).renderer_name("femtovg".into()), "femtovg"),
+        renderer::Renderer::Software => {
+            (selector.backend_name("winit".into()).renderer_name("software".into()), "software")
+        }
     };
-    if let Some(name) = name
-        && let Err(e) = slint::BackendSelector::new().backend_name("winit".into()).renderer_name(name.into()).select()
-    {
+    if let Err(e) = selector.select() {
         warn(&format!("{name} renderer unavailable, using Slint's default: {e}"));
     }
+    // The choice is made: keep SLINT_BACKEND (the user's, or the watchdog's winit-software) out of
+    // the processes Negotium starts (Open file location, Run new task). No other thread runs yet.
+    platform::remove_env_var("SLINT_BACKEND");
     // Armed before the window is created: creating it already probes OpenGL.
     let watchdog = decision
         .watchdog
         .then(|| renderer::Watchdog::arm(renderer::WATCHDOG_TIMEOUT, renderer::relaunch_in_software).0);
+    // Whether the tray icon may be created: not while the watchdog could still replace this
+    // instance (it terminates without cleanup and would orphan the icon).
+    let tray_allowed = {
+        let watchdog = watchdog.clone();
+        move || watchdog.as_ref().is_none_or(|w| w.resolved())
+    };
     let ui = MainWindow::new()?;
     if let Some((r, g, b)) = platform::read_accent() {
         ui.global::<negotium::Theme>().set_accent(slint::Color::from_rgb_u8(r, g, b));
@@ -239,20 +250,20 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // The rendering notifier marks the first presented frame (it disarms the watchdog and lets the
-    // tray icon be created) and, with NEGOTIUM_FRAME_STATS=<path>, times every frame for the bench.
+    // The rendering notifier reports the first presented frame to the watchdog and, with
+    // NEGOTIUM_FRAME_STATS=<path>, times every frame for the bench.
     let frame_stats_path = std::env::var_os("NEGOTIUM_FRAME_STATS");
     let frame_stats: Rc<RefCell<negotium::framestats::FrameStats>> = Default::default();
-    let presented = Rc::new(Cell::new(false));
     let notified = {
         let (stats, timed) = (frame_stats.clone(), frame_stats_path.is_some());
-        let (presented, watchdog) = (presented.clone(), watchdog.clone());
+        let watchdog = watchdog.clone();
         let mut first = true;
         // Debug builds only: NEGOTIUM_SIMULATE_STALL=1 blocks the UI thread before the first frame
         // of a guarded launch, to watch the watchdog relaunch into software.
-        let stall = cfg!(debug_assertions)
-            && watchdog.is_some()
-            && std::env::var_os("NEGOTIUM_SIMULATE_STALL").is_some_and(|v| v == "1");
+        #[cfg(debug_assertions)]
+        let stall = watchdog.is_some() && std::env::var_os("NEGOTIUM_SIMULATE_STALL").is_some_and(|v| v == "1");
+        #[cfg(not(debug_assertions))]
+        let stall = false;
         ui.window().set_rendering_notifier(move |state, _| match state {
             slint::RenderingState::BeforeRendering => {
                 if stall && first {
@@ -270,13 +281,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 // AfterRendering comes before the frame is presented (swapped); the timer runs
                 // once the event loop is back, after the present.
-                if std::mem::take(&mut first) {
-                    let (presented, watchdog) = (presented.clone(), watchdog.clone());
+                if std::mem::take(&mut first)
+                    && let Some(w) = watchdog.clone()
+                {
                     slint::Timer::single_shot(Duration::ZERO, move || {
-                        presented.set(true);
-                        if let Some(w) = &watchdog {
-                            w.disarm();
-                        }
+                        w.presented();
                     });
                 }
             }
@@ -286,9 +295,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Err(e) = notified {
         // The software renderer has no notifier (FemtoVG fell back to it in-process, or software
         // was chosen): there is no GL to stall, so stand the watchdog down.
-        presented.set(true);
         if let Some(w) = &watchdog {
-            w.disarm();
+            w.stand_down();
         }
         if frame_stats_path.is_some() {
             warn(&format!("frame stats unavailable with this renderer ({e}); use SLINT_BACKEND=winit-femtovg"));
@@ -383,8 +391,8 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.show()?;
     // The native HWND is created lazily once the event loop runs, so poll until it exists; then,
     // once: apply the chrome, hook the window (tray re-creation, activation by a second launch)
-    // and mark it for that second launch. The tray icon waits for the first presented frame, so
-    // an instance the renderer watchdog replaces (it exits without cleanup) leaves no icon behind.
+    // and mark it for that second launch. Every tick is also the renderer watchdog's heartbeat
+    // (the UI thread is alive), and the tray icon waits until the watchdog has resolved.
     let tray: Rc<RefCell<Option<NegotiumTray>>> = Default::default();
     let chrome_timer = Rc::new(slint::Timer::default());
     {
@@ -392,24 +400,32 @@ fn main() -> Result<(), slint::PlatformError> {
         let controls = controls.clone();
         let handle = Rc::downgrade(&chrome_timer);
         let mut chromed = false;
+        let watchdog = watchdog.clone();
         chrome_timer.start(slint::TimerMode::Repeated, Duration::from_millis(50), move || {
+            if let Some(w) = &watchdog {
+                w.heartbeat();
+            }
             let Some(ui) = weak.upgrade() else { return };
             if !chromed {
                 let Some(hwnd) = platform::main_hwnd(&ui) else { return };
                 platform::apply_window_chrome(&ui);
                 let hooked = {
                     let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
+                    let tray_allowed = tray_allowed.clone();
                     platform::install_window_hooks(hwnd, move |event| {
                         // The hook runs inside the window procedure: act from the event loop instead.
                         let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
+                        let tray_allowed = tray_allowed.clone();
                         slint::Timer::single_shot(Duration::ZERO, move || match event {
                             // Explorer restarted (perhaps ended from this very list): add the icon again.
-                            ShellEvent::TaskbarCreated => {
+                            // Before the watchdog resolves, the first creation below adds it.
+                            ShellEvent::TaskbarCreated if tray_allowed() => {
                                 drop(tray.borrow_mut().take());
                                 *tray.borrow_mut() = make_tray(&controls, &weak)
                                     .map_err(|e| warn(&format!("tray icon could not be re-created: {e}")))
                                     .ok();
                             }
+                            ShellEvent::TaskbarCreated => {}
                             ShellEvent::Activate => show_main(&controls, &weak),
                         });
                     })
@@ -420,7 +436,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 platform::mark_main_window(hwnd);
                 chromed = true;
             }
-            if !presented.get() {
+            if !tray_allowed() {
                 return;
             }
             *tray.borrow_mut() = make_tray(&controls, &weak)

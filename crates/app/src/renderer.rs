@@ -8,8 +8,10 @@
 //!   renderer when the selected one fails to build);
 //! - the GL driver stalls (seen once in Plan 2: the window took 30 s to 5+ min to appear). That
 //!   blocks the UI thread, so nothing in-process can rescue it. A [`Watchdog`] thread notices
-//!   that no frame was presented within [`WATCHDOG_TIMEOUT`], records the fallback, relaunches
-//!   the exe with the software renderer and exits.
+//!   that the UI thread showed neither a frame nor a heartbeat for [`WATCHDOG_TIMEOUT`], records
+//!   the fallback, relaunches the exe with the software renderer and terminates this process.
+//!   A window that renders nothing because it is minimised (occluded) keeps its heartbeat, so it
+//!   is not mistaken for a stall.
 //!
 //! The fallback is recorded in a marker file ([`fallback_path`]) and every later launch honours
 //! it. Only an explicit user action clears it ([`clear_fallback`], for the Settings switch of a
@@ -18,12 +20,15 @@
 //! `SLINT_BACKEND` overrides both the default and the marker.
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// How long the main window has to present its first frame before the watchdog relaunches.
-pub const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long the UI thread may show neither a first frame nor a heartbeat before the watchdog
+/// relaunches. Generous, because the fallback it records sticks: a cold start at login, a virus
+/// scan or font enumeration must not trip it.
+pub const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(10);
 /// Marks a process started by the watchdog: it never arms a watchdog of its own.
 pub const FALLBACK_ARG: &str = "--renderer-fallback";
 /// Makes the relaunch wait for this instance's single-instance lock (as restart-as-admin does).
@@ -88,11 +93,16 @@ pub fn fallback_recorded_at(path: &Path) -> bool {
     path.is_file()
 }
 
+/// Writes and flushes the marker; the file is closed on return (the watchdog then terminates the
+/// process without any cleanup).
 pub fn record_fallback_at(path: &Path) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, "The GPU renderer stalled at startup; Negotium uses the software renderer.\n")
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(b"The GPU renderer stalled at startup; Negotium uses the software renderer.\n")?;
+    f.sync_all()
 }
 
 pub fn clear_fallback_at(path: &Path) -> std::io::Result<()> {
@@ -114,39 +124,133 @@ pub fn relaunch_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> 
     out
 }
 
-/// Waits on its own thread for the first frame; if none arrives within the timeout, runs the
-/// stall callback (once, from that thread). Disarmed by [`Disarm::disarm`], or when every
-/// [`Disarm`] has been dropped.
-pub struct Watchdog;
+/// What the watchdog concluded once the timeout has passed without a first frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// Not decided yet.
+    Wait,
+    /// The UI thread has been silent for the whole timeout: a stall.
+    Fire,
+    /// The UI thread has been beating for the whole timeout but drew nothing (minimised or
+    /// hidden): it is healthy, and the watchdog stands down.
+    Healthy,
+}
 
-/// Tells the watchdog the first frame arrived. Cheap to clone; disarming twice is harmless.
-#[derive(Clone)]
-pub struct Disarm(Sender<()>);
-
-impl Disarm {
-    pub fn disarm(&self) {
-        let _ = self.0.send(());
+/// The watchdog's decision, a pure function of time since arming and since the first and the
+/// latest heartbeat (`None`: no heartbeat yet). A first frame is handled before this is asked.
+pub fn verdict(
+    since_arm: Duration,
+    since_first_beat: Option<Duration>,
+    since_last_beat: Option<Duration>,
+    timeout: Duration,
+) -> Verdict {
+    if since_last_beat.unwrap_or(since_arm) >= timeout {
+        Verdict::Fire
+    } else if since_first_beat.is_some_and(|d| d >= timeout) {
+        Verdict::Healthy
+    } else {
+        Verdict::Wait
     }
 }
 
+const ARMED: u8 = 0;
+const PRESENTED: u8 = 1;
+const STOOD_DOWN: u8 = 2;
+const FIRED: u8 = 3;
+
+struct Shared {
+    state: AtomicU8,
+    armed_at: Instant,
+    /// Milliseconds since `armed_at`, plus one; 0 means no heartbeat yet.
+    first_beat: AtomicU64,
+    last_beat: AtomicU64,
+}
+
+impl Shared {
+    fn since(&self, beat: &AtomicU64, now: Instant) -> Option<Duration> {
+        let at = beat.load(Ordering::SeqCst).checked_sub(1)?;
+        Some(now.saturating_duration_since(self.armed_at + Duration::from_millis(at)))
+    }
+}
+
+/// Guards the first frame from its own thread. The UI thread reports a heartbeat
+/// ([`Watchdog::heartbeat`]) and the first frame ([`Watchdog::presented`]); the state moves once,
+/// out of Armed, by compare-and-swap, so a first frame and the stall callback can never both win.
+#[derive(Clone)]
+pub struct Watchdog(Arc<Shared>);
+
 impl Watchdog {
-    pub fn arm(timeout: Duration, on_stall: impl FnOnce() + Send + 'static) -> (Disarm, JoinHandle<()>) {
-        let (tx, rx) = mpsc::channel::<()>();
+    /// Starts the watchdog thread. `on_stall` runs at most once, from that thread. Dropping every
+    /// handle stands the watchdog down.
+    pub fn arm(timeout: Duration, on_stall: impl FnOnce() + Send + 'static) -> (Watchdog, JoinHandle<()>) {
+        let shared = Arc::new(Shared {
+            state: AtomicU8::new(ARMED),
+            armed_at: Instant::now(),
+            first_beat: AtomicU64::new(0),
+            last_beat: AtomicU64::new(0),
+        });
+        let weak: Weak<Shared> = Arc::downgrade(&shared);
+        let poll = (timeout / 20).clamp(Duration::from_millis(1), Duration::from_millis(100));
         let thread = std::thread::Builder::new()
             .name("negotium-renderer-watchdog".into())
             .spawn(move || {
-                if let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(timeout) {
-                    on_stall();
+                loop {
+                    std::thread::sleep(poll);
+                    let Some(w) = weak.upgrade() else { return };
+                    if w.state.load(Ordering::SeqCst) != ARMED {
+                        return;
+                    }
+                    let now = Instant::now();
+                    let since_arm = now.saturating_duration_since(w.armed_at);
+                    let to = match verdict(since_arm, w.since(&w.first_beat, now), w.since(&w.last_beat, now), timeout) {
+                        Verdict::Wait => continue,
+                        Verdict::Healthy => STOOD_DOWN,
+                        Verdict::Fire => FIRED,
+                    };
+                    let won = w.state.compare_exchange(ARMED, to, Ordering::SeqCst, Ordering::SeqCst).is_ok();
+                    drop(w);
+                    if won && to == FIRED {
+                        on_stall();
+                    }
+                    return;
                 }
             })
             .expect("spawn the renderer watchdog");
-        (Disarm(tx), thread)
+        (Watchdog(shared), thread)
+    }
+
+    /// The UI thread is alive (called from a UI-thread timer).
+    pub fn heartbeat(&self) {
+        let at = self.0.armed_at.elapsed().as_millis() as u64 + 1;
+        let _ = self.0.first_beat.compare_exchange(0, at, Ordering::SeqCst, Ordering::SeqCst);
+        self.0.last_beat.store(at, Ordering::SeqCst);
+    }
+
+    /// The first frame was presented. False if the watchdog has already fired: this instance is
+    /// being replaced and must not create anything (such as the tray icon) that would outlive it.
+    pub fn presented(&self) -> bool {
+        match self.0.state.compare_exchange(ARMED, PRESENTED, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => true,
+            Err(state) => state != FIRED,
+        }
+    }
+
+    /// No GL can stall (the software renderer is in use): stand down unless already fired.
+    pub fn stand_down(&self) {
+        let _ = self.0.state.compare_exchange(ARMED, STOOD_DOWN, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// Whether the watchdog is settled and won't fire: a frame was presented or it stood down.
+    /// Until then the tray icon waits, so a replaced instance leaves none behind.
+    pub fn resolved(&self) -> bool {
+        matches!(self.0.state.load(Ordering::SeqCst), PRESENTED | STOOD_DOWN)
     }
 }
 
-/// The stall callback: records the fallback, relaunches this exe with the software renderer
-/// and exits, which releases the single-instance lock the relaunch waits for. The stalled
-/// instance has no tray icon yet (it is created after the first frame), so none is orphaned.
+/// The stall callback: records the fallback, relaunches this exe with the software renderer and
+/// terminates this process (no DLL detach: a wedged GL driver could hang an orderly exit), which
+/// releases the single-instance lock the relaunch waits for. The stalled instance has no tray
+/// icon yet (it is created once the watchdog has resolved), so none is orphaned.
 /// If the relaunch cannot start, this instance keeps waiting: the window may still appear, and
 /// the next launch uses software anyway.
 pub fn relaunch_in_software() {
@@ -154,7 +258,10 @@ pub fn relaunch_in_software() {
     if let Err(e) = record_fallback() {
         log(&format!("renderer fallback could not be recorded: {e}"));
     }
-    log("the GPU renderer showed no frame within 3 s; relaunching with the software renderer");
+    log(&format!(
+        "the UI thread showed no frame and no heartbeat for {} s; relaunching with the software renderer",
+        WATCHDOG_TIMEOUT.as_secs()
+    ));
     let spawned = std::env::current_exe().and_then(|exe| {
         std::process::Command::new(exe)
             .args(relaunch_args(std::env::args_os().skip(1)))
@@ -162,7 +269,8 @@ pub fn relaunch_in_software() {
             .spawn()
     });
     match spawned {
-        Ok(_) => std::process::exit(0),
+        // The marker and the log are written and closed above.
+        Ok(_) => crate::platform::terminate_self(),
         Err(e) => log(&format!("software relaunch failed: {e}")),
     }
 }
@@ -170,8 +278,6 @@ pub fn relaunch_in_software() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn decides_gpu_with_a_watchdog_by_default() {
@@ -231,38 +337,105 @@ mod tests {
         assert_eq!(relaunch_args(args(&[RESTARTED_ARG])), args(&[RESTARTED_ARG, FALLBACK_ARG]));
     }
 
-    fn counting() -> (Arc<AtomicUsize>, impl FnOnce() + Send + 'static) {
-        let n = Arc::new(AtomicUsize::new(0));
+    fn counting() -> (Arc<std::sync::atomic::AtomicUsize>, impl FnOnce() + Send + 'static) {
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let m = n.clone();
         (n, move || {
             m.fetch_add(1, Ordering::SeqCst);
         })
     }
 
+    const T: Duration = Duration::from_secs(10);
+    fn s(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
     #[test]
-    fn a_first_frame_in_time_disarms_the_watchdog() {
+    fn the_verdict_waits_within_the_timeout() {
+        assert_eq!(verdict(s(5), None, None, T), Verdict::Wait);
+        assert_eq!(verdict(s(9), Some(s(8)), Some(s(1)), T), Verdict::Wait);
+    }
+
+    #[test]
+    fn no_frame_and_no_heartbeat_fires() {
+        assert_eq!(verdict(s(10), None, None, T), Verdict::Fire);
+        // The loop beat early, then the first render stalled: silent for the whole timeout.
+        assert_eq!(verdict(s(11), Some(s(11)), Some(s(10)), T), Verdict::Fire);
+    }
+
+    #[test]
+    fn no_frame_with_a_heartbeat_does_not_fire() {
+        // Minimised: the loop beats on but draws nothing.
+        assert_eq!(verdict(s(10), Some(s(10)), Some(Duration::ZERO), T), Verdict::Healthy);
+        // A late start: beating, but not yet for a whole timeout.
+        assert_eq!(verdict(s(12), Some(s(4)), Some(Duration::ZERO), T), Verdict::Wait);
+    }
+
+    #[test]
+    fn a_first_frame_in_time_resolves_the_watchdog() {
         let (stalls, on_stall) = counting();
-        let (disarm, thread) = Watchdog::arm(Duration::from_secs(30), on_stall);
-        disarm.disarm();
-        disarm.disarm(); // a second signal is harmless
-        thread.join().unwrap(); // returns at once, not after 30 s
+        let (w, thread) = Watchdog::arm(Duration::from_secs(30), on_stall);
+        assert!(!w.resolved());
+        assert!(w.presented());
+        assert!(w.presented(), "a second report is harmless");
+        assert!(w.resolved());
+        thread.join().unwrap(); // returns at its next poll, not after 30 s
         assert_eq!(stalls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn no_frame_runs_the_stall_callback_exactly_once() {
+    fn fire_wins_when_no_frame_arrives() {
         let (stalls, on_stall) = counting();
-        let (disarm, thread) = Watchdog::arm(Duration::from_millis(20), on_stall);
+        let (w, thread) = Watchdog::arm(Duration::from_millis(20), on_stall);
         thread.join().unwrap();
-        disarm.disarm(); // too late: nothing more happens
         assert_eq!(stalls.load(Ordering::SeqCst), 1);
+        assert!(!w.presented(), "a frame after the fire loses: this instance is being replaced");
+        assert!(!w.resolved());
+        w.stand_down();
+        assert!(!w.resolved());
+        assert_eq!(stalls.load(Ordering::SeqCst), 1, "fired exactly once");
     }
 
     #[test]
-    fn dropping_every_disarm_disarms() {
+    fn a_frame_that_wins_after_the_timeout_keeps_the_watchdog_from_firing() {
+        // The timeout has passed, but the first frame reaches the state first: no fire.
         let (stalls, on_stall) = counting();
-        let (disarm, thread) = Watchdog::arm(Duration::from_secs(30), on_stall);
-        drop(disarm);
+        let (w, thread) = Watchdog::arm(Duration::from_millis(50), on_stall);
+        assert!(w.presented());
+        std::thread::sleep(Duration::from_millis(100));
+        thread.join().unwrap();
+        assert_eq!(stalls.load(Ordering::SeqCst), 0);
+        assert!(w.resolved());
+    }
+
+    #[test]
+    fn a_heartbeating_ui_without_frames_resolves_healthy() {
+        let (stalls, on_stall) = counting();
+        let (w, thread) = Watchdog::arm(Duration::from_millis(300), on_stall);
+        while !thread.is_finished() {
+            w.heartbeat();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        thread.join().unwrap();
+        assert_eq!(stalls.load(Ordering::SeqCst), 0);
+        assert!(w.resolved(), "minimised but alive: the tray may be created");
+    }
+
+    #[test]
+    fn standing_down_resolves_without_firing() {
+        let (stalls, on_stall) = counting();
+        let (w, thread) = Watchdog::arm(Duration::from_secs(30), on_stall);
+        w.stand_down();
+        assert!(w.resolved());
+        thread.join().unwrap();
+        assert_eq!(stalls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn dropping_every_handle_stands_down() {
+        let (stalls, on_stall) = counting();
+        let (w, thread) = Watchdog::arm(Duration::from_secs(30), on_stall);
+        drop(w);
         thread.join().unwrap();
         assert_eq!(stalls.load(Ordering::SeqCst), 0);
     }
