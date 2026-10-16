@@ -179,6 +179,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let b = bridge.clone();
         ui.on_row_key_focus(move |id, focused| negotium::bridge::row_focus(&b, id, focused));
     }
+    // Keyboard navigation through the list (ruling R4): it stays frozen while it has focus.
+    {
+        let b = bridge.clone();
+        ui.on_list_focus(move |focused| negotium::bridge::list_focus(&b, focused));
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_list_key(move |text| weak.upgrade().is_some_and(|ui| negotium::bridge::handle_list_key(&b, &ui, &text)));
+    }
     {
         let b = bridge.clone();
         ui.on_clear_key_focus(move || b.borrow_mut().clear_key_focus());

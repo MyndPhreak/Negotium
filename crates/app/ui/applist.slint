@@ -26,12 +26,46 @@ component HeaderCell inherits Text {
     color: Theme.muted;
 }
 
+// The one row menu, shared by each row (right-click, Menu key on a focused row control) and by the
+// list's current row (Menu key on the list). Never opens by itself: the owner captures the target
+// row first, then calls open(); every item reports only its action name, and the owner applies it
+// to that captured row.
+component RowMenu inherits Rectangle {
+    in property <bool> actionable;
+    callback action(string);
+    public function open(x: length, y: length) {
+        area.show({ x: x, y: y });
+    }
+    area := ContextMenuArea {
+        // Disabled so Slint never opens it by itself (right press, Menu key, Shift+F10) without
+        // the owner's capture; show() still works (see the UI tests).
+        enabled: false;
+        Menu {
+            MenuItem { title: "End task"; enabled: root.actionable; activated => { root.action("end-task"); } }
+            MenuItem { title: "End process tree"; enabled: root.actionable; activated => { root.action("end-tree"); } }
+            MenuItem { title: "Efficiency mode"; enabled: root.actionable; activated => { root.action("efficiency"); } }
+            MenuSeparator { }
+            MenuItem { title: "Open file location"; enabled: root.actionable; activated => { root.action("open-location"); } }
+            MenuItem { title: "Details"; enabled: root.actionable; activated => { root.action("details"); } }
+        }
+    }
+    // Beside the area, not inside it (it never handles input itself, so it needs no content;
+    // Slint 1.18's compiler panics inlining @children into a ContextMenuArea). Both fill the
+    // component, so open() coordinates are the content's own.
+    @children
+}
+
 export component AppList inherits VerticalLayout {
     in property <[RowData]> rows;
     in property <int> metric;
     in property <bool> interactive: true;
     in-out property <string> search-text;
+    // Keyboard navigation (ruling P3-7): the current row's index and id, and whether it can be acted on.
+    in property <int> current-row: -1;
+    in property <int> current-id: -1;
+    in property <bool> current-actionable;
     out property <bool> hovered: area.has-hover;
+    out property <length> scroll-y: lv.content-y;
     // The row a context menu was opened on. Captured when it opens; every menu item acts on it,
     // never on whatever row data sits at that index by the time an item is chosen.
     out property <int> menu-target: -1;
@@ -44,7 +78,34 @@ export component AppList inherits VerticalLayout {
     // frozen meanwhile, like on hover, so the focused control can't move to another app.
     callback row-focus(int, bool);
     callback search(string);
+    // The list itself gained (true) or lost (false) keyboard focus: frozen meanwhile, like on hover.
+    callback list-focus(bool);
+    // A key while the list itself has focus; true when it was a navigation key.
+    callback list-key(string) -> bool;
     spacing: 6px;
+
+    // Scrolls so row `i` is fully visible (rows are 32px tall).
+    public function ensure-visible(i: int) {
+        if (i < 0) {
+            return;
+        }
+        if (i * 32px < -lv.content-y) {
+            lv.content-y = -(i * 32px);
+        } else if ((i + 1) * 32px > -lv.content-y + lv.visible-height) {
+            lv.content-y = -((i + 1) * 32px - lv.visible-height);
+        }
+    }
+
+    // The current row's menu from the keyboard (Menu key, Shift+F10) while the list has focus.
+    // Same capture rule as a row's own menu: the target is fixed before the menu shows.
+    function open-key-menu() {
+        if (root.current-id >= 0 && root.current-actionable && root.interactive) {
+            root.menu-target = root.current-id;
+            root.menu-open(true);
+            key-menu.open(24px, (root.current-row + 1) * 32px + lv.content-y);
+            root.menu-open(false);
+        }
+    }
 
     LineEdit {
         text <=> root.search-text;
@@ -64,133 +125,157 @@ export component AppList inherits VerticalLayout {
         HeaderCell { text: "GPU"; }
         HeaderCell { text: "Network"; }
     }
-    area := TouchArea {
+    list-keys := FocusScope {
+        vertical-stretch: 1;
         enabled: root.interactive;
-        changed has-hover => { root.hover(self.has-hover); }
-        ListView {
-            for r in root.rows : Rectangle {
-                height: 32px;
-                background: r.hung != "" ? Theme.danger-bg : (row-touch.has-hover ? Theme.card : transparent);
-                border-radius: 4px;
-                opacity: r.exited ? 0.5 : 1.0;
-                accessible-role: list-item;
-                accessible-label: r.exited ? r.name + ", exited"
-                    : r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
-                // The only way this row's menu opens: capture the row first, keep the list frozen
-                // while it is open. The native Windows menu (muda, TrackPopupMenu) is modal: show()
-                // returns only once it has closed. Slint's popup fallback (no native menus) returns at
-                // once; there the captured menu-target alone keeps the action on the right row.
-                function open-menu(x: length, y: length) {
-                    if (r.actionable && root.interactive) {
-                        root.menu-target = r.id;
-                        root.menu-open(true);
-                        menu.show({ x: x, y: y });
-                        root.menu-open(false);
-                    }
-                }
-                menu := ContextMenuArea {
-                    // Disabled so Slint never opens it by itself (right press, Menu key, Shift+F10)
-                    // without the capture above; show() still works (see the UI tests).
-                    enabled: false;
-                    Menu {
-                        MenuItem { title: "End task"; enabled: r.actionable; activated => { root.action("end-task", root.menu-target); } }
-                        MenuItem { title: "End process tree"; enabled: r.actionable; activated => { root.action("end-tree", root.menu-target); } }
-                        MenuItem { title: "Efficiency mode"; enabled: r.actionable; activated => { root.action("efficiency", root.menu-target); } }
-                        MenuSeparator { }
-                        MenuItem { title: "Open file location"; enabled: r.actionable; activated => { root.action("open-location", root.menu-target); } }
-                        MenuItem { title: "Details"; enabled: r.actionable; activated => { root.action("details", root.menu-target); } }
-                    }
-                    // Never takes focus itself; key presses a focused control in this row rejects
-                    // (the Buttons take only Space and Return) bubble up here.
-                    row-keys := FocusScope {
-                        enabled: false;
-                        // Any key pressed while focus is inside this row (re)asserts the freeze, so a
-                        // missed focus edge can't leave Space acting on an unfrozen list.
-                        capture-key-pressed(e) => {
-                            root.row-focus(r.id, true);
-                            return reject;
-                        }
-                        key-pressed(e) => {
-                            if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
-                                open-menu(8px, 32px);
-                                return accept;
+        // Mouse clicks never select rows or move focus here; only Tab does (ruling P3-7).
+        focus-on-click: false;
+        accessible-role: list;
+        accessible-label: "Apps";
+        changed has-focus => { root.list-focus(self.has-focus); }
+        key-pressed(e) => {
+            // Keys bubbling up from a focused row control are not list navigation.
+            if (!self.has-focus) {
+                return reject;
+            }
+            if (e.text == Key.Escape) {
+                self.clear-focus();
+                return accept;
+            }
+            if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
+                root.open-key-menu();
+                return accept;
+            }
+            return root.list-key(e.text) ? accept : reject;
+        }
+        key-menu := RowMenu {
+            actionable: root.current-actionable;
+            action(name) => { root.action(name, root.menu-target); }
+            area := TouchArea {
+                enabled: root.interactive;
+                changed has-hover => { root.hover(self.has-hover); }
+                lv := ListView {
+                    for r[i] in root.rows : Rectangle {
+                        height: 32px;
+                        background: r.hung != "" ? Theme.danger-bg : (row-touch.has-hover ? Theme.card : transparent);
+                        border-radius: 4px;
+                        // The keyboard-current row, while the list has focus.
+                        border-width: (i == root.current-row && list-keys.has-focus) ? 2px : 0px;
+                        border-color: Theme.text;
+                        opacity: r.exited ? 0.5 : 1.0;
+                        accessible-role: list-item;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: i == root.current-row;
+                        accessible-label: r.exited ? r.name + ", exited"
+                            : r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
+                        // The only way this row's menu opens: capture the row first, keep the list frozen
+                        // while it is open. The native Windows menu (muda, TrackPopupMenu) is modal: show()
+                        // returns only once it has closed. Slint's popup fallback (no native menus) returns at
+                        // once; there the captured menu-target alone keeps the action on the right row.
+                        function open-menu(x: length, y: length) {
+                            if (r.actionable && root.interactive) {
+                                root.menu-target = r.id;
+                                root.menu-open(true);
+                                menu.open(x, y);
+                                root.menu-open(false);
                             }
-                            return reject;
                         }
-                        row-touch := TouchArea {
-                            enabled: root.interactive;
-                            double-clicked => { if (r.expandable) { root.toggle(r.id); } }
-                            pointer-event(e) => {
-                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
-                                    open-menu(self.mouse-x, self.mouse-y);
+                        menu := RowMenu {
+                            actionable: r.actionable;
+                            action(name) => { root.action(name, root.menu-target); }
+                            // Never takes focus itself; key presses a focused control in this row rejects
+                            // (the Buttons take only Space and Return) bubble up here.
+                            row-keys := FocusScope {
+                                enabled: false;
+                                // Any key pressed while focus is inside this row (re)asserts the freeze, so a
+                                // missed focus edge can't leave Space acting on an unfrozen list.
+                                capture-key-pressed(e) => {
+                                    root.row-focus(r.id, true);
+                                    return reject;
                                 }
-                            }
-                            HorizontalLayout {
-                                padding-left: 8px + r.depth * 20px;
-                                padding-right: 8px;
-                                spacing: 8px;
-                                if r.expandable : Rectangle {
-                                    width: 14px;
-                                    // Drawn, not a glyph: Segoe UI Variable lacks U+25B8/U+25BE, which rendered as tofu.
-                                    Path {
-                                        width: 8px;
-                                        height: 8px;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                        viewbox-width: 8;
-                                        viewbox-height: 8;
-                                        commands: r.expanded ? "M 0 2 L 4 6 L 8 2" : "M 2 0 L 6 4 L 2 8";
-                                        stroke: Theme.muted;
-                                        stroke-width: 1.5px;
-                                        fill: transparent;
+                                key-pressed(e) => {
+                                    if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
+                                        open-menu(8px, 32px);
+                                        return accept;
                                     }
-                                    accessible-role: button;
-                                    accessible-label: (r.expanded ? "Collapse " : "Expand ") + r.name;
-                                    accessible-action-default => { root.toggle(r.id); }
-                                    TouchArea {
-                                        enabled: root.interactive;
-                                        clicked => { root.toggle(r.id); }
+                                    return reject;
+                                }
+                                row-touch := TouchArea {
+                                    enabled: root.interactive;
+                                    double-clicked => { if (r.expandable) { root.toggle(r.id); } }
+                                    pointer-event(e) => {
+                                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                            open-menu(self.mouse-x, self.mouse-y);
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 8px + r.depth * 20px;
+                                        padding-right: 8px;
+                                        spacing: 8px;
+                                        if r.expandable : Rectangle {
+                                            width: 14px;
+                                            // Drawn, not a glyph: Segoe UI Variable lacks U+25B8/U+25BE, which rendered as tofu.
+                                            Path {
+                                                width: 8px;
+                                                height: 8px;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                                viewbox-width: 8;
+                                                viewbox-height: 8;
+                                                commands: r.expanded ? "M 0 2 L 4 6 L 8 2" : "M 2 0 L 6 4 L 2 8";
+                                                stroke: Theme.muted;
+                                                stroke-width: 1.5px;
+                                                fill: transparent;
+                                            }
+                                            accessible-role: button;
+                                            accessible-label: (r.expanded ? "Collapse " : "Expand ") + r.name;
+                                            accessible-action-default => { root.toggle(r.id); }
+                                            TouchArea {
+                                                enabled: root.interactive;
+                                                clicked => { root.toggle(r.id); }
+                                            }
+                                        }
+                                        if !r.expandable : Rectangle { width: 14px; }
+                                        HorizontalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: start;
+                                            spacing: 6px;
+                                            Text { text: r.name; color: Theme.text; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                                            Text { text: r.count; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                            if r.exited : Text { text: "Exited"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
+                                            if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11px; vertical-alignment: center; }
+                                            if r.hung != "" && r.actionable : Button {
+                                                text: "Force close";
+                                                enabled: root.interactive;
+                                                accessible-label: "Force close " + r.name;
+                                                changed has-focus => { root.row-focus(r.id, self.has-focus); }
+                                                clicked => { root.action("force-close", r.id); }
+                                            }
+                                            if r.hung == "" && r.actionable && row-touch.has-hover && r.depth == 0 : Button {
+                                                text: "End task";
+                                                enabled: root.interactive;
+                                                accessible-label: "End task " + r.name;
+                                                changed has-focus => { root.row-focus(r.id, self.has-focus); }
+                                                clicked => { root.action("end-task", r.id); }
+                                            }
+                                        }
+                                        Rectangle {
+                                            width: 60px;
+                                            Rectangle {
+                                                x: 0;
+                                                width: parent.width * r.bar;
+                                                height: 6px;
+                                                border-radius: 3px;
+                                                background: Theme.accent;
+                                            }
+                                        }
+                                        Cell { text: r.cpu; strong: root.metric == 0; }
+                                        Cell { text: r.mem; strong: root.metric == 1; }
+                                        Cell { text: r.disk; strong: root.metric == 2; }
+                                        Cell { text: r.gpu; strong: root.metric == 3; }
+                                        Cell { text: r.net; strong: root.metric == 4; }
                                     }
                                 }
-                                if !r.expandable : Rectangle { width: 14px; }
-                                HorizontalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: start;
-                                    spacing: 6px;
-                                    Text { text: r.name; color: Theme.text; font-size: 12px; vertical-alignment: center; overflow: elide; }
-                                    Text { text: r.count; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
-                                    if r.exited : Text { text: "Exited"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
-                                    if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11px; vertical-alignment: center; }
-                                    if r.hung != "" && r.actionable : Button {
-                                        text: "Force close";
-                                        enabled: root.interactive;
-                                        accessible-label: "Force close " + r.name;
-                                        changed has-focus => { root.row-focus(r.id, self.has-focus); }
-                                        clicked => { root.action("force-close", r.id); }
-                                    }
-                                    if r.hung == "" && r.actionable && row-touch.has-hover && r.depth == 0 : Button {
-                                        text: "End task";
-                                        enabled: root.interactive;
-                                        accessible-label: "End task " + r.name;
-                                        changed has-focus => { root.row-focus(r.id, self.has-focus); }
-                                        clicked => { root.action("end-task", r.id); }
-                                    }
-                                }
-                                Rectangle {
-                                    width: 60px;
-                                    Rectangle {
-                                        x: 0;
-                                        width: parent.width * r.bar;
-                                        height: 6px;
-                                        border-radius: 3px;
-                                        background: Theme.accent;
-                                    }
-                                }
-                                Cell { text: r.cpu; strong: root.metric == 0; }
-                                Cell { text: r.mem; strong: root.metric == 1; }
-                                Cell { text: r.disk; strong: root.metric == 2; }
-                                Cell { text: r.gpu; strong: root.metric == 3; }
-                                Cell { text: r.net; strong: root.metric == 4; }
                             }
                         }
                     }

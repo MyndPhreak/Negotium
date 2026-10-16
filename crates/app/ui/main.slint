@@ -51,6 +51,11 @@ export component MainWindow inherits Window {
     in property <[ScrubRow]> scrub-rows;
     out property <bool> modal-open: confirm-visible || details-visible;
     out property <int> menu-target: list.menu-target;
+    // Keyboard navigation through the app list (ruling P3-7): set by the bridge.
+    in property <int> current-row: -1;
+    in property <int> current-id: -1;
+    in property <bool> current-actionable;
+    out property <length> list-scroll-y: list.scroll-y;
 
     callback select-page(int);
     callback select-metric(int);
@@ -70,6 +75,13 @@ export component MainWindow inherits Window {
     callback select-device(string);
     callback select-range(int);
     callback scrub(float);
+    callback list-focus(bool);
+    callback list-key(string) -> bool;
+
+    // Scrolls the app list so row `i` is fully visible.
+    public function ensure-row-visible(i: int) {
+        list.ensure-visible(i);
+    }
 
     // has-hover only re-evaluates on the next pointer event, so release the list freeze explicitly
     // when a modal opens and re-evaluate it when the modal closes.
@@ -153,6 +165,11 @@ export component MainWindow inherits Window {
                         menu-open(open) => { root.menu-open(open); }
                         row-focus(id, focused) => { root.row-key-focus(id, focused); }
                         search(text) => { root.search-changed(text); }
+                        current-row: root.current-row;
+                        current-id: root.current-id;
+                        current-actionable: root.current-actionable;
+                        list-focus(f) => { root.list-focus(f); }
+                        list-key(k) => { return root.list-key(k); }
                     }
                     if root.toast != "" : Toast {
                         text: root.toast;

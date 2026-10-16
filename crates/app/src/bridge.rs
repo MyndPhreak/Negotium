@@ -1,6 +1,7 @@
 //! UI-thread glue: applies worker Frames to Slint models in place and keeps
 //! expand/search state local so they react instantly. No Windows calls here.
 use crate::controls::{Controls, Page};
+use crate::nav::{NavKey, NavOutcome, navigate};
 use crate::perf::{GraphView, PerfFrame};
 use crate::view::{Frame, RowView, Target, visible_rows};
 use crate::worker::SharedHistory;
@@ -191,6 +192,12 @@ pub struct Bridge {
     key_focus: Option<i32>,
     /// Bumped by every focus change; a deferred focus-out applies only if nothing came after it.
     focus_generation: u64,
+    /// The keyboard-current row (by id). Kept while focus is elsewhere, so Tab back resumes there.
+    current: Option<i32>,
+    /// The list itself has keyboard focus: it stays frozen, like on hover (ruling P3-7).
+    list_focused: bool,
+    /// Bumped by every list focus change; a deferred list focus-out applies only if none came after.
+    list_generation: u64,
     banner_dismissed: bool,
     pub controls: Arc<Controls>,
     ui: slint::Weak<MainWindow>,
@@ -220,6 +227,9 @@ impl Bridge {
             menu_open: false,
             key_focus: None,
             focus_generation: 0,
+            current: None,
+            list_focused: false,
+            list_generation: 0,
             banner_dismissed: false,
             controls,
             ui: ui.as_weak(),
@@ -367,6 +377,7 @@ impl Bridge {
             bar: r.bar, hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.expanded.contains(&r.id),
             actionable: r.actionable, exited: r.exited,
         }).collect());
+        self.sync_current();
     }
 
     pub fn set_search(&mut self, text: &str) {
@@ -400,6 +411,9 @@ impl Bridge {
         let fresh = self.fresh();
         self.layout.rebase(fresh);
         self.push_rows();
+        if let (Some(i), Some(ui)) = (self.layout.rows().iter().position(|r| r.id == id), self.ui.upgrade()) {
+            ui.invoke_ensure_row_visible(i as i32);
+        }
     }
 
     pub fn set_hover(&mut self, hover: bool) {
@@ -428,12 +442,77 @@ impl Bridge {
         })
     }
 
-    /// A modal opened: its controls are disabled, and a disabled Button never sees the focus-out,
-    /// so forget the keyboard focus here (and drop any pending release).
+    /// A modal opened: its controls are disabled, and a disabled Button or FocusScope never sees
+    /// the focus-out, so forget the keyboard focus (a row control's and the list's) here, and drop
+    /// any pending release.
     pub fn clear_key_focus(&mut self) {
         self.focus_generation += 1;
         self.key_focus = None;
+        self.list_generation += 1;
+        self.list_focused = false;
         self.update_frozen();
+    }
+
+    /// The list itself gained or lost keyboard focus. Gaining it starts at the first row unless a
+    /// current row is still shown, and brings that row into view.
+    pub fn set_list_focus(&mut self, focused: bool) {
+        self.list_focused = focused;
+        if focused && self.current_index().is_none() {
+            self.current = self.layout.rows().first().map(|r| r.id);
+        }
+        self.update_frozen();
+        self.sync_current();
+        if focused {
+            self.reveal_current();
+        }
+    }
+
+    /// A navigation key while the list has focus. Moves and expand/collapse happen here; an action
+    /// is returned for the caller to run through the window's row-action handler. Every outcome is
+    /// decided by the current row's id, never by an index.
+    pub fn list_key(&mut self, key: NavKey) -> NavOutcome {
+        // The key came from the focused list: a focus edge that never arrived (a modal opened
+        // without parking focus first) must not leave it acting on an unfrozen list.
+        if !self.list_focused {
+            self.set_list_focus(true);
+        }
+        let outcome = navigate(self.layout.rows(), &self.expanded, self.current, key);
+        match outcome {
+            NavOutcome::Move(id) => {
+                self.current = Some(id);
+                self.sync_current();
+                self.reveal_current();
+            }
+            NavOutcome::Toggle(id) => {
+                self.current = Some(id);
+                self.toggle(id);
+                self.reveal_current();
+            }
+            NavOutcome::Action(..) | NavOutcome::Nothing => {}
+        }
+        outcome
+    }
+
+    fn current_index(&self) -> Option<usize> {
+        self.current.and_then(|id| self.layout.rows().iter().position(|r| r.id == id))
+    }
+
+    /// Tells the list which row is current (its index moves when rows expand or collapse). Never
+    /// scrolls (ruling PF1): a frame must not pull a wheel-scrolled list back to the current row.
+    fn sync_current(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let rows = self.layout.rows();
+        let index = self.current_index();
+        ui.set_current_row(index.map_or(-1, |i| i as i32));
+        ui.set_current_id(self.current.unwrap_or(-1));
+        ui.set_current_actionable(index.is_some_and(|i| rows[i].actionable && !rows[i].exited));
+    }
+
+    /// Scrolls the current row into view: only for the user's own keyboard moves (ruling PF1).
+    fn reveal_current(&self) {
+        if let (Some(i), Some(ui)) = (self.current_index(), self.ui.upgrade()) {
+            ui.invoke_ensure_row_visible(i as i32);
+        }
     }
 
     pub fn set_menu_open(&mut self, open: bool) {
@@ -445,7 +524,7 @@ impl Bridge {
         if !self.key_focus_holds() {
             self.key_focus = None;
         }
-        let frozen = self.hover || self.menu_open || self.key_focus.is_some();
+        let frozen = self.hover || self.menu_open || self.key_focus.is_some() || self.list_focused;
         self.controls.set_frozen(frozen);
         if frozen != self.layout.frozen() {
             if !frozen {
@@ -478,27 +557,58 @@ thread_local! {
     static CURRENT: RefCell<Option<Rc<RefCell<Bridge>>>> = const { RefCell::new(None) };
 }
 
-/// Keyboard focus entered or left a control in row `id` (the UI's `row-key-focus`). A focus-out
-/// is applied on the next turn of the event loop, and dropped if a focus-in came meanwhile:
-/// Tabbing from one row to the next delivers the old row's focus-out first, and releasing the
-/// freeze in between would let a pending re-sort move rows under the newly focused control.
-pub fn row_focus(bridge: &Rc<RefCell<Bridge>>, id: i32, focused: bool) {
+/// Applies a keyboard focus change (ruling R11): a focus-in at once; a focus-out on the next turn
+/// of the event loop, dropped if another focus change on the same counter came meanwhile. Tabbing
+/// from one control to the next delivers the old one's focus-out first, and releasing the freeze
+/// in between would let a pending re-sort move rows under the newly focused control.
+fn deferred_focus(
+    bridge: &Rc<RefCell<Bridge>>,
+    focused: bool,
+    counter: fn(&mut Bridge) -> &mut u64,
+    apply: impl FnOnce(&mut Bridge, bool) + 'static,
+) {
     let generation = {
         let mut b = bridge.borrow_mut();
-        b.focus_generation += 1;
+        let count = counter(&mut b);
+        *count += 1;
+        let generation = *count;
         if focused {
-            b.set_key_focus(id, true);
+            apply(&mut b, true);
             return;
         }
-        b.focus_generation
+        generation
     };
     let b = bridge.clone();
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         let mut b = b.borrow_mut();
-        if b.focus_generation == generation {
-            b.set_key_focus(id, false);
+        if *counter(&mut b) == generation {
+            apply(&mut b, false);
         }
     });
+}
+
+/// Keyboard focus entered or left a control in row `id` (the UI's `row-key-focus`); see
+/// `deferred_focus`.
+pub fn row_focus(bridge: &Rc<RefCell<Bridge>>, id: i32, focused: bool) {
+    deferred_focus(bridge, focused, |b| &mut b.focus_generation, move |b, f| b.set_key_focus(id, f));
+}
+
+/// The list gained or lost keyboard focus (the UI's `list-focus`); see `deferred_focus`. A focus
+/// moving from the list to a row control meanwhile keeps the list frozen through `key_focus`.
+pub fn list_focus(bridge: &Rc<RefCell<Bridge>>, focused: bool) {
+    deferred_focus(bridge, focused, |b| &mut b.list_generation, Bridge::set_list_focus);
+}
+
+/// A key pressed while the list itself has focus (the UI's `list-key`). An action (Delete: End
+/// task) runs through the window's row-action handler, like a click, after the bridge borrow is
+/// released (that handler borrows it again). Returns true when it was a navigation key.
+pub fn handle_list_key(bridge: &Rc<RefCell<Bridge>>, ui: &MainWindow, text: &str) -> bool {
+    let Some(key) = NavKey::from_text(text) else { return false };
+    let outcome = bridge.borrow_mut().list_key(key);
+    if let NavOutcome::Action(name, id) = outcome {
+        ui.invoke_row_action(name.into(), id);
+    }
+    true
 }
 
 pub fn set_current(b: Rc<RefCell<Bridge>>) {

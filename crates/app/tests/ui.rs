@@ -1190,3 +1190,291 @@ fn the_scrub_card_stays_inside_the_graph_at_the_smallest_window() {
         assert!(card.3 >= 34.0 + 5.0 * 16.0, "at {f} the card lists several apps: {card:?}");
     }
 }
+
+// ---- Plan 3a: keyboard navigation ----
+
+type Actions = Rc<RefCell<Vec<(String, i32)>>>;
+
+/// A shown window driven by a real Bridge, with the list wired the way main.rs wires it.
+fn wired_list(rows: Vec<RowView>) -> (MainWindow, Arc<Controls>, Rc<RefCell<Bridge>>, Actions) {
+    let (ui, controls, bridge) = bridged();
+    bridge.borrow_mut().apply(&ui, frame(rows));
+    let actions: Actions = Default::default();
+    let a = actions.clone();
+    ui.on_row_action(move |name, id| a.borrow_mut().push((name.to_string(), id)));
+    let b = bridge.clone();
+    ui.on_list_focus(move |f| negotium::bridge::list_focus(&b, f));
+    let (b, weak) = (bridge.clone(), ui.as_weak());
+    ui.on_list_key(move |text| weak.upgrade().is_some_and(|ui| negotium::bridge::handle_list_key(&b, &ui, &text)));
+    let b = bridge.clone();
+    ui.on_row_key_focus(move |id, f| negotium::bridge::row_focus(&b, id, f));
+    let b = bridge.clone();
+    ui.on_list_hover(move |h| b.borrow_mut().set_hover(h));
+    let b = bridge.clone();
+    ui.on_clear_key_focus(move || b.borrow_mut().clear_key_focus());
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.show().unwrap();
+    (ui, controls, bridge, actions)
+}
+
+/// A key, then two event-loop turns: one runs `changed` handlers, the next the zero-delay timers
+/// they start (a deferred focus-out).
+fn press_key(ui: &MainWindow, k: slint::platform::Key) {
+    key(ui, k);
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+}
+
+#[test]
+fn tabbing_into_the_list_freezes_it_and_arrows_move_a_current_row_that_never_jumps() {
+    use slint::platform::Key;
+    let (ui, controls, bridge, actions) =
+        wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", ""), row_view(11, "Tool", "")]);
+    assert!(tab_until(&ui, || controls.frozen()), "Tab reaches the list");
+    assert_eq!((ui.get_current_row(), ui.get_current_id()), (0, 7));
+    press_key(&ui, Key::DownArrow);
+    assert_eq!((ui.get_current_row(), ui.get_current_id()), (1, 9));
+    // A new frame re-sorts and adds an app: nothing moves under the keyboard.
+    bridge.borrow_mut().apply(&ui, frame(vec![row_view(12, "New", ""), row_view(11, "Tool", ""), row_view(9, "Browser", ""), row_view(7, "Editor", "")]));
+    assert_eq!(shown_ids(&ui), [7, 9, 11]);
+    assert_eq!((ui.get_current_row(), ui.get_current_id()), (1, 9));
+    press_key(&ui, Key::Delete);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 9)], "Delete ends the current row's app");
+    press_key(&ui, Key::Escape);
+    assert!(!controls.frozen(), "Esc leaves the list and live ordering resumes");
+    assert_eq!(shown_ids(&ui), [12, 11, 9, 7]);
+}
+
+#[test]
+fn right_and_left_expand_enter_and_collapse_from_the_keyboard() {
+    use slint::platform::Key;
+    let mut browser = row_view(9, "Browser", "");
+    browser.expandable = true;
+    let child = |id: i32| RowView { id, parent: 9, depth: 1, name: format!("proc{id}"), actionable: true, ..Default::default() };
+    let (ui, controls, _bridge, _) = wired_list(vec![browser, child(20), child(21), row_view(11, "Tool", "")]);
+    assert!(tab_until(&ui, || controls.frozen()));
+    press_key(&ui, Key::RightArrow);
+    assert_eq!(shown_ids(&ui), [9, 20, 21, 11], "expanded in place");
+    press_key(&ui, Key::RightArrow);
+    assert_eq!(ui.get_current_id(), 20);
+    press_key(&ui, Key::LeftArrow);
+    assert_eq!(ui.get_current_id(), 9);
+    press_key(&ui, Key::LeftArrow);
+    assert_eq!(shown_ids(&ui), [9, 11]);
+}
+
+#[test]
+fn a_modal_opened_from_the_keyboard_does_not_leave_the_list_frozen() {
+    use slint::platform::Key;
+    let (ui, controls, _bridge, _) = wired_list(vec![row_view(7, "csrss.exe", ""), row_view(9, "Browser", "")]);
+    let weak = ui.as_weak();
+    ui.on_row_action(move |_, _| {
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_show_confirm("Ending csrss.exe will crash Windows.".into());
+        }
+    });
+    assert!(tab_until(&ui, || controls.frozen()));
+    press_key(&ui, Key::Delete);
+    assert!(ui.get_confirm_visible());
+    ui.set_confirm_visible(false);
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen(), "closing the modal must not leave the list frozen");
+}
+
+#[test]
+fn the_menu_key_on_the_list_opens_the_current_rows_menu_with_that_row_captured() {
+    use slint::platform::Key;
+    let (ui, controls, _bridge, actions) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || controls.frozen()));
+    press_key(&ui, Key::DownArrow);
+    key(&ui, Key::Menu);
+    assert_eq!(ui.get_menu_target(), 9);
+    key(&ui, Key::DownArrow);
+    key(&ui, Key::Return);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 9)]);
+}
+
+#[test]
+fn opening_a_tile_scrolls_its_app_into_view() {
+    let rows: Vec<RowView> = (1..=40).map(|i| row_view(i, &format!("App{i}"), "")).collect();
+    let (ui, _controls, bridge, _) = wired_list(rows);
+    assert_eq!(ui.get_list_scroll_y(), 0.0);
+    bridge.borrow_mut().open_tile(35);
+    assert!(ui.get_list_scroll_y() < 0.0, "the list scrolled down to App35");
+}
+
+// Ruling PF1: frames only sync the current row; they never scroll the list.
+#[test]
+fn a_wheel_scrolled_focused_list_is_not_pulled_back_by_frames() {
+    use slint::platform::Key;
+    let rows = |cpu: &str| -> Vec<RowView> {
+        (1..=40).map(|i| RowView { cpu: cpu.into(), ..row_view(i, &format!("App{i}"), "") }).collect()
+    };
+    let (ui, controls, bridge, _) = wired_list(rows("1.0%"));
+    assert!(tab_until(&ui, || controls.frozen()));
+    assert_eq!(ui.get_current_row(), 0);
+    let list = El::find_by_accessible_label(&ui, "Apps").next().expect("the list");
+    let (x, y) = centre(&list);
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(x, y), delta_x: 0.0, delta_y: -400.0 });
+    slint::platform::update_timers_and_animations();
+    let scrolled = ui.get_list_scroll_y();
+    assert!(scrolled < -100.0, "the wheel scrolled the list: {scrolled}");
+    for cpu in ["2.0%", "3.0%", "4.0%"] {
+        bridge.borrow_mut().apply(&ui, frame(rows(cpu)));
+        slint::platform::update_timers_and_animations();
+        assert_eq!(ui.get_list_scroll_y(), scrolled, "a frame must not snap the view back to the current row");
+    }
+    // A navigation key brings the current row back into view.
+    press_key(&ui, Key::DownArrow);
+    assert_eq!(ui.get_current_row(), 1);
+    assert!(ui.get_list_scroll_y() > scrolled, "Down scrolls to the current row: {}", ui.get_list_scroll_y());
+}
+
+// Review Focus 5: an exited row held in place is inert from the keyboard too.
+#[test]
+fn delete_and_the_menu_key_do_nothing_on_an_exited_current_row() {
+    use slint::platform::Key;
+    let (ui, controls, bridge, actions) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let o = opened.clone();
+    ui.on_menu_open(move |open| o.borrow_mut().push(open));
+    assert!(tab_until(&ui, || controls.frozen()));
+    press_key(&ui, Key::DownArrow);
+    // Browser exits while it is the current row: it stays in place, marked exited.
+    bridge.borrow_mut().apply(&ui, frame(vec![row_view(7, "Editor", "")]));
+    assert_eq!(shown_ids(&ui), [7, 9]);
+    assert_eq!((ui.get_current_row(), ui.get_current_id(), ui.get_current_actionable()), (1, 9, false));
+    press_key(&ui, Key::Delete);
+    key(&ui, Key::Menu);
+    assert!(actions.borrow().is_empty(), "no action on an exited row: {:?}", actions.borrow());
+    assert!(opened.borrow().is_empty(), "no menu on an exited row");
+    assert_eq!(ui.get_current_id(), 9, "the current row does not jump to another app");
+}
+
+// Ruling R7: the Windows group is never a keyboard target either.
+#[test]
+fn the_windows_group_is_never_acted_on_from_the_keyboard() {
+    use slint::platform::Key;
+    let mut group = row_view(5, "Windows", "");
+    group.actionable = false;
+    group.expandable = true;
+    let member = RowView { id: 6, parent: 5, depth: 1, name: "svchost.exe".into(), actionable: true, ..Default::default() };
+    let (ui, controls, _bridge, actions) = wired_list(vec![group, member, row_view(9, "Browser", "")]);
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let o = opened.clone();
+    ui.on_menu_open(move |open| o.borrow_mut().push(open));
+    assert!(tab_until(&ui, || controls.frozen()));
+    assert_eq!(ui.get_current_id(), 5);
+    assert!(!ui.get_current_actionable());
+    press_key(&ui, Key::Delete);
+    key(&ui, Key::Menu);
+    let shift: slint::SharedString = Key::Shift.into();
+    ui.window().dispatch_event(WindowEvent::KeyPressed { text: shift.clone() });
+    key(&ui, Key::F10);
+    ui.window().dispatch_event(WindowEvent::KeyReleased { text: shift });
+    press_key(&ui, Key::Return);
+    assert_eq!(shown_ids(&ui), [5, 6, 9], "Enter only expands the group");
+    assert_eq!(ui.get_current_id(), 5);
+    assert!(actions.borrow().is_empty(), "nothing acts on the Windows group: {:?}", actions.borrow());
+    assert!(opened.borrow().is_empty(), "its menu never opens");
+}
+
+// Review Focus 5: actions follow the current row's id, not the index it sat at.
+#[test]
+fn keyboard_actions_follow_the_current_rows_id_after_the_list_reorders() {
+    use slint::platform::Key;
+    let (ui, controls, bridge, actions) =
+        wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", ""), row_view(11, "Tool", "")]);
+    assert!(tab_until(&ui, || controls.frozen()));
+    press_key(&ui, Key::DownArrow);
+    assert_eq!((ui.get_current_row(), ui.get_current_id()), (1, 9));
+    // Leave the list; it re-sorts and Browser moves to the end, Tool takes its index.
+    press_key(&ui, Key::Escape);
+    bridge.borrow_mut().apply(&ui, frame(vec![row_view(7, "Editor", ""), row_view(11, "Tool", ""), row_view(9, "Browser", "")]));
+    assert_eq!(shown_ids(&ui), [7, 11, 9]);
+    assert_eq!((ui.get_current_row(), ui.get_current_id()), (2, 9), "the current row followed its app");
+    // Back into the list: Delete and the menu act on Browser, not on Tool at the old index.
+    assert!(tab_until(&ui, || controls.frozen()));
+    assert_eq!(ui.get_current_id(), 9);
+    press_key(&ui, Key::Delete);
+    key(&ui, Key::Menu);
+    assert_eq!(ui.get_menu_target(), 9);
+    key(&ui, Key::DownArrow);
+    key(&ui, Key::Return);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 9), ("end-task".to_string(), 9)]);
+}
+
+#[test]
+fn the_list_and_its_current_row_are_exposed_to_screen_readers() {
+    use slint::platform::Key;
+    let (ui, controls, _bridge, _) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    let list = El::find_by_accessible_label(&ui, "Apps").next().expect("the list");
+    assert_eq!(list.accessible_role(), Some(i_slint_backend_testing::AccessibleRole::List));
+    assert!(tab_until(&ui, || controls.frozen()));
+    press_key(&ui, Key::DownArrow);
+    let editor = El::find_by_accessible_label(&ui, "Editor, CPU 1.0%, memory ").next().expect("editor row");
+    let browser = El::find_by_accessible_label(&ui, "Browser, CPU 1.0%, memory ").next().expect("browser row");
+    assert_eq!(browser.accessible_role(), Some(i_slint_backend_testing::AccessibleRole::ListItem));
+    assert_eq!(browser.accessible_item_selectable(), Some(true));
+    assert_eq!((browser.accessible_item_selected(), editor.accessible_item_selected()), (Some(true), Some(false)));
+}
+
+#[test]
+fn a_mouse_click_on_a_row_never_selects_it() {
+    let (ui, controls, _bridge, _) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    let row = El::find_by_accessible_label(&ui, "Browser, CPU 1.0%, memory ").next().expect("browser row");
+    let (x, y) = centre(&row);
+    move_pointer(&ui, x, y);
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+    assert_eq!(ui.get_current_row(), -1, "no current row from a click");
+    move_pointer(&ui, 5.0, 5.0);
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen(), "a click gave the list no keyboard focus");
+}
+
+
+#[test]
+fn any_modal_drops_the_list_freeze_even_without_a_focus_out() {
+    // A modal shown without parking focus first: the disabled list never sees its focus-out.
+    let (ui, controls, _bridge, _) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || controls.frozen()));
+    ui.set_details_visible(true);
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+    ui.set_details_visible(false);
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen(), "modal-open clears the list's keyboard focus");
+}
+
+#[test]
+fn tabbing_from_the_list_to_a_rows_force_close_never_unfreezes_the_list() {
+    use slint::platform::Key;
+    let (ui, controls, bridge, _) = wired_list(vec![row_view(7, "Editor", HUNG), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || controls.frozen()), "Tab reaches the list");
+    assert_eq!(ui.get_current_id(), 7);
+    // A re-sort and a new app wait while the keyboard is in the list.
+    bridge.borrow_mut().apply(&ui, frame(vec![row_view(3, "Game", HUNG), row_view(9, "Browser", ""), row_view(7, "Editor", HUNG)]));
+    assert_eq!(shown_ids(&ui), [7, 9]);
+    // Tab on to Editor's Force close: the list's focus-out arrives before the button's focus-in.
+    key(&ui, Key::Tab);
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        assert!(controls.frozen(), "the hand-off from the list to a row control never releases the freeze");
+        assert_eq!(shown_ids(&ui), [7, 9]);
+    }
+    // Shift+Tab back to the list: still frozen, still the same current row.
+    let shift: slint::SharedString = Key::Shift.into();
+    ui.window().dispatch_event(WindowEvent::KeyPressed { text: shift.clone() });
+    key(&ui, Key::Tab);
+    ui.window().dispatch_event(WindowEvent::KeyReleased { text: shift });
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        assert!(controls.frozen());
+        assert_eq!(shown_ids(&ui), [7, 9]);
+    }
+    assert_eq!(ui.get_current_id(), 7);
+}
