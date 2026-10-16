@@ -1,0 +1,18 @@
+import { ScrollView } from "std-widgets.slint";
+
+// A ScrollView whose owner can bring a control reached with Tab into view: Slint does not scroll
+// to the focused element on its own. The Settings and Startup pages call `reveal` from their
+// controls' `focus-gained`.
+export component RevealScrollView inherits ScrollView {
+    // Scrolls the least distance that shows the whole element at absolute `y` with height `h`
+    // (its top if it is taller than the view).
+    public function reveal(y: length, h: length) {
+        let top = y - root.absolute-position.y;
+        let lowest = min(0px, root.visible-height - root.content-height);
+        if (top < 0) {
+            root.content-y = min(0px, root.content-y - top);
+        } else if (top + h > root.visible-height) {
+            root.content-y = max(lowest, root.content-y - min(top, top + h - root.visible-height));
+        }
+    }
+}

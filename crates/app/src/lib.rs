@@ -13,6 +13,7 @@ pub mod renderer;
 pub mod scrub;
 pub mod settings;
 pub mod settingspage;
+pub mod startup;
 pub mod view;
 pub mod worker;
 

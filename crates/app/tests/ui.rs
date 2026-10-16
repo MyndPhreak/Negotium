@@ -1,5 +1,5 @@
 use i_slint_backend_testing::ElementHandle;
-use negotium::{DeviceData, GraphData, SegmentData, StatData};
+use negotium::{DeviceData, GraphData, SegmentData, StartupData, StatData};
 use negotium::controls::Page;
 use negotium::perf::{DeviceView, GraphView, PerfFrame, Range, StatView};
 use negotium::worker::SharedHistory;
@@ -1960,13 +1960,18 @@ fn settings_rects(ui: &MainWindow) -> Vec<(String, Rect)> {
 
 /// The Settings page alone at `w` × `h`.
 fn settings_window(w: u32, h: u32) -> MainWindow {
+    page_window(3, w, h)
+}
+
+/// The window at `w` × `h` showing `page`; may be called more than once per test.
+fn page_window(page: i32, w: u32, h: u32) -> MainWindow {
     thread_local! { static BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
     if !BACKEND.with(|b| b.replace(true)) {
         i_slint_backend_testing::init_no_event_loop();
     }
     let ui = MainWindow::new().unwrap();
     ui.window().set_size(PhysicalSize::new(w, h));
-    ui.set_page(3);
+    ui.set_page(page);
     ui.show().unwrap();
     ui
 }
@@ -2138,4 +2143,285 @@ fn slint_backend_overrides_the_gpu_switch_and_says_so() {
     switch(&ui, "Use GPU rendering").invoke_accessible_default_action();
     assert!(text(&ui, "Overridden by SLINT_BACKEND.").is_some(), "instead of the restart note");
     assert!(text(&ui, RESTART_NOTE).is_none());
+}
+
+// ---- Plan 3b: startup ----
+
+fn startup_row(id: i32, name: &str, enabled: bool, can_change: bool, note: &str) -> StartupData {
+    StartupData {
+        id, name: name.into(), publisher: "Contoso".into(), status: if enabled { "Enabled" } else { "Disabled" }.into(),
+        location: "Registry (you)".into(), command: format!(r"C:\Apps\{name}.exe").into(), enabled, can_change, note: note.into(),
+    }
+}
+
+#[test]
+fn startup_rows_show_their_state_and_report_toggles() {
+    let ui = shown_window();
+    ui.set_page(2);
+    ui.set_startup_rows(ModelRc::new(VecModel::from(vec![
+        startup_row(0, "Discord", true, true, ""),
+        startup_row(1, "Old tool", false, false, "Needs admin"),
+    ])));
+    let toggled = Rc::new(RefCell::new(Vec::new()));
+    let t = toggled.clone();
+    ui.on_toggle_startup(move |id, on| t.borrow_mut().push((id, on)));
+    let discord = switch(&ui, "Start Discord with Windows");
+    assert_eq!(discord.accessible_checked(), Some(true));
+    discord.invoke_accessible_default_action();
+    assert_eq!(*toggled.borrow(), [(0, false)]);
+    let old = switch(&ui, "Start Old tool with Windows");
+    assert_eq!(old.accessible_enabled(), Some(false), "an all-users entry without admin can't be switched");
+    old.invoke_accessible_default_action();
+    assert_eq!(toggled.borrow().len(), 1);
+    assert!(El::find_by_accessible_label(&ui, "Needs admin").next().is_some());
+}
+
+const STARTUP_BANNER: &str = "Apps that start for all users can only be changed with admin rights.";
+
+#[test]
+fn the_startup_admin_banner_offers_restart_inline() {
+    let ui = shown_window();
+    ui.set_page(2);
+    ui.set_startup_admin_banner(true);
+    let restarted = Rc::new(RefCell::new(false));
+    let r = restarted.clone();
+    ui.on_restart_admin(move || *r.borrow_mut() = true);
+    El::find_by_accessible_label(&ui, "Restart as admin").next().expect("inline button").invoke_accessible_default_action();
+    assert!(*restarted.borrow());
+    // The Overview's banner is the same component; only it can be dismissed.
+    assert!(text(&ui, STARTUP_BANNER).is_some());
+    assert_eq!(El::find_by_accessible_label(&ui, "Dismiss").count(), 0, "the Startup banner has no Dismiss");
+    ui.set_page(0);
+    ui.set_show_admin_banner(true);
+    assert_eq!(El::find_by_accessible_label(&ui, "Dismiss").count(), 1);
+    assert!(text(&ui, "Some processes need admin rights to show details or be ended.").is_some(), "the Overview keeps its text");
+}
+
+#[test]
+fn the_bridge_shows_startup_entries_and_a_pending_toggle() {
+    use negotium_actions::startup::{StartupEntry, StartupSource};
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    let entry = |key: &str, name: &str, source| StartupEntry {
+        source, key: key.into(), name: name.into(), publisher: None, enabled: true, changeable: true,
+        command: String::new(), location: String::new(),
+    };
+    let entries = vec![entry("z", "Zoom", StartupSource::UserRun), entry("a", "Audio", StartupSource::MachineRun)];
+    bridge.borrow_mut().set_startup(&ui, entries, false);
+    let rows = ui.get_startup_rows();
+    assert_eq!(rows.row_data(0).unwrap().name, "Audio");
+    assert!(ui.get_startup_admin_banner());
+    assert!(!ui.get_startup_loading());
+    assert_eq!(bridge.borrow().startup_entry(0).unwrap().key, "z");
+    assert_eq!(bridge.borrow().startup_entry(7), None);
+    bridge.borrow().show_startup_pending(0, false);
+    let zoom = (0..rows.row_count()).map(|i| rows.row_data(i).unwrap()).find(|r| r.name == "Zoom").unwrap();
+    assert!(!zoom.enabled, "the switch moves at once; the re-read shows the real state");
+    assert_eq!(zoom.status, "Disabled");
+}
+
+fn startup_entries() -> Vec<negotium_actions::startup::StartupEntry> {
+    use negotium_actions::startup::{StartupEntry, StartupSource};
+    vec![StartupEntry {
+        source: StartupSource::UserRun, key: "z".into(), name: "Zoom".into(), publisher: None, enabled: true,
+        changeable: true, command: String::new(), location: String::new(),
+    }]
+}
+
+// PF4: while a list or toggle job runs, a toggle starts nothing, so an older list can't land last.
+#[test]
+fn a_toggle_while_the_list_is_read_starts_nothing() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    bridge.borrow_mut().set_startup(&ui, startup_entries(), false);
+    assert!(negotium::startup::begin_list(&ui), "a list starts");
+    assert!(ui.get_startup_loading());
+    assert!(!negotium::startup::begin_list(&ui), "not a second one while it runs");
+    assert_eq!(negotium::startup::begin_toggle(&bridge.borrow(), &ui, 0, false), None, "no toggle while listing");
+    assert!(ui.get_startup_rows().row_data(0).unwrap().enabled, "the switch keeps the real state");
+    // The list lands: now a toggle starts, moves the switch and holds off the next job.
+    bridge.borrow_mut().set_startup(&ui, startup_entries(), false);
+    let entry = negotium::startup::begin_toggle(&bridge.borrow(), &ui, 0, false).expect("a toggle starts");
+    assert_eq!(entry.key, "z");
+    assert!(!ui.get_startup_rows().row_data(0).unwrap().enabled);
+    assert!(ui.get_startup_loading());
+    assert_eq!(negotium::startup::begin_toggle(&bridge.borrow(), &ui, 0, true), None, "nor a second toggle");
+    assert!(!negotium::startup::begin_list(&ui), "nor a list");
+    // An unknown row starts nothing either.
+    bridge.borrow_mut().set_startup(&ui, startup_entries(), false);
+    assert_eq!(negotium::startup::begin_toggle(&bridge.borrow(), &ui, 5, true), None);
+    assert!(!ui.get_startup_loading());
+}
+
+#[test]
+fn a_job_result_lands_through_the_bridge_with_its_failure_inline() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    negotium::bridge::set_current(bridge.clone());
+    ui.set_startup_loading(true);
+    negotium::startup::deliver(&ui, startup_entries(), Some("Couldn't change Zoom: access denied.".into()), false);
+    assert_eq!(ui.get_startup_rows().row_count(), 1);
+    assert!(!ui.get_startup_loading());
+    assert_eq!(ui.get_toast(), "Couldn't change Zoom: access denied.");
+}
+
+// PF12: nothing on the Startup page changes per tick; a frame meant for it touches nothing.
+#[test]
+fn a_frame_on_the_startup_page_leaves_it_alone() {
+    use slint::Model;
+    let (ui, controls, bridge) = bridged();
+    bridge.borrow_mut().set_page(&ui, Page::Startup);
+    bridge.borrow_mut().set_startup(&ui, startup_entries(), false);
+    bridge.borrow_mut().apply(&ui, Frame { page: Page::Startup, rows: vec![row_view(1, "X", "")], ..Default::default() });
+    assert_eq!(controls.page(), Page::Startup);
+    assert_eq!(ui.get_rows().row_count(), 0, "no Overview rows built");
+    assert_eq!(ui.get_startup_rows().row_count(), 1);
+}
+
+#[test]
+fn the_rail_reaches_startup() {
+    let ui = window();
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_select_page(move |i| *p.borrow_mut() = Some(i));
+    El::find_by_accessible_label(&ui, "Startup page").next().expect("rail item").invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(2));
+}
+
+#[test]
+fn screen_readers_get_a_labelled_list_and_each_switchs_details() {
+    let ui = shown_window();
+    ui.set_page(2);
+    let mut policy = startup_row(1, "Locked", true, false, "Set by policy");
+    policy.publisher = "".into();
+    ui.set_startup_rows(ModelRc::new(VecModel::from(vec![startup_row(0, "Discord", true, true, ""), policy])));
+    assert!(
+        El::find_by_accessible_label(&ui, "Startup apps").any(|e| e.accessible_role() == Some(AccessibleRole::List)),
+        "a labelled list"
+    );
+    let item = El::find_by_accessible_label(&ui, "Discord, Enabled, Registry (you)").next().expect("a labelled item");
+    assert_eq!(item.accessible_role(), Some(AccessibleRole::ListItem));
+    assert_eq!(switch(&ui, "Start Discord with Windows").accessible_description().as_deref(), Some("Contoso, Registry (you)"));
+    let locked = switch(&ui, "Start Locked with Windows");
+    assert_eq!(locked.accessible_description().as_deref(), Some("Registry (you). Set by policy"));
+    assert_eq!(locked.accessible_enabled(), Some(false));
+    assert!(text(&ui, "Set by policy").is_some(), "the reason is read out");
+    assert_eq!(El::find_by_accessible_label(&ui, "Discord").count(), 0, "the name is read with its item and switch only");
+}
+
+/// The Startup page alone at `w` × `h` with `n` rows (every third set by policy) and the banner.
+fn startup_window(w: u32, h: u32, n: i32) -> MainWindow {
+    let ui = page_window(2, w, h);
+    let rows = (0..n).map(|i| {
+        startup_row(i, &format!("App{i:02}"), i % 2 == 0, i % 3 != 0, if i % 3 == 0 { "Set by policy" } else { "" })
+    });
+    ui.set_startup_rows(ModelRc::new(VecModel::from(rows.collect::<Vec<_>>())));
+    ui.set_startup_admin_banner(true);
+    ui
+}
+
+// PF3: spare height goes to the list only.
+#[test]
+fn a_tall_window_leaves_the_startup_header_and_banner_their_size() {
+    let measure = |h: u32, n: i32| {
+        let ui = startup_window(1000, h, n);
+        let mut out = vec![
+            rect_of(&text(&ui, "Startup apps").expect("title")),
+            rect_of(&text(&ui, STARTUP_BANNER).expect("banner")),
+            rect_of(&El::find_by_accessible_label(&ui, "Restart as admin").next().expect("banner button")),
+            rect_of(&text(&ui, "Publisher").expect("header")),
+        ];
+        if n == 0 {
+            out.push(rect_of(&text(&ui, "No apps start with Windows.").expect("empty state")));
+        }
+        out
+    };
+    for n in [0, 3] {
+        assert_eq!(measure(720, n), measure(1100, n), "with {n} rows nothing above the list moves or grows");
+    }
+    let header = measure(1100, 3)[3];
+    assert!(header.3 < 20.0, "the header keeps its text height: {header:?}");
+    let ui = startup_window(1000, 1100, 3);
+    let first = rect_of(&switch(&ui, "Start App01 with Windows"));
+    assert!(first.1 - (header.1 + header.3) < 80.0, "the rows follow the header: {first:?}");
+}
+
+// PF19: "Set by policy" fits beside its switch at the smallest window.
+#[test]
+fn the_policy_note_fits_beside_its_switch() {
+    let ui = startup_window(760, 440, 1);
+    let note = rect_of(&text(&ui, "Set by policy").expect("note"));
+    let toggle = rect_of(&switch(&ui, "Start App00 with Windows"));
+    let location = rect_of(&text(&ui, "Location").expect("header"));
+    assert!(note.2 > 40.0, "the note has its width: {note:?}");
+    assert!(note.0 >= location.0 + location.2, "the note stays out of the location column: {note:?} {location:?}");
+    assert!(note.0 + note.2 <= toggle.0, "and clear of the switch: {note:?} {toggle:?}");
+    assert!(toggle.0 + toggle.2 <= 760.0 - 14.0, "the switch clears the scrollbar gutter: {toggle:?}");
+}
+
+#[test]
+fn a_startup_switch_reached_with_tab_is_scrolled_into_view_and_space_toggles_it() {
+    use slint::platform::Key;
+    let ui = startup_window(760, 440, 20);
+    // The list's view: below the column header, above the page's bottom padding.
+    let header = rect_of(&text(&ui, "Name").expect("header"));
+    let row_in_view = |ui: &MainWindow, id: i32| {
+        let label = format!("App{id:02}, {}, Registry (you)", if id % 2 == 0 { "Enabled" } else { "Disabled" });
+        let r = rect_of(&El::find_by_accessible_label(ui, &label).next().unwrap_or_else(|| panic!("row {label}")));
+        assert!(r.1 >= header.1 + header.3 && r.1 + r.3 <= 440.0 - 12.0 + 0.5, "App{id:02}: its whole row is in view: {r:?}");
+    };
+    let log = Rc::new(RefCell::new(Vec::<(i32, bool)>::new()));
+    let l = log.clone();
+    ui.on_toggle_startup(move |id, on| l.borrow_mut().push((id, on)));
+    // Space acts on the focused control: the toggle it reports names it.
+    let current = |ui: &MainWindow| {
+        log.borrow_mut().clear();
+        press_key(ui, Key::Space);
+        log.borrow().last().copied()
+    };
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        press_key(&ui, Key::Tab);
+        let Some((id, on)) = current(&ui) else { continue };
+        let r = rect_of(&switch(&ui, &format!("Start App{id:02} with Windows")));
+        assert!(r.1 >= 0.0 && r.1 + r.3 <= 440.0, "App{id:02} is in view when focused: {r:?}");
+        row_in_view(&ui, id);
+        assert_eq!(on, id % 2 != 0, "Space asks for the other state");
+        seen.push(id);
+        if id == 19 {
+            break;
+        }
+    }
+    let changeable: Vec<i32> = (0..20).filter(|i| i % 3 != 0).collect();
+    assert_eq!(seen, changeable, "Tab reaches every switch that can change, in order, and skips the rest");
+    // And back up to the first.
+    let mut back = None;
+    for _ in 0..60 {
+        press_key(&ui, Key::Backtab);
+        back = current(&ui);
+        if back.map(|b| b.0) == Some(1) {
+            break;
+        }
+    }
+    assert_eq!(back.map(|b| b.0), Some(1), "Shift+Tab reaches the first switch");
+    row_in_view(&ui, 1);
+}
+
+#[test]
+fn the_toast_shows_on_every_page() {
+    // A click on its OK reaches it on every page (a hidden page gets no input).
+    let ui = shown_window();
+    let dismissed = Rc::new(RefCell::new(0));
+    let d = dismissed.clone();
+    ui.on_dismiss_toast(move || *d.borrow_mut() += 1);
+    ui.set_toast("Couldn't change Zoom: access denied.".into());
+    for page in [0, 1, 2, 3] {
+        ui.set_page(page);
+        let toast = rect_of(&text(&ui, "Couldn't change Zoom: access denied.").expect("toast"));
+        assert!(toast.0 >= 76.0 && toast.1 > 600.0 && toast.1 + toast.3 <= 720.0, "page {page}: at the bottom of the window: {toast:?}");
+        let ok = El::find_by_accessible_label(&ui, "OK").next().expect("the toast's OK");
+        let (x, y) = centre(&ok);
+        press(&ui, x, y, slint::platform::PointerEventButton::Left);
+        assert_eq!(*dismissed.borrow(), page + 1, "page {page}: the toast takes the click");
+    }
 }

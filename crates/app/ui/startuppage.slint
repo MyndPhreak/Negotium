@@ -1,0 +1,179 @@
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Toggle } from "settingspage.slint";
+import { Banner } from "overlays.slint";
+import { RevealScrollView } from "revealscroll.slint";
+
+// One startup entry as the page shows it (crate::startup::StartupRow).
+export struct StartupData {
+    id: int,
+    name: string,
+    publisher: string,
+    status: string,
+    location: string,
+    command: string,
+    enabled: bool,
+    can-change: bool,
+    note: string,
+}
+
+component HeaderText inherits Text {
+    color: Theme.muted;
+    font-size: 11px;
+}
+
+// The startup apps (spec 5.3): name, publisher, status and location, each with a switch. Only the
+// list takes spare height. Every change goes through Rust (`toggle`), which re-reads the list,
+// so the switches always show the real state.
+export component StartupPage inherits VerticalLayout {
+    in property <[StartupData]> rows;
+    in property <bool> loading;
+    in property <bool> admin-banner;
+    in property <bool> interactive: true;
+    callback toggle(int, bool);
+    callback refresh();
+    callback restart-admin();
+    // Column widths, shared by the header and the rows. The last holds the note and the switch:
+    // "Set by policy" (about 60 px), 6 px and the 40 px switch.
+    property <length> publisher-w: 150px;
+    property <length> status-w: 64px;
+    property <length> location-w: 160px;
+    property <length> switch-w: 130px;
+    // The list's scrollbar gutter (as on the Settings page), kept clear in the header too.
+    property <length> gutter: 14px;
+    max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+    padding: 12px;
+    spacing: 10px;
+
+    HorizontalLayout {
+        vertical-stretch: 0;
+        spacing: 12px;
+        Text {
+            text: "Startup apps";
+            color: Theme.text;
+            font-size: 24px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        // Always offered: a refresh asked for while a job runs is refused in Rust (that job's
+        // re-read lands anyway); a Button disabled under its focus would keep a stale focus.
+        Button { text: "Refresh"; enabled: root.interactive; clicked => { root.refresh(); } }
+    }
+    // Inline, never a dialog (spec 7).
+    if root.admin-banner : Banner {
+        text: "Apps that start for all users can only be changed with admin rights.";
+        dismissable: false;
+        interactive: root.interactive;
+        restart => { root.restart-admin(); }
+    }
+    HorizontalLayout {
+        vertical-stretch: 0;
+        padding-left: 8px;
+        padding-right: 8px + root.gutter;
+        spacing: 8px;
+        HeaderText { text: "Name"; horizontal-stretch: 1; }
+        HeaderText { text: "Publisher"; width: root.publisher-w; }
+        HeaderText { text: "Status"; width: root.status-w; }
+        HeaderText { text: "Location"; width: root.location-w; }
+        Rectangle { width: root.switch-w; }
+    }
+    if root.loading && root.rows.length == 0 : Text {
+        text: "Reading startup apps…";
+        color: Theme.muted;
+        vertical-stretch: 0;
+    }
+    if !root.loading && root.rows.length == 0 : Text {
+        text: "No apps start with Windows.";
+        color: Theme.muted;
+        vertical-stretch: 0;
+    }
+    // Not a ListView: a virtualized list leaves rows out of sight uncreated, so Tab could not
+    // reach them. Startup lists are short.
+    sv := RevealScrollView {
+        vertical-stretch: 1;
+        property <length> content-w: max(0px, self.width - root.gutter);
+        content-width: self.content-w;
+        content-height: entries.height;
+        entries := Rectangle {
+            width: sv.content-w;
+            height: rows-layout.preferred-height;
+            accessible-role: list;
+            accessible-label: "Startup apps";
+            rows-layout := VerticalLayout {
+                alignment: start;
+                max-width: 16384px; // see MetersRow
+                for r in root.rows : row := Rectangle {
+                    height: 48px;
+                    border-radius: 4px;
+                    background: ta.has-hover ? Theme.card : transparent;
+                    accessible-role: list-item;
+                    accessible-label: r.name + ", " + r.status + ", " + r.location;
+                    ta := TouchArea { }
+                    // The item's label carries the name, status and location, and the switch the
+                    // publisher: those Texts are not read out again. The command and the note are.
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            Text { text: r.name; color: Theme.text; font-size: 12px; overflow: elide; accessible-role: none; }
+                            Text { text: r.command; color: Theme.muted; font-size: 10px; overflow: elide; }
+                        }
+                        Text {
+                            text: r.publisher;
+                            width: root.publisher-w;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                        Text {
+                            text: r.status;
+                            width: root.status-w;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            accessible-role: none;
+                        }
+                        Text {
+                            text: r.location;
+                            width: root.location-w;
+                            color: Theme.muted;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                        HorizontalLayout {
+                            width: root.switch-w;
+                            spacing: 6px;
+                            alignment: end;
+                            if r.note != "" : Text {
+                                text: r.note;
+                                color: Theme.muted;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Toggle {
+                                    label: "Start " + r.name + " with Windows";
+                                    description: (r.publisher != "" ? r.publisher + ", " : "") + r.location
+                                        + (r.note != "" ? ". " + r.note : "");
+                                    checked: r.enabled;
+                                    interactive: root.interactive && r.can-change;
+                                    toggled(on) => { root.toggle(r.id, on); }
+                                    focus-gained => { sv.reveal(row.absolute-position.y, row.height); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

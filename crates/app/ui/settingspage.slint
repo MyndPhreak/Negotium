@@ -1,6 +1,6 @@
-import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
+import { RevealScrollView } from "revealscroll.slint";
 
 // An on/off switch. `checked` is owned by the caller: the switch only asks (`toggled` with the
 // requested state), so a refused change never leaves it showing the wrong state.
@@ -164,19 +164,8 @@ export component SettingsPage inherits VerticalLayout {
     property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
     max-width: 16384px;
 
-    // Scrolls the least distance that shows the whole row at absolute `y` with height `h` (its top
-    // if it is taller than the view), so a control reached with Tab is never out of sight.
-    function reveal(y: length, h: length) {
-        let top = y - sv.absolute-position.y;
-        let lowest = min(0px, sv.visible-height - sv.content-height);
-        if (top < 0) {
-            sv.content-y = min(0px, sv.content-y - top);
-        } else if (top + h > sv.visible-height) {
-            sv.content-y = max(lowest, sv.content-y - min(top, top + h - sv.visible-height));
-        }
-    }
-
-    sv := ScrollView {
+    // A control reached with Tab is never out of sight: its whole row scrolls into view.
+    sv := RevealScrollView {
         // Content width: the view less a gutter the scrollbar always gets (as on the Performance
         // page). Not visible-width: the wrapped descriptions' height decides whether the
         // scrollbar shows, so a width that depended on the scrollbar could flip back and forth.
@@ -201,7 +190,7 @@ export component SettingsPage inherits VerticalLayout {
                     selected: root.refresh;
                     interactive: root.interactive;
                     chosen(i) => { root.refresh-chosen(i); }
-                    focus-gained => { root.reveal(refresh-row.absolute-position.y, refresh-row.height); }
+                    focus-gained => { sv.reveal(refresh-row.absolute-position.y, refresh-row.height); }
                 }
             }
             theme-row := SettingRow {
@@ -214,7 +203,7 @@ export component SettingsPage inherits VerticalLayout {
                     selected: root.theme;
                     interactive: root.interactive;
                     chosen(i) => { root.theme-chosen(i); }
-                    focus-gained => { root.reveal(theme-row.absolute-position.y, theme-row.height); }
+                    focus-gained => { sv.reveal(theme-row.absolute-position.y, theme-row.height); }
                 }
             }
             top-row := SettingRow {
@@ -226,7 +215,7 @@ export component SettingsPage inherits VerticalLayout {
                     checked: root.always-on-top;
                     interactive: root.interactive;
                     toggled(on) => { root.always-on-top-toggled(on); }
-                    focus-gained => { root.reveal(top-row.absolute-position.y, top-row.height); }
+                    focus-gained => { sv.reveal(top-row.absolute-position.y, top-row.height); }
                 }
             }
             tray-row := SettingRow {
@@ -238,7 +227,7 @@ export component SettingsPage inherits VerticalLayout {
                     checked: root.keep-in-tray;
                     interactive: root.interactive;
                     toggled(on) => { root.tray-toggled(on); }
-                    focus-gained => { root.reveal(tray-row.absolute-position.y, tray-row.height); }
+                    focus-gained => { sv.reveal(tray-row.absolute-position.y, tray-row.height); }
                 }
             }
             gpu-row := SettingRow {
@@ -255,7 +244,7 @@ export component SettingsPage inherits VerticalLayout {
                     checked: root.gpu-shown;
                     interactive: root.interactive;
                     toggled(on) => { root.gpu-rendering-toggled(on); }
-                    focus-gained => { root.reveal(gpu-row.absolute-position.y, gpu-row.height); }
+                    focus-gained => { sv.reveal(gpu-row.absolute-position.y, gpu-row.height); }
                 }
             }
             Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }

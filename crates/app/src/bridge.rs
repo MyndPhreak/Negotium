@@ -5,7 +5,8 @@ use crate::nav::{NavKey, NavOutcome, navigate};
 use crate::perf::{GraphView, PerfFrame};
 use crate::view::{Frame, RowView, Target, visible_rows};
 use crate::worker::SharedHistory;
-use crate::{DeviceData, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StatData, TileData};
+use crate::{DeviceData, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
+use negotium_actions::startup::StartupEntry;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -200,6 +201,9 @@ pub struct Bridge {
     /// Bumped by every list focus change; a deferred list focus-out applies only if none came after.
     list_generation: u64,
     banner_dismissed: bool,
+    /// The startup entries as last listed; a Startup row's id indexes them.
+    startup: Vec<StartupEntry>,
+    startup_rows: Rc<VecModel<StartupData>>,
     pub controls: Arc<Controls>,
     ui: slint::Weak<MainWindow>,
 }
@@ -232,6 +236,8 @@ impl Bridge {
             list_focused: false,
             list_generation: 0,
             banner_dismissed: false,
+            startup: Vec::new(),
+            startup_rows: Rc::new(VecModel::default()),
             controls,
             ui: ui.as_weak(),
         };
@@ -244,6 +250,7 @@ impl Bridge {
         ui.set_perf_stats(ModelRc::from(b.perf_stats.clone()));
         ui.set_perf_segments(ModelRc::from(b.perf_segments.clone()));
         ui.set_scrub_rows(ModelRc::from(b.scrub_rows.clone()));
+        ui.set_startup_rows(ModelRc::from(b.startup_rows.clone()));
         Rc::new(RefCell::new(b))
     }
 
@@ -313,6 +320,38 @@ impl Bridge {
         self.last_perf = Some(p);
         // The window moved under a still pointer: the card follows it to the new moment.
         self.show_scrub(ui);
+    }
+
+    /// A startup list (or a toggle's re-read) landed: the Startup page shows it, and the next job
+    /// may start.
+    pub fn set_startup(&mut self, ui: &MainWindow, entries: Vec<StartupEntry>, elevated: bool) {
+        let rows = crate::startup::startup_rows(&entries, elevated);
+        sync_model(&*self.startup_rows, rows.iter().map(|r| StartupData {
+            id: r.id, name: r.name.as_str().into(), publisher: r.publisher.as_str().into(), status: r.status.as_str().into(),
+            location: r.location.as_str().into(), command: r.command.as_str().into(), enabled: r.enabled,
+            can_change: r.can_change, note: r.note.as_str().into(),
+        }).collect());
+        ui.set_startup_admin_banner(crate::startup::needs_admin_banner(&entries, elevated));
+        ui.set_startup_loading(false);
+        self.startup = entries;
+    }
+
+    /// The entry behind a Startup row id, as last listed.
+    pub fn startup_entry(&self, id: i32) -> Option<StartupEntry> {
+        usize::try_from(id).ok().and_then(|i| self.startup.get(i)).cloned()
+    }
+
+    /// Moves a switch at once; the re-read after the toggle then shows the real state.
+    pub fn show_startup_pending(&self, id: i32, enabled: bool) {
+        for i in 0..self.startup_rows.row_count() {
+            if let Some(mut row) = self.startup_rows.row_data(i)
+                && row.id == id
+            {
+                row.enabled = enabled;
+                row.status = crate::startup::status_text(enabled).into();
+                self.startup_rows.set_row_data(i, row);
+            }
+        }
     }
 
     pub fn set_history(&mut self, history: SharedHistory) {

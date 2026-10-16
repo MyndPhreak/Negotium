@@ -196,12 +196,43 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
-    {
-        let (weak, b) = (weak.clone(), bridge.clone());
-        ui.on_select_page(move |i| {
-            if let Some(ui) = weak.upgrade() {
-                b.borrow_mut().set_page(&ui, negotium::controls::Page::from_index(i));
+    // Startup page: listing calls the registry, the file system, COM and WinRT, so it runs on an
+    // action thread and the result comes back through the bridge (negotium::startup). The list is
+    // read again when the page opens, on Refresh and after every toggle, so it shows the real state.
+    let load_startup = {
+        let weak = weak.clone();
+        move || {
+            if weak.upgrade().is_some_and(|ui| negotium::startup::begin_list(&ui)) {
+                negotium::startup::spawn_job(weak.clone(), elevated, || {
+                    negotium::startup::list_job(&negotium_actions::startup::StartupRoots::system())
+                });
             }
+        }
+    };
+    {
+        let (weak, b, load_startup) = (weak.clone(), bridge.clone(), load_startup.clone());
+        ui.on_select_page(move |i| {
+            let page = negotium::controls::Page::from_index(i);
+            if let Some(ui) = weak.upgrade() {
+                b.borrow_mut().set_page(&ui, page);
+            }
+            // Outside the bridge borrow.
+            if page == negotium::controls::Page::Startup {
+                load_startup();
+            }
+        });
+    }
+    ui.on_refresh_startup(load_startup);
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_toggle_startup(move |id, on| {
+            let Some(ui) = weak.upgrade() else { return };
+            // Refused while a list or toggle runs (PF4); the switch then keeps the listed state.
+            let Some(entry) = negotium::startup::begin_toggle(&b.borrow(), &ui, id, on) else { return };
+            negotium::startup::spawn_job(weak.clone(), elevated, move || {
+                let roots = negotium_actions::startup::StartupRoots::system();
+                negotium::startup::toggle_job(&roots, &entry, on, elevated)
+            });
         });
     }
     {

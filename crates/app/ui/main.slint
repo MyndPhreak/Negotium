@@ -7,9 +7,10 @@ import { Banner, Toast, Modal } from "overlays.slint";
 import { Rail } from "rail.slint";
 import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
 import { SettingsPage } from "settingspage.slint";
+import { StartupPage, StartupData } from "startuppage.slint";
 import { GraphData, ScrubRow } from "graph.slint";
 export { NegotiumTray } from "tray.slint";
-export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow }
+export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -79,6 +80,14 @@ export component MainWindow inherits Window {
     callback scrub(float);
     callback list-focus(bool);
     callback list-key(string) -> bool;
+
+    // Startup (crate::startup): the rows, whether a list or toggle job runs (set and cleared by
+    // Rust; one job at a time), and whether the inline "Restart as admin" banner shows.
+    in property <[StartupData]> startup-rows;
+    in-out property <bool> startup-loading;
+    in property <bool> startup-admin-banner;
+    callback toggle-startup(int, bool);
+    callback refresh-startup();
 
     // Settings (crate::settings::Settings, shown by crate::settingspage): refresh index (0.5 / 1 /
     // 2 / 5 s), theme index (System / Light / Dark), the switches. `on-top` is both the window's
@@ -219,11 +228,6 @@ export component MainWindow inherits Window {
                         list-key(k) => { return root.list-key(k); }
                         park-focus => { parking.focus(); }
                     }
-                    if root.toast != "" : Toast {
-                        text: root.toast;
-                        interactive: !root.modal-open;
-                        dismiss => { root.dismiss-toast(); }
-                    }
                 }
             }
             Rectangle {
@@ -258,6 +262,22 @@ export component MainWindow inherits Window {
                 y: 0;
                 width: parent.width;
                 height: parent.height;
+                visible: root.page == 2;
+                StartupPage {
+                    rows: root.startup-rows;
+                    loading: root.startup-loading;
+                    admin-banner: root.startup-admin-banner;
+                    interactive: !root.modal-open;
+                    toggle(id, on) => { root.toggle-startup(id, on); }
+                    refresh => { root.refresh-startup(); }
+                    restart-admin => { root.restart-admin(); }
+                }
+            }
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
                 visible: root.page == 3;
                 SettingsPage {
                     refresh: root.settings-refresh;
@@ -275,6 +295,17 @@ export component MainWindow inherits Window {
                     tray-toggled(on) => { root.tray-toggled(on); }
                     gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
                 }
+            }
+            // Over every page: a result (a failed startup toggle, an action's message) shows
+            // wherever the user is.
+            if root.toast != "" : Toast {
+                x: 12px;
+                width: parent.width - 24px;
+                height: self.preferred-height;
+                y: parent.height - self.height - 12px;
+                text: root.toast;
+                interactive: !root.modal-open;
+                dismiss => { root.dismiss-toast(); }
             }
         }
     }
