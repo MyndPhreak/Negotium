@@ -162,12 +162,10 @@ fn block_comments_are_stripped_too() {
     assert!(!sets(bodies[0], "fit", &["fill"]), "a fit inside a block comment does not count");
 }
 
-/// Every data path (a 1000 × 100 view box, see crate::graph) stretches to its box: the default
-/// `fit: contain` keeps the 10:1 aspect and squashes the data into a band.
-#[test]
-fn every_data_path_stretches_to_fill_its_box() {
+/// Every data path (a 1000 × 100 view box, see crate::graph) in ui/*.slint: (file, squeezed body).
+fn data_paths() -> Vec<(String, String)> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let mut checked = 0;
+    let mut found = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_none_or(|e| e != "slint") {
@@ -176,12 +174,60 @@ fn every_data_path_stretches_to_fill_its_box() {
         let src = squeezed(&std::fs::read_to_string(&path).unwrap());
         for body in path_bodies(&src) {
             if sets(body, "viewbox-width", &["1000", "1000.0"]) {
-                checked += 1;
-                assert!(sets(body, "fit", &["fill"]), "{}: a data Path without fit: fill: {body}", path.display());
+                found.push((path.display().to_string(), body.to_string()));
             }
         }
     }
-    assert!(checked >= 5, "found only {checked} data paths");
+    found
+}
+
+/// Every data path stretches to its box: the default `fit: contain` keeps the 10:1 aspect and
+/// squashes the data into a band.
+#[test]
+fn every_data_path_stretches_to_fill_its_box() {
+    let paths = data_paths();
+    assert!(paths.len() >= 5, "found only {} data paths", paths.len());
+    for (file, body) in &paths {
+        assert!(sets(body, "fit", &["fill"]), "{file}: a data Path without fit: fill: {body}");
+    }
+}
+
+/// Every data path clips to its box: frames draw history left of their window at negative x
+/// (crate::graph::LEAD_MS), which must never paint outside the graph.
+#[test]
+fn every_data_path_clips_to_its_box() {
+    for (file, body) in &data_paths() {
+        assert!(sets(body, "clip", &["true"]), "{file}: a data Path without clip: true: {body}");
+    }
+}
+
+/// A sparkline's history left of its window stays inside its meter: nothing is drawn in the gap
+/// between two meters.
+#[test]
+fn a_sparklines_off_screen_history_is_clipped_to_its_meter() {
+    software_backend();
+    let ui = MainWindow::new().unwrap();
+    ui.global::<Theme>().set_accent(slint::Color::from_rgb_u8(255, 0, 0));
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    let meter = |label: &str| negotium::MeterData {
+        label: label.into(), value: "1%".into(), sub: "".into(), spark: "M -400 50 L 1400 50".into(), available: true,
+    };
+    let meters: Vec<negotium::MeterData> = ["CPU", "Memory", "Disk", "GPU", "Network"].into_iter().map(meter).collect();
+    ui.set_meters(ModelRc::new(VecModel::from(meters)));
+    ui.set_selected_metric(-1); // no meter is tinted by being selected
+    ui.show().unwrap();
+    let shot = ui.window().take_snapshot().expect("snapshot");
+    let memory = ElementHandle::find_by_accessible_label(&ui, "Memory meter").next().expect("memory meter");
+    let disk = ElementHandle::find_by_accessible_label(&ui, "Disk meter").next().expect("disk meter");
+    let (m, mw, mh, d) = (memory.absolute_position(), memory.size().width, memory.size().height, disk.absolute_position());
+    let tinted = |x0: f32, x1: f32| {
+        (m.y.round() as u32..(m.y + mh).round() as u32)
+            .flat_map(|y| (x0.round() as u32..x1.round() as u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| accent_tinted(shot.as_slice()[(y * shot.width() + x) as usize]))
+            .count()
+    };
+    assert!(tinted(m.x + 12.0, m.x + mw - 12.0) > 0, "the line shows inside the meter");
+    assert_eq!(tinted(m.x + mw + 1.0, d.x - 1.0), 0, "nothing is drawn between the meters");
 }
 
 /// Bench data: `Smooth` is load-like (a slow wave with a little noise); `Noise` is uniform

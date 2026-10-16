@@ -235,10 +235,11 @@ pub struct PerfFrame {
     pub segments: Vec<SegmentView>,
     pub stats: Vec<StatView>,
     pub range: Range,
-    /// Graph window `[window_end_ms - span_ms, window_end_ms]` in collector time, for the scrub.
+    /// Graph window `[window_end_ms - span_ms, window_end_ms]` in collector time, for the scrub:
+    /// `window_end_ms` is the newest history sample, where the graphs' right edge rests.
     pub window_end_ms: u64,
     pub span_ms: u64,
-    /// Local wall-clock time of `window_end_ms`, ms since midnight.
+    /// Local wall-clock time of `window_end_ms` (that sample's clock), ms since midnight.
     pub end_clock_ms: u64,
     /// Which app ranking the scrub shows on this page (ruling P3-4).
     pub scrub_metric: Metric,
@@ -304,29 +305,45 @@ impl LastSeen {
 }
 
 impl PerfInput<'_> {
+    /// This tick's collector time (the device grace period counts from it).
     fn end(&self) -> u64 {
         self.snap.taken_at_ms
     }
 
+    /// The graphs' right edge: the newest history sample. At refresh rates under a second the
+    /// history keeps one sample a second (ruling P3-3), so a tick can be newer; anchoring on the
+    /// tick would pull every line's end in from the edge.
+    fn anchor(&self) -> u64 {
+        self.history.latest_t().unwrap_or(self.snap.taken_at_ms)
+    }
+
+    /// Local wall-clock time (ms since midnight) of the graphs' right edge.
+    fn anchor_clock(&self) -> u64 {
+        let day = crate::scrub::DAY_MS;
+        let back = self.end().saturating_sub(self.anchor()) % day;
+        (self.snap.totals.local_time_ms % day + day - back) % day
+    }
+
     fn shape(&self, key: &Series, max: f32, buckets: usize) -> Shape {
-        let span = self.range.span_ms();
-        graph::shape(self.history.points(key, self.end().saturating_sub(span)), self.end(), span, max, buckets)
+        let (end, span) = (self.anchor(), self.range.span_ms());
+        graph::shape(self.history.points(key, graph::since(end, span)), end, span, max, buckets)
     }
 
     /// A small multiple's shape: the line only, since cells draw no area (Graph `filled: false`).
     fn cell_shape(&self, key: &Series, max: f32) -> Shape {
-        let span = self.range.span_ms();
-        let line = graph::line(self.history.points(key, self.end().saturating_sub(span)), self.end(), span, max, CELL_BUCKETS);
+        let (end, span) = (self.anchor(), self.range.span_ms());
+        let line = graph::line(self.history.points(key, graph::since(end, span)), end, span, max, CELL_BUCKETS);
         Shape { line, area: EMPTY_PATH.to_string() }
     }
 
     /// The largest value of a series within the last `span_ms`, 0 when there is none.
     fn max_over(&self, key: &Series, span_ms: u64) -> f32 {
-        self.history.points(key, self.end().saturating_sub(span_ms)).filter_map(|(_, v)| v).filter(|v| v.is_finite()).fold(0.0, f32::max)
+        self.history.points(key, self.anchor().saturating_sub(span_ms)).filter_map(|(_, v)| v).filter(|v| v.is_finite()).fold(0.0, f32::max)
     }
 
     fn spark(&self, key: &Series, max: f32) -> String {
-        graph::line(self.history.points(key, self.end().saturating_sub(SPARK_MS)), self.end(), SPARK_MS, max, 60)
+        let end = self.anchor();
+        graph::line(self.history.points(key, graph::since(end, SPARK_MS)), end, SPARK_MS, max, 60)
     }
 }
 
@@ -427,9 +444,9 @@ pub fn build_perf(input: &PerfInput) -> PerfFrame {
         requested: input.device.to_string(),
         selected: list[selected].id(),
         range: input.range,
-        window_end_ms: input.end(),
+        window_end_ms: input.anchor(),
         span_ms: input.range.span_ms(),
-        end_clock_ms: input.snap.totals.local_time_ms,
+        end_clock_ms: input.anchor_clock(),
         ..Default::default()
     };
     match list[selected] {
@@ -1111,5 +1128,32 @@ pub(crate) mod tests {
         let input = PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute, last_seen: None };
         assert_eq!(input.max_over(&Series::GpuUtil("k".into()), 30_000), 3.0);
         assert_eq!(input.max_over(&Series::GpuUtil("none".into()), 30_000), 0.0);
+    }
+
+    /// A path's x coordinates.
+    fn path_xs(path: &str) -> Vec<f64> {
+        let t: Vec<&str> = path.split_whitespace().collect();
+        t.chunks(3).filter(|c| c.len() == 3).map(|c| c[1].parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn graphs_reach_both_edges_when_the_tick_is_newer_than_the_newest_sample() {
+        // At a 0.5 s refresh the history keeps one sample a second (ruling P3-3): every other tick
+        // is half a second newer than the newest sample.
+        let mut h = History::new();
+        for i in 0..=60u64 {
+            h.push(i * 1_000, &snapshot(i * 1_000).totals, &[]);
+        }
+        let s = snapshot(60_500);
+        assert!(!h.push(s.taken_at_ms, &s.totals, &[]), "too soon after the last sample: not kept");
+        let info = info();
+        let f = build_perf(&PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute, last_seen: None });
+        let main = path_xs(&f.graphs[0].line);
+        assert_eq!(main.last(), Some(&1000.0), "the line ends on the right edge: {}", f.graphs[0].line);
+        assert!(main[0] <= 0.0, "and starts on the left edge: {}", &f.graphs[0].line[..30]);
+        assert_eq!(path_xs(&f.cells[0].line).last(), Some(&1000.0), "{}", f.cells[0].line);
+        assert_eq!(path_xs(&f.devices[0].spark).last(), Some(&1000.0), "{}", f.devices[0].spark);
+        assert_eq!(f.window_end_ms, 60_000, "the scrub maps the right edge to the newest sample");
+        assert_eq!(f.end_clock_ms, 12 * 3_600_000 - 500, "at that sample's clock");
     }
 }

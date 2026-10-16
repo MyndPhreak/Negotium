@@ -33,6 +33,7 @@ export component Graph inherits Rectangle {
         viewbox-width: 1000;
         viewbox-height: 100;
         fit: fill;
+        clip: true;
         visible: root.filled;
         commands: root.data.area;
         fill: Theme.accent.with-alpha(0.16);
@@ -46,6 +47,7 @@ export component Graph inherits Rectangle {
         viewbox-width: 1000;
         viewbox-height: 100;
         fit: fill;
+        clip: true;
         commands: root.data.line;
         fill: transparent;
         stroke: Theme.accent;
@@ -59,6 +61,7 @@ export component Graph inherits Rectangle {
         viewbox-width: 1000;
         viewbox-height: 100;
         fit: fill;
+        clip: true;
         commands: root.data.line2;
         fill: transparent;
         stroke: Theme.muted;

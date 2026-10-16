@@ -131,16 +131,22 @@ fn busiest_gpu(gpus: &[negotium_snapshot::GpuSample]) -> Option<&negotium_snapsh
     best
 }
 
+/// The graphs' right edge: the newest history sample. A tick can be newer (the history keeps one
+/// sample a second, ruling P3-3); anchoring on it would pull every line's end in from the edge.
+fn graph_end(snap: &Snapshot, history: &History) -> u64 {
+    history.latest_t().unwrap_or(snap.taken_at_ms)
+}
+
 fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     let t = &snap.totals;
     let span = SPARK_SECONDS * 1000;
-    let now = snap.taken_at_ms;
-    let since = now.saturating_sub(span);
-    let spark = |key: Series, max: f32| graph::line(history.points(&key, since), now, span, max, SPARK_SECONDS as usize);
+    let end = graph_end(snap, history);
+    let since = graph::since(end, span);
+    let spark = |key: Series, max: f32| graph::line(history.points(&key, since), end, span, max, SPARK_SECONDS as usize);
     // A zero total is no reading (as on the Memory page): "Unavailable", never 100% in use.
     let memory = t.memory.as_ref().filter(|m| m.total > 0);
     let mem_total = memory.map(|m| m.total as f32).unwrap_or(0.0);
-    let net_max = history.points(&Series::NetTotal, since).filter_map(|(_, v)| v).fold(0.0f32, f32::max).max(t.net_bps.unwrap_or(0.0) as f32);
+    let net_max = history.points(&Series::NetTotal, end.saturating_sub(span)).filter_map(|(_, v)| v).fold(0.0f32, f32::max).max(t.net_bps.unwrap_or(0.0) as f32);
     vec![
         MeterView {
             label: "CPU",
@@ -580,5 +586,21 @@ mod tests {
         assert_eq!(visible_rows(&rows, &HashSet::from([1]), "").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2, 3]);
         assert_eq!(visible_rows(&rows, &none, "HELPER").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2]);
         assert!(visible_rows(&rows, &none, "zzz").is_empty());
+    }
+
+    #[test]
+    fn meter_sparklines_reach_both_edges_between_kept_samples() {
+        let mut h = History::new();
+        let mut s = snap(Some(50.0));
+        for t in (0..=60u64).map(|i| i * 1_000) {
+            s.taken_at_ms = t;
+            h.push(t, &s.totals, &[]);
+        }
+        // A 0.5 s refresh: this tick is half a second newer than the newest kept sample.
+        s.taken_at_ms = 60_500;
+        let f = build_frame(&mut IdMap::new(), &s, &[], &[], &h, &opts(Metric::Cpu, true));
+        let spark = &f.meters[0].spark;
+        assert!(spark.starts_with("M 0.0 50.0"), "{spark}");
+        assert!(spark.ends_with("L 1000.0 50.0"), "{spark}");
     }
 }

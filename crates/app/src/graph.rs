@@ -8,6 +8,19 @@ use std::fmt::Write;
 /// hidden-window 2 s interval, and the 5 s refreshes of sparse graphs), far below any real pause.
 pub const PAUSE_BREAK_MS: u64 = 10_000;
 
+/// History drawn left of a graph's window, off the edge (the Path clips it): reaching one pause
+/// back always takes in the sample before the window's start, so the line runs to the left edge
+/// instead of starting at the first sample inside it.
+///
+/// The 1 h graph can still fall short of its left edge by at most one 12 s column: history keeps
+/// exactly 1 h (ruling PF9), so there is nothing older to draw there.
+pub const LEAD_MS: u64 = PAUSE_BREAK_MS;
+
+/// The earliest sample time a graph of `[end - span, end]` draws (see [`LEAD_MS`]).
+pub fn since(end: u64, span: u64) -> u64 {
+    end.saturating_sub(span + LEAD_MS)
+}
+
 pub const VIEW_W: f64 = 1000.0;
 /// A path that draws nothing (Slint needs a valid command string).
 pub const EMPTY_PATH: &str = "M 0 100";
@@ -84,8 +97,10 @@ impl Pen {
 /// laid on an absolute time grid (column k covers `(k·w, (k+1)·w]`), so a sample stays in its column
 /// while time advances and the graph scrolls instead of shimmering. A column shows its largest value
 /// (ruling P3-5) at its end time (the newest column at `end`, the right edge); a column holding only
-/// missing values breaks the line, and columns without any sample are simply skipped. The window
-/// touches at most `buckets + 1` columns. `max <= 0` draws values on the floor.
+/// missing values breaks the line, and columns without any sample are simply skipped. History up to
+/// [`LEAD_MS`] before the window is drawn too, at negative x (off the edge; the Path clips it), so
+/// the line reaches the left edge. `end` is the newest sample: anchoring on a later moment would pull
+/// the line's end in from the right edge. `max <= 0` draws values on the floor.
 pub fn shape(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u64, max: f32, buckets: usize) -> Shape {
     trace(points, end, span, max, buckets, true)
 }
@@ -101,6 +116,8 @@ fn trace(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u
     // Negative right after start: the window then reaches back before collector time 0, and the
     // little history there is still drawn at the right edge.
     let start = end as i64 - span as i64;
+    // History left of the window is drawn too, off the edge (see LEAD_MS).
+    let first = start - LEAD_MS as i64;
     let mut pen = Pen { with_area, ..Pen::default() };
     let mut current: Option<(i64, Option<f32>)> = None;
     let mut prev_t: Option<i64> = None;
@@ -116,7 +133,7 @@ fn trace(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u
     };
     for (t, v) in points {
         let t = t as i64;
-        if t < start || t > end as i64 {
+        if t < first || t > end as i64 {
             continue;
         }
         if prev_t.is_some_and(|p| t - p > PAUSE_BREAK_MS as i64) {
@@ -163,9 +180,10 @@ pub fn column_bounds(k: i64, span: u64, buckets: usize) -> (i64, i64) {
 }
 
 /// Where collector time `t` is drawn on a graph of `[end - span, end]`: x in the view box, the
-/// newest moment on the right edge. [`fraction_to_time`] is its inverse.
+/// newest moment on the right edge; negative left of the window (history drawn off the edge, see
+/// [`LEAD_MS`]). [`fraction_to_time`] is its inverse inside the window.
 fn time_to_x(t: f64, end: u64, span: u64) -> f64 {
-    (VIEW_W - (end as f64 - t) / span as f64 * VIEW_W).clamp(0.0, VIEW_W)
+    (VIEW_W - (end as f64 - t) / span as f64 * VIEW_W).min(VIEW_W)
 }
 
 /// The collector time under a pointer `fraction` of the way across a graph of `[end - span, end]`
@@ -337,5 +355,40 @@ mod tests {
         assert_eq!(nice_max(1_300.0, 1_000.0), 2_000.0);
         assert_eq!(nice_max(7_100_000.0, 1.0), 10_000_000.0);
         assert_eq!(nice_max(f32::NAN, 5.0), 5.0);
+    }
+
+    #[test]
+    fn the_sample_before_the_window_carries_the_line_to_the_left_edge() {
+        // One sample a second, half a second off the column grid; the window is [1.5 s, 61.5 s].
+        let pts: Vec<(u64, Option<f32>)> = (0..=61u64).map(|i| (i * 1_000 + 500, Some(50.0))).collect();
+        let s = shape(pts, 61_500, 60_000, 100.0, 60);
+        let x = xs(&s.line);
+        assert!(x[0] < 0.0 && x[1] > 0.0, "the line enters from beyond the left edge: {}", &s.line[..30]);
+        assert_eq!(s.line.matches('M').count(), 1, "one unbroken line");
+        assert!(s.area.starts_with(&format!("M {:.1} 100.0", x[0])), "the fill starts with it: {}", &s.area[..30]);
+        assert_eq!(*x.last().unwrap(), 1000.0);
+    }
+
+    #[test]
+    fn history_further_back_than_the_lead_in_is_not_drawn() {
+        let (end, span) = (200_000u64, 60_000u64);
+        // One stray sample just before `since`, then one a second from the window's start: the stray is
+        // further back than a pause from the rest, so drawing it would start a second segment.
+        let mut pts = vec![(since(end, span) - 1_000, Some(50.0))];
+        pts.extend((end - span + 1_000..=end).step_by(1_000).map(|t| (t, Some(50.0))));
+        let s = shape(pts, end, span, 100.0, 60);
+        assert_eq!(s.line.matches('M').count(), 1, "{}", &s.line[..40]);
+        assert_eq!(since(end, span), end - span - LEAD_MS);
+        assert_eq!(since(5_000, 60_000), 0);
+    }
+
+    #[test]
+    fn the_scrub_maps_a_drawn_column_back_to_its_time() {
+        let (end, span) = (61_000u64, 60_000u64);
+        let pts: Vec<(u64, Option<f32>)> = (0..=61u64).map(|i| (i * 1_000, Some(50.0))).collect();
+        let x = xs(&shape(pts, end, span, 100.0, 60).line);
+        let drawn = x[x.len() - 11]; // the column ending 10 s before the newest sample
+        let t = fraction_to_time((drawn / VIEW_W) as f32, end, span);
+        assert!((t - 51_000).abs() <= 2, "{t}");
     }
 }
