@@ -25,9 +25,11 @@ pub fn lag_ms(refresh_ms: u64) -> f64 {
 }
 
 /// Redraws per second a graph `width_px` wide needs to scroll smoothly over `span_ms` at `speed`
-/// (graph ms per real ms): half a pixel of motion is worth a redraw, and never more than 60 a second.
+/// (graph ms per real ms): half a pixel of motion is worth a redraw, within the ruled range of
+/// 16 ms to 1 s between redraws (1 to 60 a second; zero or NaN gives the 1 s floor).
 pub fn redraw_hz(width_px: f64, span_ms: f64, speed: f64) -> f64 {
-    (2.0 * width_px * speed * 1_000.0 / span_ms.max(1.0)).min(60.0)
+    let hz = 2.0 * width_px * speed * 1_000.0 / span_ms.max(1.0);
+    if hz.is_finite() { hz.clamp(1.0, 60.0) } else if hz > 0.0 { 60.0 } else { 1.0 }
 }
 
 /// The view's right edge (collector ms) from one frame to the next: a straight run that stops on
@@ -60,13 +62,13 @@ impl Scroll {
     /// nothing jumps, and its speed steers it toward `now - lag`; it is never so fast that it
     /// reaches the newest sample before the next one is due. Without a usable `prev` (the first
     /// frame, smoothing just turned on, a long absence, a history restart) the edge starts at
-    /// `now - lag`. Either way it stays within SCROLL_MARGIN_MS of the newest sample: the history
+    /// `now - lag`. An absence of 12 s or less (within SCROLL_MARGIN_MS) is caught up at up to MAX_SPEED, 2x. Either way it stays within SCROLL_MARGIN_MS of the newest sample: the history
     /// the frame's paths hold.
     pub fn next(prev: Option<&Scroll>, now: f64, newest: f64, lag: f64) -> Scroll {
         let (floor, target) = (newest - SCROLL_MARGIN_MS as f64, now - lag);
         let r0 = match prev.map(|p| p.right_edge(now)) {
             Some(edge) if (floor..=newest).contains(&edge) => edge,
-            _ => target.clamp(floor, newest),
+            _ => target.max(floor).min(newest),
         };
         let horizon = CATCH_UP_MS.max(2.0 * lag);
         // The next frame lands within one lag of this sample, so aim to reach it no sooner than that
@@ -163,7 +165,7 @@ mod tests {
         // An hour hidden in the tray: the last run ended an hour ago.
         let old = Scroll::next(None, 61_000.0, 60_000.0, 1_250.0);
         let run = Scroll::next(Some(&old), 3_661_000.0, 3_660_000.0, 1_250.0);
-        assert_eq!(run.r0, 3_659_750.0);
+        assert!((run.r0 - 3_659_750.0).abs() < 1e-6);
         assert_eq!(run.speed, 1.0, "no fast-forward through the hour");
     }
 
@@ -172,7 +174,7 @@ mod tests {
         // Collector time restarted (the history was cleared): the old run is far ahead of the new samples.
         let old = Scroll::next(None, 3_600_000.0, 3_599_000.0, 1_250.0);
         let run = Scroll::next(Some(&old), 2_005.0, 2_000.0, 1_250.0);
-        assert_eq!(run.r0, 755.0);
+        assert!((run.r0 - 755.0).abs() < 1e-6);
         assert!(run.right_edge(2_500.0) <= 2_000.0);
     }
 
@@ -239,10 +241,39 @@ mod tests {
         for width in [100.0, 1_000.0, 5_120.0, 10_240.0, 1e6] {
             for span in [60_000.0, 3_600_000.0] {
                 for speed in [MIN_SPEED, 1.0, MAX_SPEED] {
-                    assert!(redraw_hz(width, span, speed) <= 60.0);
+                    assert!((1.0..=60.0).contains(&redraw_hz(width, span, speed)));
                 }
             }
         }
-        assert!(redraw_hz(1_000.0, 3_600_000.0, 1.0) < 1.0, "an hour-wide view redraws rarely");
+        assert_eq!(redraw_hz(1_000.0, 3_600_000.0, 1.0), 1.0, "an hour-wide view redraws once a second");
+        assert_eq!([redraw_hz(0.0, 60_000.0, 1.0), redraw_hz(f64::NAN, 60_000.0, 1.0)], [1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_minute_at_a_thousand_pixels_redraws_about_thirty_three_times_a_second() {
+        assert!((redraw_hz(1_000.0, 60_000.0, 1.0) - 33.3).abs() < 0.1);
+    }
+
+    #[test]
+    fn huge_timestamps_and_nan_do_not_panic_or_lose_the_edge() {
+        let big = 1e12;
+        let a = Scroll::next(None, big + 1_000.0, big, 1_250.0);
+        assert!((a.r0 - (big - 250.0)).abs() < 1e-3 && a.speed == 1.0);
+        let b = Scroll::next(Some(&a), big + 1_500.0, big + 500.0, 1_250.0);
+        assert!((a.right_edge(big + 1_500.0) - b.r0).abs() < 1e-3);
+        let n = Scroll::next(None, f64::NAN, f64::NAN, 1_250.0);
+        let _ = n.right_edge(0.0);
+        let m = Scroll::next(Some(&n), 1_000.0, 500.0, 1_250.0);
+        assert!(m.r0.is_finite() && m.speed.is_finite());
+    }
+
+    #[test]
+    fn a_slightly_older_newest_sample_does_not_snap_the_edge_back() {
+        let a = Scroll::next(None, 61_000.0, 60_000.0, 1_250.0);
+        let now = 61_500.0;
+        let before = a.right_edge(now);
+        let b = Scroll::next(Some(&a), now, 59_900.0, 1_250.0);
+        assert!(b.r0 <= 59_900.0 && before - b.r0 <= 100.0 + 1e-6, "snap back of {}", before - b.r0);
+        assert!(b.speed >= 0.0);
     }
 }
