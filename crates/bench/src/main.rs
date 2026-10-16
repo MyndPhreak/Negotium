@@ -1,8 +1,11 @@
 //! Measures an app the way spec §8 defines: launch → first window, CPU %, private
 //! working set, and UI responsiveness (WM_NULL round-trip). Run from an elevated terminal.
+mod childenv;
+mod memmap;
 mod stats;
 
 use anyhow::{Context, Result, bail};
+use childenv::Renderer;
 use negotium_collector::{ProcessReader, logical_cpus};
 use serde::Serialize;
 use stats::{Summary, summary};
@@ -39,17 +42,63 @@ struct Report {
     responsiveness_timeouts: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     frame_stats: Option<serde_json::Value>,
+    /// Which renderer a Negotium run used (`--renderer`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renderer: Option<Renderer>,
+    /// Where Negotium's memory went at the end of sampling (crate::memmap).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory: Option<memmap::MemoryReport>,
+}
+
+/// Why the bench will not start a child: it never closes or kills an instance it did not launch.
+fn already_running_message(exe_name: &str, is_negotium: bool) -> String {
+    if is_negotium {
+        format!("{exe_name} is already running. The benchmark will not touch it: exit Negotium from its tray icon (right-click, Exit), then run the benchmark again.")
+    } else {
+        format!("{exe_name} is already running; close it first (Task Manager is single-instance)")
+    }
+}
+
+/// `negotium-bench memory (--pid N | --name EXE) [--top N] [--out FILE]`: where a running
+/// process's memory goes (crate::memmap). Needs no elevation for the user's own processes.
+fn memory_command(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let (mut pid, mut top, mut out) = (None::<u32>, 12usize, None::<String>);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--pid" => pid = Some(args.next().context("--pid N")?.parse()?),
+            "--name" => {
+                let name = args.next().context("--name EXE")?.to_lowercase();
+                pid = Some(running_pid(&name)?.with_context(|| format!("{name} is not running"))?);
+            }
+            "--top" => top = args.next().context("--top N")?.parse()?,
+            "--out" => out = Some(args.next().context("--out FILE")?),
+            other => bail!("unknown argument {other}"),
+        }
+    }
+    let report = memmap::measure(pid.context("--pid N or --name EXE")?, top)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    println!("{json}");
+    if let Some(path) = out {
+        std::fs::write(&path, json).with_context(|| format!("write {path}"))?;
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let target = args.next().context("usage: negotium-bench <taskmgr|negotium|PATH> [--runs N] [--sample-secs S] [--warmup-secs S] [--out FILE]")?;
+    let target = args.next().context("usage: negotium-bench <taskmgr|negotium|PATH> [--runs N] [--sample-secs S] [--warmup-secs S] [--renderer gpu|software] [--out FILE]
+       negotium-bench memory (--pid N | --name EXE) [--top N] [--out FILE]")?;
+    if target == "memory" {
+        return memory_command(args);
+    }
     let (mut runs, mut sample_secs, mut warmup_secs, mut out) = (5u32, 60u64, 5u64, None::<String>);
+    let mut renderer = Renderer::default();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--runs" => runs = args.next().context("--runs N")?.parse()?,
             "--sample-secs" => sample_secs = args.next().context("--sample-secs S")?.parse()?,
             "--warmup-secs" => warmup_secs = args.next().context("--warmup-secs S")?.parse()?,
+            "--renderer" => renderer = Renderer::parse(&args.next().context("--renderer gpu|software")?)?,
             "--out" => out = Some(args.next().context("--out FILE")?),
             other => bail!("unknown argument {other}"),
         }
@@ -69,10 +118,8 @@ fn main() -> Result<()> {
     let exe_name = path.file_name().context("target has no file name")?.to_string_lossy().to_lowercase();
 
     let stats_path = std::env::temp_dir().join("negotium-frame-stats.json");
-    if is_negotium {
-        // SAFETY: single-threaded at this point; no other thread reads the environment.
-        unsafe { std::env::set_var("NEGOTIUM_FRAME_STATS", &stats_path) };
-    }
+    let real_local_app_data = std::env::var_os("LOCALAPPDATA");
+    let mut scratch: Option<PathBuf> = None;
     let launch_args = is_negotium.then_some("--exit-on-close");
 
     let mut startup_ms = Vec::new();
@@ -82,11 +129,23 @@ fn main() -> Result<()> {
             prev.close()?;
         }
         if running_pid(&exe_name)?.is_some() {
-            bail!("{exe_name} is already running; close it first (Task Manager is single-instance)");
+            bail!("{}", already_running_message(&exe_name, is_negotium));
         }
         if is_negotium {
             // Per-run reset: a run that fails to write its stats must not leave an earlier run's behind.
             let _ = std::fs::remove_file(&stats_path);
+            // A fresh LOCALAPPDATA per run: its own settings.json, renderer marker and log, so the
+            // user's real files are never read or written (and a fallback marker cannot leak into
+            // the next run).
+            if let Some(old) = scratch.take() {
+                let _ = std::fs::remove_dir_all(old);
+            }
+            let dir = childenv::scratch_local_appdata(&std::env::temp_dir(), real_local_app_data.as_deref(), std::process::id(), run)?;
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+            // No thread has been spawned yet (the probe thread starts in `sample`, after this loop).
+            childenv::negotium_child_env(&dir, &stats_path, renderer).apply_to_process();
+            scratch = Some(dir);
         }
         let t0 = Instant::now();
         // An early return below drops `target`, which cleans the launched process up.
@@ -103,7 +162,15 @@ fn main() -> Result<()> {
     println!("warming up pid {} for {warmup_secs} s, then sampling for {sample_secs} s …", target.pid);
     let (cpu, ws, resp, timeouts) =
         sample(&target, Duration::from_secs(warmup_secs), Duration::from_secs(sample_secs))?;
+    let memory = if is_negotium {
+        memmap::measure(target.pid, 12).map_err(|e| eprintln!("memory breakdown unavailable: {e:#}")).ok()
+    } else {
+        None
+    };
     target.close()?;
+    if let Some(dir) = scratch {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     let frame_stats = if is_negotium {
         let read = std::fs::read_to_string(&stats_path)
@@ -130,6 +197,8 @@ fn main() -> Result<()> {
         responsiveness_ms: summary(&resp),
         responsiveness_timeouts: timeouts,
         frame_stats,
+        renderer: is_negotium.then_some(renderer),
+        memory,
     };
     let json = serde_json::to_string_pretty(&report)?;
     println!("{json}");
@@ -367,4 +436,16 @@ fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<Sam
     let (resp, timeouts) = probed.map_err(|e| anyhow::anyhow!("responsiveness probe failed: {e}"))?;
     sampled?;
     Ok((cpu, ws, resp, timeouts))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_running_negotium_is_never_closed_and_the_user_is_told_to_exit_it_from_the_tray() {
+        let m = already_running_message("negotium.exe", true);
+        assert!(m.contains("tray") && m.contains("will not touch"), "{m}");
+        assert!(!already_running_message("taskmgr.exe", false).contains("tray"));
+    }
 }
