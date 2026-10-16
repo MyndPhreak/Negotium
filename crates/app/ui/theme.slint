@@ -11,5 +11,7 @@ export global Theme {
     out property <color> muted: dark ? #ffffffa0 : #00000099;
     out property <color> danger-text: dark ? #ff99a4 : #c42b1c;
     out property <color> danger-bg: dark ? #442726 : #fde7e9;
+    // Text drawn on an accent fill: dark on a light accent, white otherwise (perceived luminance).
+    out property <color> on-accent: (accent.red * 0.299 + accent.green * 0.587 + accent.blue * 0.114) > 150 ? #000000 : #ffffff;
     out property <length> radius: 8px;
 }

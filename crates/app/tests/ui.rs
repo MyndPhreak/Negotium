@@ -808,3 +808,228 @@ fn the_performance_page_lays_out_graph_cells_details_and_ranges() {
     assert!(speed.1 > cell[15].1, "the details come after the cells");
     assert!(El::find_by_accessible_label(&ui, "Utilization —").next().is_some());
 }
+
+// ---- Task 9 fix round 1 ----
+
+type Rect = (f32, f32, f32, f32);
+
+fn rect_of(e: &El) -> Rect {
+    let (p, s) = (e.absolute_position(), e.size());
+    (p.x, p.y, s.width, s.height)
+}
+
+fn rect(ui: &MainWindow, label: &str) -> Rect {
+    rect_of(&El::find_by_accessible_label(ui, label).next().unwrap_or_else(|| panic!("missing {label}")))
+}
+
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+}
+
+fn cell(label: &str, value: &str) -> GraphData {
+    GraphData { value: value.into(), ..graph_data(label) }
+}
+
+/// A Performance page at `w` × `h` with the given main graphs and cells, four stats and a note.
+fn perf_window(w: u32, h: u32, graphs: &[&str], cells: Vec<GraphData>) -> MainWindow {
+    // One testing backend per test thread; a test may build several windows.
+    thread_local! { static BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if !BACKEND.with(|b| b.replace(true)) {
+        i_slint_backend_testing::init_no_event_loop();
+    }
+    let ui = MainWindow::new().unwrap();
+    ui.window().set_size(PhysicalSize::new(w, h));
+    ui.set_page(1);
+    ui.set_perf_devices(ModelRc::new(VecModel::from(vec![device("cpu", "CPU"), device("gpu:0", "GPU 0")])));
+    ui.set_perf_title("CPU".into());
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(graphs.iter().map(|g| graph_data(g)).collect::<Vec<_>>())));
+    ui.set_perf_cells(ModelRc::new(VecModel::from(cells)));
+    let stats: Vec<StatData> = ["Utilization", "Speed", "Temperature", "Processes"]
+        .iter()
+        .map(|l| StatData { label: (*l).into(), value: "1".into() })
+        .collect();
+    ui.set_perf_stats(ModelRc::new(VecModel::from(stats)));
+    ui.set_perf_note("A note.".into());
+    ui.show().unwrap();
+    ui
+}
+
+fn cores(n: usize) -> Vec<GraphData> {
+    (0..n).map(|i| cell(&format!("CPU {i}"), "37%")).collect()
+}
+
+#[test]
+fn spare_height_goes_to_the_main_graph_only() {
+    let measure = |h: u32| {
+        let ui = perf_window(1000, h, &["% Utilization"], cores(16));
+        (
+            rect(&ui, "% Utilization graph"),
+            rect(&ui, "CPU 0 37%"),
+            rect(&ui, "1 min range"),
+            rect(&ui, "Speed 1"),
+        )
+    };
+    let (graph, cell, range, stat) = measure(720);
+    assert_eq!(graph.3, 180.0, "content taller than the view: the graph keeps its minimum");
+    let (tall_graph, tall_cell, tall_range, tall_stat) = measure(1100);
+    assert!(tall_graph.3 > 180.0, "a tall window grows the main graph: {}", tall_graph.3);
+    assert_eq!((tall_cell.2, tall_cell.3), (cell.2, cell.3), "cells keep their size");
+    assert_eq!((tall_range.2, tall_range.3), (range.2, range.3), "range buttons keep their size");
+    assert_eq!(tall_stat.3, stat.3, "details keep their size");
+    let note = rect(&perf_window(1000, 1100, &["% Utilization"], cores(16)), "A note.");
+    assert!(note.1 + note.3 <= 1100.0 - 12.0 + 0.5, "the content fills the view exactly, no more: {note:?}");
+}
+
+#[test]
+fn spare_height_is_shared_by_two_main_graphs() {
+    let ui = perf_window(1000, 1100, &["Active time", "Transfer rate"], cores(0));
+    let (a, b) = (rect(&ui, "Active time graph"), rect(&ui, "Transfer rate graph"));
+    assert!(a.3 > 180.0 && (a.3 - b.3).abs() < 1.0, "both grow alike: {a:?} {b:?}");
+    assert!(a.1 + a.3 <= b.1, "and stay apart");
+}
+
+#[test]
+fn a_cells_value_is_never_cut_off_by_a_long_label() {
+    let long = "Video Processing Engine With A Rather Long Name";
+    let ui = perf_window(760, 440, &["3D"], vec![cell("3D", "12.5%"), cell(long, "12.5%"), cell("Copy", "—"), cell(long, "—")]);
+    for value in ["12.5%", "—"] {
+        let texts: Vec<Rect> = El::find_by_accessible_label(&ui, value).map(|e| rect_of(&e)).collect();
+        assert_eq!(texts.len(), 2, "one {value} per cell");
+        assert!(texts[0].2 > 0.0 && texts[0].2 == texts[1].2, "{value} has its full width beside a long label: {texts:?}");
+    }
+    for (label, value) in [("3D", "12.5%"), (long, "12.5%"), ("Copy", "—"), (long, "—")] {
+        let c = rect(&ui, &format!("{label} {value}"));
+        let v: Vec<Rect> = El::find_by_accessible_label(&ui, value).map(|e| rect_of(&e)).collect();
+        assert!(
+            v.iter().any(|t| t.0 >= c.0 && t.0 + t.2 <= c.0 + c.2 + 0.5 && t.1 >= c.1 && t.1 < c.1 + c.3),
+            "the value of {label} lies inside its cell {c:?}: {v:?}"
+        );
+    }
+}
+
+fn find_rect(ui: &MainWindow, label: &str) -> Option<Rect> {
+    El::find_by_accessible_label(ui, label).next().map(|e| rect_of(&e))
+}
+
+/// Every element in view that has an accessible label, by label (first one wins); one tree walk.
+fn labelled(ui: &MainWindow) -> std::collections::HashMap<String, Rect> {
+    use i_slint_backend_testing::ElementRoot;
+    let mut map = std::collections::HashMap::new();
+    for e in ui.root_element().query_descendants().match_predicate(|e| e.accessible_label().is_some()).find_all() {
+        map.entry(e.accessible_label().unwrap().to_string()).or_insert_with(|| rect_of(&e));
+    }
+    map
+}
+
+fn scroll_detail(ui: &MainWindow, dy: f32) {
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(600.0, 300.0), delta_x: 0.0, delta_y: dy });
+}
+
+/// Scrolls the detail area from top to bottom. At every position, the cells in view (the testing
+/// API finds only what is not clipped away) must sit on one grid in index order without
+/// overlapping, clear of the scrollbar gutter, and the sections in view must stack in order.
+/// Returns the column count; panics unless every cell was seen.
+fn scan_grid(ui: &MainWindow, labels: &[String], graphs: &[&str], width: f32) -> usize {
+    scroll_detail(ui, 100_000.0); // to the top
+    let mut seen = vec![false; labels.len()];
+    let mut cols = None;
+    let mut last = None;
+    for _ in 0..200 {
+        let view = labelled(ui);
+        let find = |l: &str| view.get(l).copied();
+        let cells: Vec<Option<Rect>> = labels.iter().map(|l| find(&format!("{l} graph"))).collect();
+        let marks: Vec<Option<Rect>> = graphs.iter().map(|g| format!("{g} graph")).chain(["1 h range".into(), "A note.".into()]).map(|l| find(&l)).collect();
+        let snapshot = (cells.clone(), marks);
+        if last.as_ref() == Some(&snapshot) {
+            break; // the bottom: scrolling moved nothing
+        }
+        let shown: Vec<(usize, Rect)> = cells.iter().enumerate().filter_map(|(i, c)| c.map(|c| (i, c))).collect();
+        if let Some(&(i0, c0)) = shown.first() {
+            let n = *cols.get_or_insert_with(|| shown.iter().take_while(|(_, c)| c.1 == c0.1).count().max(1));
+            if shown.len() > n {
+                // Seen a full row: its length is the column count (unless all cells fit one row).
+                assert_eq!(n, shown.iter().take_while(|(_, c)| c.1 == c0.1).count().max(n));
+            }
+            let pitch = shown.iter().find(|(i, _)| *i == i0 + n).map(|(_, c)| c.1 - c0.1);
+            for &(i, c) in &shown {
+                for &(j, d) in &shown {
+                    if i < j {
+                        assert!(!overlaps(c, d), "cells {i} and {j} overlap: {c:?} {d:?}");
+                    }
+                    if i % n == j % n {
+                        assert_eq!(c.0, d.0, "cells {i} and {j} share a column");
+                    }
+                    if i / n == j / n {
+                        assert_eq!(c.1, d.1, "cells {i} and {j} share a row");
+                    }
+                }
+                if let Some(p) = pitch {
+                    let rows = (i / n) as f32 - (i0 / n) as f32;
+                    assert!((c.1 - c0.1 - rows * p).abs() < 0.5, "cell {i} is in row {} below cell {i0}", i / n);
+                }
+                assert!(c.0 + c.2 <= width - 12.0 - 14.0 + 0.5, "cell {i} clears the scrollbar gutter: {c:?}");
+                seen[i] = true;
+            }
+        }
+        let mut sections: Vec<Rect> = ["1 h range"].iter().filter_map(|l| find(l)).collect();
+        sections.extend(graphs.iter().filter_map(|g| find(&format!("{g} graph"))));
+        if let (Some(&(_, a)), Some(&(_, b))) = (shown.first(), shown.last()) {
+            sections.push((a.0, a.1, width, b.1 + b.3 - a.1));
+        }
+        sections.extend(["Speed 1", "A note."].iter().filter_map(|l| find(l)));
+        for w in sections.windows(2) {
+            assert!(w[0].1 + w[0].3 <= w[1].1, "sections stacked without overlap: {w:?}");
+        }
+        last = Some(snapshot);
+        scroll_detail(ui, -60.0);
+    }
+    assert!(seen.iter().all(|s| *s), "every cell was reached by scrolling: {seen:?}");
+    assert!(find_rect(ui, "A note.").is_some(), "the bottom of the page is reachable");
+    cols.unwrap()
+}
+
+#[test]
+fn sixty_four_cores_at_the_minimum_window_size_stay_in_order_without_overlap() {
+    let ui = perf_window(760, 440, &["% Utilization"], cores(64));
+    let labels: Vec<String> = (0..64).map(|i| format!("CPU {i}")).collect();
+    let cols = scan_grid(&ui, &labels, &["% Utilization"], 760.0);
+    assert!(cols >= 2, "{cols} columns");
+    scroll_detail(&ui, 100_000.0);
+    assert_eq!(rect(&ui, "% Utilization graph").3, 180.0, "the main graph keeps its minimum");
+}
+
+#[test]
+fn eight_gpu_engines_lay_out_without_overlap() {
+    let engines = ["3D", "Copy", "Video Decode", "Video Encode", "Video Processing", "Compute_0", "Compute_1", "Security"];
+    let graphs = ["Utilization", "Dedicated GPU memory", "Shared GPU memory"];
+    let ui = perf_window(760, 440, &graphs, engines.iter().map(|e| cell(e, "—")).collect());
+    let labels: Vec<String> = engines.iter().map(|e| e.to_string()).collect();
+    assert!(scan_grid(&ui, &labels, &graphs, 760.0) >= 2);
+}
+
+#[test]
+fn the_column_count_does_not_flip_around_the_scrollbar_threshold() {
+    // Sweep the height across the point where the content stops fitting (the scrollbar appears):
+    // the columns depend on the width only, and every layout settles without a binding loop.
+    for w in [760u32, 1000] {
+        let mut seen = None;
+        for h in (440..=1300).step_by(20) {
+            let ui = perf_window(w, h, &["% Utilization"], cores(16));
+            let view = labelled(&ui);
+            let first = view["CPU 0 graph"];
+            let cols = (0..16).take_while(|i| view.get(&format!("CPU {i} graph")).is_some_and(|c| c.1 == first.1)).count();
+            slint::platform::update_timers_and_animations();
+            assert_eq!(rect(&ui, "CPU 0 graph"), first, "settled at {w}x{h}");
+            assert_eq!(*seen.get_or_insert(cols), cols, "column count changed at {w}x{h}");
+        }
+    }
+}
+
+#[test]
+fn text_on_the_accent_contrasts_with_it() {
+    let ui = window();
+    let theme = ui.global::<negotium::Theme>();
+    assert_eq!(theme.get_on_accent(), slint::Color::from_rgb_u8(255, 255, 255), "white on the default blue");
+    theme.set_accent(slint::Color::from_rgb_u8(0xff, 0xd7, 0x00));
+    assert_eq!(theme.get_on_accent(), slint::Color::from_rgb_u8(0, 0, 0), "dark on a light accent");
+}
