@@ -28,4 +28,4 @@ windows = { workspace = true, features = [
 slint-build.workspace = true
 
 [dev-dependencies]
-i-slint-backend-testing.workspace = true
+i-slint-backend-testing = { workspace = true, features = ["renderer-software"] }
