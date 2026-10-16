@@ -325,10 +325,28 @@ fn missing_lists_are_empty_not_errors() {
     );
 }
 
+/// The real lists, on any machine: listing them never panics, and every line it reports (read
+/// errors and "Skipped …" lines alike) is plain English, never a Debug dump of an error. Only
+/// read: this process never unlocks writes outside the test sandbox.
+#[test]
+fn the_real_lists_list_without_panicking_and_report_in_plain_english() {
+    let (entries, errors) = list_startup(&StartupRoots::system());
+    for line in &errors {
+        for artifact in ["Other(", "AccessDenied", "AlreadyExited", "HRESULT(", "Error {", "kind:", "Os {"] {
+            assert!(!line.contains(artifact), "{artifact} in {line:?}");
+        }
+        assert!(!line.trim().is_empty(), "an empty error line");
+    }
+    for e in &entries {
+        assert!(!e.name.is_empty() && !e.location.is_empty(), "{e:?}");
+    }
+}
+
 /// Review Focus 3: reading the all-users lists and the Startup folders needs no admin, so the real
 /// lists read cleanly. "Skipped …" lines (say, a Run value that isn't a command) are information
-/// about one value, not read errors.
+/// about one value, not read errors. Depends on this machine's entries and permissions.
 #[test]
+#[ignore = "reads this machine"]
 fn the_real_lists_can_be_read_without_changing_them() {
     let roots = StartupRoots::system();
     assert!(
@@ -671,7 +689,9 @@ fn a_task_gone_since_listing_is_not_recreated() {
 
 /// The name and publisher of an installed package come from PackageManager (current user, no
 /// admin). Only the sandbox is written: a real family name is borrowed for a fake task key.
+/// Depends on this machine having a suitable installed package.
 #[test]
+#[ignore = "reads this machine"]
 fn an_installed_package_is_named_after_its_display_name() {
     use windows::Management::Deployment::PackageManager;
     use windows::core::HSTRING;
