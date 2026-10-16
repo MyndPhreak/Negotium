@@ -1575,3 +1575,56 @@ fn the_current_row_reports_selected_only_while_the_list_has_focus() {
     assert_eq!(ui.get_current_id(), 7, "the current row is kept for Tab back");
     assert_eq!(editor().accessible_item_selected(), Some(false), "not selected while the list is unfocused");
 }
+
+// ---- Plan 3b Task 0: the menu key with nothing focused ----
+
+fn shift_f10(ui: &MainWindow) {
+    use slint::platform::Key;
+    let shift: slint::SharedString = Key::Shift.into();
+    ui.window().dispatch_event(WindowEvent::KeyPressed { text: shift.clone() });
+    key(ui, Key::F10);
+    ui.window().dispatch_event(WindowEvent::KeyReleased { text: shift });
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+}
+
+fn menu_key(ui: &MainWindow) {
+    press_key(ui, slint::platform::Key::Menu);
+}
+
+/// With no control focused (at startup, or after Esc left the list), the first menu key only
+/// shows the ring on the current row (rulings R9-R11: nothing acts on a row not yet seen
+/// highlighted); the second opens that row's menu.
+fn the_menu_key_with_nothing_focused_highlights_first_then_opens(press: fn(&MainWindow)) {
+    use slint::platform::Key;
+    let (ui, controls, _bridge, actions) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let o = opened.clone();
+    ui.on_menu_open(move |open| o.borrow_mut().push(open));
+    for round in ["at startup", "after Esc in the list"] {
+        assert!(!controls.frozen(), "{round}: not frozen before the key");
+        press(&ui);
+        assert!(controls.frozen(), "{round}: the first press focuses (and so freezes) the list");
+        assert_eq!(ui.get_current_id(), 7, "{round}: the ring is on the first row");
+        assert!(opened.borrow().is_empty(), "{round}: no menu on the first press");
+        assert!(actions.borrow().is_empty(), "{round}: nothing acted on");
+        press(&ui);
+        assert_eq!(*opened.borrow(), [true, false], "{round}: the second press opens the menu");
+        assert_eq!(ui.get_menu_target(), 7, "{round}: on the highlighted row");
+        press_key(&ui, Key::Escape); // closes the menu
+        press_key(&ui, Key::Escape); // leaves the list
+        assert!(!controls.frozen(), "{round}: Esc leaves the list and live ordering resumes");
+        assert!(actions.borrow().is_empty(), "{round}: nothing acted on");
+        opened.borrow_mut().clear();
+    }
+}
+
+#[test]
+fn shift_f10_with_nothing_focused_highlights_the_list_then_opens_its_menu() {
+    the_menu_key_with_nothing_focused_highlights_first_then_opens(shift_f10);
+}
+
+#[test]
+fn the_menu_key_with_nothing_focused_highlights_the_list_then_opens_its_menu() {
+    the_menu_key_with_nothing_focused_highlights_first_then_opens(menu_key);
+}

@@ -114,11 +114,26 @@ export component MainWindow inherits Window {
     public function park-focus() {
         parking.focus();
     }
+    // Holds keyboard focus whenever no control has it (from startup on, and after Esc in the list):
+    // with no focus at all, Slint drops every key but Tab and Esc.
     parking := FocusScope {
         width: 0px;
         height: 0px;
         focus-on-click: false;
         focus-on-tab-navigation: false;
+        // The menu key (or Shift+F10) with nothing focused only brings the list into focus, ring on
+        // its current row; never a menu for a row the user hasn't seen highlighted (R9-R11). The
+        // next press, now in the list, opens that row's menu.
+        key-pressed(e) => {
+            if ((e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) && root.page == 0 && !root.modal-open) {
+                list.focus-list();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    init => {
+        parking.focus();
     }
 
     HorizontalLayout {
@@ -175,6 +190,7 @@ export component MainWindow inherits Window {
                         current-actionable: root.current-actionable;
                         list-focus(f) => { root.list-focus(f); }
                         list-key(k) => { return root.list-key(k); }
+                        park-focus => { parking.focus(); }
                     }
                     if root.toast != "" : Toast {
                         text: root.toast;

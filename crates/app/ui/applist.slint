@@ -84,6 +84,9 @@ export component AppList inherits VerticalLayout {
     callback list-focus(bool);
     // A key while the list itself has focus; true when it was a navigation key.
     callback list-key(string) -> bool;
+    // Esc in the list: the owner parks keyboard focus (never none at all, so the menu key still
+    // reaches the owner and can bring the list back).
+    callback park-focus();
     spacing: 6px;
 
     // Scrolls so row `i` is fully visible.
@@ -96,6 +99,12 @@ export component AppList inherits VerticalLayout {
         } else if ((i + 1) * root.row-height > -lv.content-y + lv.visible-height) {
             lv.content-y = -((i + 1) * root.row-height - lv.visible-height);
         }
+    }
+
+    // Gives the list keyboard focus: the ring shows on the current row (or the first), and the
+    // list freezes, exactly as when Tab reaches it.
+    public function focus-list() {
+        list-keys.focus();
     }
 
     // The current row's menu from the keyboard (Menu key, Shift+F10) while the list has focus.
@@ -143,7 +152,7 @@ export component AppList inherits VerticalLayout {
                 return reject;
             }
             if (e.text == Key.Escape) {
-                self.clear-focus();
+                root.park-focus();
                 return accept;
             }
             if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
