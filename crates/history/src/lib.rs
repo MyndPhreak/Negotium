@@ -509,10 +509,10 @@ impl History {
         let col = key.and_then(|k| self.columns.get(k));
         let mut best: Option<(usize, f32)> = None;
         for i in start..end {
-            if let Some(v) = col.and_then(|c| c.get(i)).filter(|v| v.is_finite()) {
-                if best.is_none_or(|(_, b)| v > b) {
-                    best = Some((i, v));
-                }
+            if let Some(v) = col.and_then(|c| c.get(i)).filter(|v| v.is_finite())
+                && best.is_none_or(|(_, b)| v > b)
+            {
+                best = Some((i, v));
             }
         }
         Some(self.top_of(best.map_or(end - 1, |(i, _)| i), metric))
