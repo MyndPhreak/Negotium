@@ -2646,6 +2646,7 @@ fn the_graph_clock_runs_from_its_lead_to_the_newest_sample_and_stops_there() {
 #[test]
 fn the_graph_clock_stands_still_with_smooth_graphs_off_hidden_or_on_pages_without_graphs() {
     let ui = shown_window();
+    negotium::smooth::install(&ui, mocked_clock); // a clock that moves, so standing still means something
     let clock = ui.global::<GraphClock>();
     ui.invoke_scroll_from(-1_000.0, 1.0);
     clock.set_smooth(false);
@@ -2655,6 +2656,11 @@ fn the_graph_clock_stands_still_with_smooth_graphs_off_hidden_or_on_pages_withou
     clock.set_shown(false);
     assert_eq!(clock.get_offset_ms(), 0.0, "hidden or minimised: no motion");
     clock.set_shown(true);
+    // The control: on the Overview the same run moves.
+    ui.invoke_scroll_from(-1_000.0, 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1_000));
+    assert!(clock.get_offset_ms() > -1_000.0, "the Overview's sparklines scroll: {}", clock.get_offset_ms());
     ui.set_page(2);
     ui.invoke_scroll_from(-1_000.0, 1.0);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
