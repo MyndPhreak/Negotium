@@ -69,6 +69,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     };
+    // The registry helpers refuse writes outside the test sandbox until the real app unlocks them,
+    // so tests (which never run `main`) can't reach the user's startup entries.
+    negotium_actions::startup::registry::allow_system_writes();
     // Before the worker starts, so the collector and every action see the privilege.
     let elevated = negotium_actions::is_elevated();
     if elevated && let Err(e) = negotium_actions::enable_debug_privilege() {

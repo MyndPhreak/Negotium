@@ -32,6 +32,19 @@ pub enum ActionError {
     Other(String),
 }
 
+/// The bare reason, for log and error lines ("access denied"); `message` builds the sentence
+/// shown to the user.
+impl std::fmt::Display for ActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActionError::AlreadyExited => f.write_str("it already exited"),
+            ActionError::AccessDenied => f.write_str("access denied"),
+            ActionError::Critical => f.write_str("Windows marks the process as critical"),
+            ActionError::Other(detail) => f.write_str(detail),
+        }
+    }
+}
+
 impl ActionError {
     pub fn message(&self, what: &str, elevated: bool) -> String {
         match self {
@@ -149,6 +162,12 @@ mod tests {
         // Not critical, or the flag couldn't be read: proceed (the terminate fails on its own if denied).
         assert_eq!(guard_critical(Some(false)), Ok(()));
         assert_eq!(guard_critical(None), Ok(()));
+    }
+
+    #[test]
+    fn errors_display_as_their_bare_reason() {
+        assert_eq!(ActionError::AccessDenied.to_string(), "access denied");
+        assert_eq!(ActionError::Other("The system cannot find the file specified".into()).to_string(), "The system cannot find the file specified");
     }
 
     #[test]

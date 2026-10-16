@@ -10,6 +10,7 @@ pub use approved::{APPROVED_LEN, encode_approved, filetime_now, is_enabled};
 pub use command::{exe_from_command, expand_env};
 
 use crate::ActionError;
+use command::is_host_program;
 use negotium_collector::VersionInfo;
 use registry::{Hive, RegKey, RegValue};
 
@@ -28,7 +29,10 @@ pub enum StartupSource {
 impl StartupSource {
     /// Changing these entries writes under HKLM: admin only.
     pub fn needs_admin(self) -> bool {
-        matches!(self, StartupSource::MachineRun | StartupSource::MachineRun32)
+        matches!(
+            self,
+            StartupSource::MachineRun | StartupSource::MachineRun32
+        )
     }
 
     pub fn label(self) -> &'static str {
@@ -110,41 +114,79 @@ impl StartupRoots {
 /// The name and publisher shown for a startup program: its version resource's FileDescription and
 /// CompanyName (one read of the resource), else `fallback` and no publisher. Shared by every
 /// source that starts a program file (the Run keys and the Startup folders).
+/// A host program (`rundll32`, `cmd`, `powershell`, …) counts as unknown: its own name and
+/// publisher would hide what it runs.
 fn describe_program(exe: Option<&str>, fallback: &str) -> (String, Option<String>) {
-    let info = exe.and_then(VersionInfo::read);
+    let info = exe
+        .filter(|e| !is_host_program(e))
+        .and_then(VersionInfo::read);
     let info = info.as_ref();
-    let name = info.and_then(|i| i.string("FileDescription")).unwrap_or_else(|| fallback.to_string());
+    let name = info
+        .and_then(|i| i.string("FileDescription"))
+        .unwrap_or_else(|| fallback.to_string());
     (name, info.and_then(|i| i.string("CompanyName")))
 }
 
 /// Enabled unless a StartupApproved value (names compare case-insensitively) says disabled.
 fn enabled_in(states: &[(String, RegValue)], name: &str) -> bool {
-    states.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).and_then(|(_, v)| v.binary()).is_none_or(is_enabled)
+    states
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .and_then(|(_, v)| v.binary())
+        .is_none_or(is_enabled)
 }
 
-fn run_entries(roots: &StartupRoots, source: StartupSource, run: &RegKey) -> Result<Vec<StartupEntry>, ActionError> {
-    let states = registry::values(&roots.approved_key(source))?;
-    Ok(registry::values(run)?
-        .into_iter()
-        .filter(|(name, _)| !name.is_empty())
-        .filter_map(|(name, v)| v.as_str().map(|c| (name, c.to_string())))
-        .map(|(name, command)| {
-            let (display, publisher) = describe_program(exe_from_command(&command, &roots.system_root).as_deref(), &name);
-            StartupEntry {
-                source,
-                name: display,
-                publisher,
-                enabled: enabled_in(&states, &name),
-                changeable: true,
-                command,
-                location: run.display(),
-                key: name,
-            }
-        })
-        .collect())
+/// One Run list's entries. A list that can't be read, an unreadable StartupApproved key (its
+/// entries are then listed as enabled) and a value that isn't a command each add a line to `errors`.
+fn run_entries(
+    roots: &StartupRoots,
+    source: StartupSource,
+    run: &RegKey,
+    errors: &mut Vec<String>,
+) -> Vec<StartupEntry> {
+    let values = match registry::values(run) {
+        Ok(values) => values,
+        Err(e) => {
+            errors.push(format!("Couldn't read {}: {e}", run.display()));
+            return Vec::new();
+        }
+    };
+    let approved = roots.approved_key(source);
+    let states = registry::values(&approved).unwrap_or_else(|e| {
+        errors.push(format!("Couldn't read {}: {e}", approved.display()));
+        Vec::new()
+    });
+    let mut entries = Vec::new();
+    for (name, value) in values {
+        if name.is_empty() {
+            continue; // the key's default value: Windows doesn't start it
+        }
+        let Some(command) = value.as_str().map(str::to_string) else {
+            errors.push(format!(
+                "Skipped {name:?} in {}: it isn't a command",
+                run.display()
+            ));
+            continue;
+        };
+        let (display, publisher) = describe_program(
+            exe_from_command(&command, &roots.system_root).as_deref(),
+            &name,
+        );
+        entries.push(StartupEntry {
+            source,
+            name: display,
+            publisher,
+            enabled: enabled_in(&states, &name),
+            changeable: true,
+            command,
+            location: run.display(),
+            key: name,
+        });
+    }
+    entries
 }
 
-/// Every startup entry, and a readable line for each list that couldn't be read.
+/// Every startup entry, and a readable line for each list or value that couldn't be read.
 pub fn list_startup(roots: &StartupRoots) -> (Vec<StartupEntry>, Vec<String>) {
     let mut entries = Vec::new();
     let mut errors = Vec::new();
@@ -154,10 +196,7 @@ pub fn list_startup(roots: &StartupRoots) -> (Vec<StartupEntry>, Vec<String>) {
         (StartupSource::MachineRun32, &roots.machine_run32),
     ];
     for (source, run) in runs {
-        match run_entries(roots, source, run) {
-            Ok(found) => entries.extend(found),
-            Err(e) => errors.push(format!("startup: {} could not be read ({e:?})", run.display())),
-        }
+        entries.extend(run_entries(roots, source, run, &mut errors));
     }
     (entries, errors)
 }
@@ -165,9 +204,17 @@ pub fn list_startup(roots: &StartupRoots) -> (Vec<StartupEntry>, Vec<String>) {
 /// Enables or disables an entry the way Task Manager does. Writing an HKLM value without admin
 /// fails with `ActionError::AccessDenied` (shown inline with the restart-as-admin hint); any other
 /// write failure is an `ActionError::Other` with Windows' message.
-pub fn set_startup_enabled(roots: &StartupRoots, entry: &StartupEntry, enabled: bool) -> Result<(), ActionError> {
+pub fn set_startup_enabled(
+    roots: &StartupRoots,
+    entry: &StartupEntry,
+    enabled: bool,
+) -> Result<(), ActionError> {
     let key = roots.approved_key(entry.source);
     let previous = registry::value(&key, &entry.key);
-    let bytes = encode_approved(previous.as_ref().and_then(RegValue::binary), enabled, filetime_now());
+    let bytes = encode_approved(
+        previous.as_ref().and_then(RegValue::binary),
+        enabled,
+        filetime_now(),
+    );
     registry::set_binary(&key, &entry.key, &bytes)
 }

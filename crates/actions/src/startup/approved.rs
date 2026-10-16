@@ -13,7 +13,11 @@ pub fn is_enabled(bytes: &[u8]) -> bool {
 
 /// The value to write: `previous`'s other flag bits kept (0x02 when there are none), the low bit
 /// set when disabling together with `now_filetime`, and zeros when enabling.
-pub fn encode_approved(previous: Option<&[u8]>, enabled: bool, now_filetime: u64) -> [u8; APPROVED_LEN] {
+pub fn encode_approved(
+    previous: Option<&[u8]>,
+    enabled: bool,
+    now_filetime: u64,
+) -> [u8; APPROVED_LEN] {
     let old = previous
         .filter(|b| b.len() >= 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -32,7 +36,9 @@ pub fn encode_approved(previous: Option<&[u8]>, enabled: bool, now_filetime: u64
 
 /// The current time as a FILETIME: 100 ns intervals since 1601-01-01 UTC.
 pub fn filetime_now() -> u64 {
-    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     UNIX_EPOCH_AS_FILETIME + (since.as_nanos() / 100) as u64
 }
 
@@ -56,15 +62,32 @@ mod tests {
             encode_approved(None, false, 0x01D9_ABCD_1234_5678),
             [3, 0, 0, 0, 0x78, 0x56, 0x34, 0x12, 0xCD, 0xAB, 0xD9, 0x01]
         );
-        assert_eq!(encode_approved(Some(&[3, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]), true, 99), [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            encode_approved(Some(&[3, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]), true, 99),
+            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]
     fn other_flag_bits_are_kept() {
-        assert_eq!(encode_approved(Some(&[7, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]), true, 5)[..4], [6, 0, 0, 0]);
-        assert_eq!(encode_approved(Some(&[6, 0, 0, 0]), false, 5), [7, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(encode_approved(Some(&[1, 0, 0, 0]), true, 5)[..4], [2, 0, 0, 0], "no other bits: the default");
-        assert_eq!(encode_approved(Some(&[3, 0]), false, 5)[..4], [3, 0, 0, 0], "too short: the default");
+        assert_eq!(
+            encode_approved(Some(&[7, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]), true, 5)[..4],
+            [6, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_approved(Some(&[6, 0, 0, 0]), false, 5),
+            [7, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_approved(Some(&[1, 0, 0, 0]), true, 5)[..4],
+            [2, 0, 0, 0],
+            "no other bits: the default"
+        );
+        assert_eq!(
+            encode_approved(Some(&[3, 0]), false, 5)[..4],
+            [3, 0, 0, 0],
+            "too short: the default"
+        );
     }
 
     #[test]
