@@ -1,0 +1,68 @@
+import { Theme } from "theme.slint";
+import { FocusButton } from "focusbutton.slint";
+
+// One rail entry: a drawn icon (glyphs render as tofu in Segoe UI Variable) over a short label.
+component RailButton inherits FocusButton {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> selected;
+    height: 56px;
+    border-radius: Theme.radius;
+    background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card : transparent);
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.text;
+    accessible-label: root.label + " page";
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    if root.selected : Rectangle {
+        x: 0;
+        y: (parent.height - 16px) / 2;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent;
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+        HorizontalLayout {
+            alignment: center;
+            Path {
+                width: 20px;
+                height: 20px;
+                viewbox-width: 20;
+                viewbox-height: 20;
+                commands: root.icon;
+                stroke: root.selected ? Theme.accent : Theme.text;
+                stroke-width: 1.5px;
+                fill: transparent;
+            }
+        }
+        Text { text: root.label; color: Theme.text; font-size: 10px; horizontal-alignment: center; }
+    }
+}
+
+export component Rail inherits VerticalLayout {
+    in property <int> page;
+    in property <bool> interactive: true;
+    callback select(int);
+    width: 76px;
+    padding: 6px;
+    spacing: 4px;
+    // The buttons keep their fixed height; spare height stays empty below them.
+    alignment: start;
+    RailButton {
+        label: "Overview";
+        icon: "M 2 2 L 8 2 L 8 8 L 2 8 Z M 12 2 L 18 2 L 18 8 L 12 8 Z M 2 12 L 8 12 L 8 18 L 2 18 Z M 12 12 L 18 12 L 18 18 L 12 18 Z";
+        selected: root.page == 0;
+        interactive: root.interactive;
+        activated => { root.select(0); }
+    }
+    RailButton {
+        label: "Performance";
+        icon: "M 1 11 L 5 11 L 8 4 L 12 16 L 15 9 L 19 9";
+        selected: root.page == 1;
+        interactive: root.interactive;
+        activated => { root.select(1); }
+    }
+}

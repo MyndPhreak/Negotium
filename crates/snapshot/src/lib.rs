@@ -92,7 +92,7 @@ impl MemoryTotals {
     /// source for every memory figure shown, so that in use + available = total.
     pub fn in_use(&self) -> u64 {
         match self.lists {
-            Some(l) => self.total.saturating_sub(l.modified + l.standby + l.free),
+            Some(l) => self.total.saturating_sub(l.modified.saturating_add(l.standby).saturating_add(l.free)),
             None => self.used,
         }
     }
@@ -196,6 +196,14 @@ mod tests {
         let g = GpuSample { key: "k".into(), util_pct: f32::NAN, ..Default::default() };
         let back: GpuSample = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
         assert!(back.util_pct.is_nan());
+    }
+
+    #[test]
+    fn in_use_does_not_overflow_on_absurd_page_lists() {
+        let lists = MemoryLists { modified: u64::MAX, standby: u64::MAX, free: 1 };
+        let m = MemoryTotals { total: 16 << 30, lists: Some(lists), ..Default::default() };
+        assert_eq!(m.in_use(), 0);
+        assert_eq!(m.available(), 16 << 30);
     }
 
     #[test]

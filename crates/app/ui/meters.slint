@@ -1,36 +1,19 @@
 import { Theme } from "theme.slint";
+import { FocusButton } from "focusbutton.slint";
 
 export struct MeterData { label: string, value: string, sub: string, spark: string, available: bool }
 
-component Meter inherits Rectangle {
+component Meter inherits FocusButton {
     in property <MeterData> data;
     in property <bool> selected;
-    in property <bool> interactive: true;
-    callback activated();
     min-width: 96px;
     border-radius: Theme.radius;
     background: selected ? Theme.accent.with-alpha(0.18) : Theme.card;
-    border-width: fs.has-focus ? 2px : 1px;
-    border-color: fs.has-focus ? Theme.text : (selected ? Theme.accent : Theme.card-border);
-    accessible-role: button;
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.text : (selected ? Theme.accent : Theme.card-border);
     accessible-label: data.label + " meter";
     accessible-checkable: true;
     accessible-checked: root.selected;
-    accessible-action-default => { root.activated(); }
-    fs := FocusScope {
-        enabled: root.interactive;
-        key-pressed(event) => {
-            if (event.text == " " || event.text == Key.Return) {
-                root.activated();
-                return accept;
-            }
-            return reject;
-        }
-    }
-    TouchArea {
-        enabled: root.interactive;
-        clicked => { fs.focus(); root.activated(); }
-    }
     VerticalLayout {
         padding: 10px;
         spacing: 2px;
@@ -57,6 +40,9 @@ export component MetersRow inherits HorizontalLayout {
     // An empty repeater derives a maximum width below the window's min-width, which clamped the
     // window to min-width and made it ignore preferred-width. An explicit cap overrides that.
     max-width: 16384px;
+    // Natural height only: spare window height goes to the app list. Without this the meters
+    // soaked it up once the top strip filled, growing a second after the app opened.
+    vertical-stretch: 0;
     spacing: 8px;
     for m[i] in meters : Meter {
         data: m;

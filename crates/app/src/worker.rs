@@ -1,8 +1,9 @@
 //! The supervised worker: one thread owns Collector -> Model -> Ranker -> History and emits
 //! Frames. A panic anywhere in a tick rebuilds the pipeline after a backoff (spec section 7).
-use crate::controls::Controls;
+use crate::controls::{Controls, Page};
+use crate::perf::{PerfInput, build_perf};
 use crate::view::{Frame, FrameOptions, IdMap, build_frame};
-use negotium_collector::Collector;
+use negotium_collector::{Collector, SystemInfo};
 use negotium_history::History;
 use negotium_model::{Model, Ranker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -78,6 +79,7 @@ pub fn supervise<S: Source, M: Fn() -> S>(
 
 pub struct LiveSource {
     collector: Collector,
+    info: SystemInfo,
     model: Model,
     ranker: Ranker,
     history: History,
@@ -88,8 +90,11 @@ pub struct LiveSource {
 
 impl LiveSource {
     pub fn new() -> Self {
+        let collector = Collector::new();
+        let info = collector.system_info().clone();
         Self {
-            collector: Collector::new(),
+            collector,
+            info,
             model: Model::new(),
             ranker: Ranker::new(),
             history: History::new(),
@@ -117,11 +122,21 @@ impl Source for LiveSource {
         if !controls.visible() {
             return None;
         }
-        let metric = controls.metric();
-        let order = self.ranker.order(&rows, metric, snap.taken_at_ms, controls.frozen());
-        let (expanded, all_children) = controls.child_rows();
-        let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children };
-        Some(build_frame(&mut self.ids, &snap, &rows, &order, &self.history, &opts))
+        // Only the page on screen is built (spec section 8).
+        match controls.page() {
+            Page::Overview => {
+                let metric = controls.metric();
+                let order = self.ranker.order(&rows, metric, snap.taken_at_ms, controls.frozen());
+                let (expanded, all_children) = controls.child_rows();
+                let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children };
+                Some(build_frame(&mut self.ids, &snap, &rows, &order, &self.history, &opts))
+            }
+            Page::Performance => {
+                let (device, range) = controls.perf();
+                let input = PerfInput { snap: &snap, history: &self.history, info: &self.info, device: &device, range };
+                Some(Frame { page: Page::Performance, perf: Some(build_perf(&input)), ..Default::default() })
+            }
+        }
     }
 }
 
@@ -173,6 +188,41 @@ mod tests {
             }
             Some(Frame::default())
         }
+    }
+
+    #[test]
+    fn only_the_visible_page_is_built_while_collection_keeps_running() {
+        use crate::controls::Page;
+        let mut source = LiveSource::new();
+        let dir = std::env::temp_dir().join(format!("negotium-worker-test-{}", std::process::id()));
+        source.log = crate::log::Log::new(dir.join("negotium.log"));
+        let controls = Controls::default();
+
+        let f = source.next_frame(&controls).expect("visible: a frame");
+        assert_eq!(f.page, Page::Overview);
+        assert!(!f.meters.is_empty() && !f.rows.is_empty(), "the Overview is built");
+        assert!(f.perf.is_none(), "no Performance view while the Overview shows");
+
+        controls.set_page(Page::Performance);
+        let f = source.next_frame(&controls).expect("visible: a frame");
+        assert_eq!(f.page, Page::Performance);
+        let perf = f.perf.expect("the Performance view is built");
+        assert_eq!(perf.selected, "cpu");
+        assert!(f.meters.is_empty() && f.tiles.is_empty() && f.rows.is_empty() && f.targets.is_empty(),
+            "no Overview view while Performance shows");
+
+        controls.set_visible(false);
+        let before = source.history.len();
+        // History keeps one sample per MIN_SPACING_MS: wait so this tick's sample is kept.
+        std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
+        assert!(source.next_frame(&controls).is_none(), "nothing is built while hidden in the tray");
+        assert!(source.history.len() > before, "collection and history keep running while hidden");
+
+        controls.set_visible(true);
+        controls.set_page(Page::Overview);
+        let f = source.next_frame(&controls).expect("visible again");
+        assert!(f.perf.is_none() && !f.rows.is_empty(), "switching back stops building Performance");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

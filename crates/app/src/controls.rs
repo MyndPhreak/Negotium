@@ -1,12 +1,37 @@
 //! State shared between the UI thread (writes) and the worker (reads).
+use crate::perf::Range;
 use negotium_model::Metric;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
+/// Which page the window shows; the worker builds only that page's view.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Page {
+    #[default]
+    Overview = 0,
+    Performance = 1,
+}
+
+impl Page {
+    pub const ALL: [Page; 2] = [Page::Overview, Page::Performance];
+
+    pub fn from_index(i: i32) -> Page {
+        Self::ALL[(i.max(0) as usize).min(Self::ALL.len() - 1)]
+    }
+
+    pub fn index(self) -> i32 {
+        self as i32
+    }
+}
+
 pub struct Controls {
     metric: AtomicU8,
+    page: AtomicU8,
+    /// Selected Performance device id and graph range.
+    perf: Mutex<(String, Range)>,
     frozen: AtomicBool,
     visible: AtomicBool,
     stop: AtomicBool,
@@ -23,6 +48,8 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             metric: AtomicU8::new(0),
+            page: AtomicU8::new(Page::Overview as u8),
+            perf: Mutex::new(("cpu".to_string(), Range::Minute)),
             frozen: AtomicBool::new(false),
             visible: AtomicBool::new(true),
             stop: AtomicBool::new(false),
@@ -40,6 +67,28 @@ impl Controls {
     }
     pub fn metric(&self) -> Metric {
         Metric::ALL[(self.metric.load(Ordering::Relaxed) as usize).min(Metric::ALL.len() - 1)]
+    }
+    pub fn set_page(&self, p: Page) {
+        self.page.store(p as u8, Ordering::Relaxed);
+        self.poke();
+    }
+    pub fn page(&self) -> Page {
+        Page::from_index(self.page.load(Ordering::Relaxed) as i32)
+    }
+    pub fn select_device(&self, id: &str) {
+        self.perf.lock().unwrap_or_else(|e| e.into_inner()).0 = id.to_string();
+        self.poke();
+    }
+    /// Records the device a frame fell back to; the frame is already on screen, so no wakeup.
+    pub fn adopt_device(&self, id: &str) {
+        self.perf.lock().unwrap_or_else(|e| e.into_inner()).0 = id.to_string();
+    }
+    pub fn set_range(&self, r: Range) {
+        self.perf.lock().unwrap_or_else(|e| e.into_inner()).1 = r;
+        self.poke();
+    }
+    pub fn perf(&self) -> (String, Range) {
+        self.perf.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
     pub fn set_frozen(&self, f: bool) {
         self.frozen.store(f, Ordering::Relaxed);
@@ -139,6 +188,27 @@ mod tests {
         c.set_child_rows(&HashSet::new(), true);
         assert!(c.wait(Duration::from_millis(20)), "starting a search needs every app's children");
         assert_eq!(c.child_rows(), (HashSet::new(), true));
+    }
+
+    #[test]
+    fn page_and_performance_selection_are_shared_and_wake_the_worker() {
+        use crate::perf::Range;
+        let c = Controls::default();
+        assert_eq!(c.page(), Page::Overview);
+        assert_eq!(c.perf(), ("cpu".to_string(), Range::Minute));
+        c.set_page(Page::Performance);
+        assert!(c.wait(Duration::from_millis(20)));
+        assert_eq!(c.page(), Page::Performance);
+        c.select_device("memory");
+        assert!(c.wait(Duration::from_millis(20)));
+        c.set_range(Range::Hour);
+        assert!(c.wait(Duration::from_millis(20)));
+        assert_eq!(c.perf(), ("memory".to_string(), Range::Hour));
+        c.adopt_device("cpu");
+        assert!(!c.wait(Duration::from_millis(20)), "a fallback adopted from a frame needs no new frame");
+        assert_eq!(c.perf().0, "cpu");
+        assert_eq!(Page::from_index(9), Page::Performance);
+        assert_eq!(Page::from_index(-2), Page::Overview);
     }
 
     #[test]

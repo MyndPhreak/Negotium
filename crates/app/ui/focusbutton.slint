@@ -1,0 +1,25 @@
+// The one focusable button behaviour shared by meters, rail items and device buttons: button
+// semantics, a click focuses and activates, Space or Return activates, and the screen reader's
+// default action activates. Each user draws its own look from `focused` and `hovered`.
+export component FocusButton inherits Rectangle {
+    in property <bool> interactive: true;
+    out property <bool> focused: fs.has-focus;
+    out property <bool> hovered: ta.has-hover;
+    callback activated();
+    accessible-role: button;
+    accessible-action-default => { root.activated(); }
+    fs := FocusScope {
+        enabled: root.interactive;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == Key.Return) {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.interactive;
+        clicked => { fs.focus(); root.activated(); }
+    }
+}

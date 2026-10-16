@@ -1,0 +1,74 @@
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { FocusButton } from "focusbutton.slint";
+
+export struct DeviceData { id: string, title: string, value: string, spark: string }
+
+component DeviceButton inherits FocusButton {
+    in property <DeviceData> data;
+    in property <bool> selected;
+    height: 60px;
+    border-radius: Theme.radius;
+    background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card : transparent);
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.text;
+    accessible-label: root.data.title + " performance";
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 10px;
+        Rectangle {
+            width: 56px;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            Path {
+                width: parent.width;
+                height: parent.height;
+                viewbox-width: 1000;
+                viewbox-height: 100;
+                commands: root.data.spark;
+                stroke: Theme.accent;
+                stroke-width: 1.5px;
+                fill: transparent;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Text { text: root.data.title; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+            Text { text: root.data.value; color: Theme.muted; font-size: 11px; overflow: elide; }
+        }
+    }
+}
+
+export component PerformancePage inherits HorizontalLayout {
+    in property <[DeviceData]> devices;
+    in property <string> selected;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> interactive: true;
+    callback select-device(string);
+    max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+    padding: 12px;
+    spacing: 12px;
+    ListView {
+        width: 220px;
+        for d in root.devices : DeviceButton {
+            data: d;
+            selected: d.id == root.selected;
+            interactive: root.interactive;
+            activated => { root.select-device(d.id); }
+        }
+    }
+    // The detail area takes its natural height at the top; spare height stays empty below it.
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: start;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: root.title; color: Theme.text; font-size: 24px; font-weight: 600; }
+            Text { text: root.subtitle; color: Theme.muted; font-size: 13px; vertical-alignment: bottom; overflow: elide; horizontal-stretch: 1; }
+        }
+    }
+}

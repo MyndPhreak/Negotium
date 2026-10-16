@@ -3,8 +3,10 @@ import { MetersRow, MeterData } from "meters.slint";
 import { TopStrip, TileData } from "topstrip.slint";
 import { AppList, RowData } from "applist.slint";
 import { Banner, Toast, Modal } from "overlays.slint";
+import { Rail } from "rail.slint";
+import { PerformancePage, DeviceData } from "perfpage.slint";
 export { NegotiumTray } from "tray.slint";
-export { Theme, MeterData, TileData, RowData }
+export { Theme, MeterData, TileData, RowData, DeviceData }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -16,6 +18,8 @@ export component MainWindow inherits Window {
     default-font-family: "Segoe UI Variable Text";
     background: Theme.window-bg;
 
+    // Page shown: 0 Overview, 1 Performance (crate::controls::Page).
+    in-out property <int> page: 0;
     in property <[MeterData]> meters;
     in property <int> selected-metric;
     in property <[TileData]> tiles;
@@ -28,9 +32,14 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm-visible;
     in-out property <string> details-text;
     in-out property <bool> details-visible;
+    in property <[DeviceData]> perf-devices;
+    in-out property <string> perf-selected: "cpu";
+    in property <string> perf-title;
+    in property <string> perf-subtitle;
     out property <bool> modal-open: confirm-visible || details-visible;
     out property <int> menu-target: list.menu-target;
 
+    callback select-page(int);
     callback select-metric(int);
     callback open-tile(int);
     callback toggle-row(int);
@@ -45,6 +54,7 @@ export component MainWindow inherits Window {
     callback confirm(bool);
     callback close-details();
     callback dismiss-toast();
+    callback select-device(string);
 
     // has-hover only re-evaluates on the next pointer event, so release the list freeze explicitly
     // when a modal opens and re-evaluate it when the modal closes.
@@ -77,44 +87,78 @@ export component MainWindow inherits Window {
         focus-on-tab-navigation: false;
     }
 
-    VerticalLayout {
-        padding: 12px;
-        spacing: 10px;
-        if root.show-admin-banner : Banner {
+    HorizontalLayout {
+        Rail {
+            page: root.page;
             interactive: !root.modal-open;
-            restart => { root.restart-admin(); }
-            dismiss => { root.dismiss-banner(); }
+            select(p) => { root.select-page(p); }
         }
-        MetersRow {
-            meters: root.meters;
-            selected: root.selected-metric;
-            interactive: !root.modal-open;
-            select(i) => { root.select-metric(i); }
-        }
-        TopStrip {
-            tiles: root.tiles;
-            caption: root.top-caption;
-            interactive: !root.modal-open;
-            // Opening a tile clears the filter, so the box must be emptied together with it.
-            open(id) => { root.search-text = ""; root.open-tile(id); }
-        }
-        list := AppList {
-            vertical-stretch: 1;
-            rows: root.rows;
-            metric: root.selected-metric;
-            search-text <=> root.search-text;
-            interactive: !root.modal-open;
-            toggle(id) => { root.toggle-row(id); }
-            action(name, id) => { root.row-action(name, id); }
-            hover(h) => { root.list-hover(h); }
-            menu-open(open) => { root.menu-open(open); }
-            row-focus(id, focused) => { root.row-key-focus(id, focused); }
-            search(text) => { root.search-changed(text); }
-        }
-        if root.toast != "" : Toast {
-            text: root.toast;
-            interactive: !root.modal-open;
-            dismiss => { root.dismiss-toast(); }
+        // Pages are stacked, not laid out (an invisible element still takes layout space): a hidden
+        // page keeps its state (scroll position, search text, selection) and gets no input.
+        Rectangle {
+            horizontal-stretch: 1;
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 0;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+                    if root.show-admin-banner : Banner {
+                        interactive: !root.modal-open;
+                        restart => { root.restart-admin(); }
+                        dismiss => { root.dismiss-banner(); }
+                    }
+                    MetersRow {
+                        meters: root.meters;
+                        selected: root.selected-metric;
+                        interactive: !root.modal-open;
+                        select(i) => { root.select-metric(i); }
+                    }
+                    TopStrip {
+                        tiles: root.tiles;
+                        caption: root.top-caption;
+                        interactive: !root.modal-open;
+                        // Opening a tile clears the filter, so the box must be emptied together with it.
+                        open(id) => { root.search-text = ""; root.open-tile(id); }
+                    }
+                    list := AppList {
+                        vertical-stretch: 1;
+                        rows: root.rows;
+                        metric: root.selected-metric;
+                        search-text <=> root.search-text;
+                        interactive: !root.modal-open;
+                        toggle(id) => { root.toggle-row(id); }
+                        action(name, id) => { root.row-action(name, id); }
+                        hover(h) => { root.list-hover(h); }
+                        menu-open(open) => { root.menu-open(open); }
+                        row-focus(id, focused) => { root.row-key-focus(id, focused); }
+                        search(text) => { root.search-changed(text); }
+                    }
+                    if root.toast != "" : Toast {
+                        text: root.toast;
+                        interactive: !root.modal-open;
+                        dismiss => { root.dismiss-toast(); }
+                    }
+                }
+            }
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 1;
+                PerformancePage {
+                    devices: root.perf-devices;
+                    selected: root.perf-selected;
+                    title: root.perf-title;
+                    subtitle: root.perf-subtitle;
+                    interactive: !root.modal-open;
+                    select-device(id) => { root.select-device(id); }
+                }
+            }
         }
     }
     if root.confirm-visible : Modal {

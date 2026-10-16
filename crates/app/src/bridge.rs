@@ -1,8 +1,9 @@
 //! UI-thread glue: applies worker Frames to Slint models in place and keeps
 //! expand/search state local so they react instantly. No Windows calls here.
-use crate::controls::Controls;
+use crate::controls::{Controls, Page};
+use crate::perf::PerfFrame;
 use crate::view::{Frame, RowView, Target, visible_rows};
-use crate::{MainWindow, MeterData, RowData, TileData};
+use crate::{DeviceData, MainWindow, MeterData, RowData, TileData};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -165,6 +166,9 @@ pub struct Bridge {
     meters: Rc<VecModel<MeterData>>,
     tiles: Rc<VecModel<TileData>>,
     rows: Rc<VecModel<RowData>>,
+    perf_devices: Rc<VecModel<DeviceData>>,
+    /// The Performance frame on screen (the scrub reads its graph window).
+    pub last_perf: Option<PerfFrame>,
     expanded: HashSet<i32>,
     /// Groups expanded automatically for their current hang (see `auto_expand_hung_groups`).
     auto_expanded: HashSet<i32>,
@@ -188,6 +192,8 @@ impl Bridge {
             meters: Rc::new(VecModel::default()),
             tiles: Rc::new(VecModel::default()),
             rows: Rc::new(VecModel::default()),
+            perf_devices: Rc::new(VecModel::default()),
+            last_perf: None,
             expanded: HashSet::new(),
             auto_expanded: HashSet::new(),
             search: String::new(),
@@ -204,10 +210,43 @@ impl Bridge {
         ui.set_meters(ModelRc::from(b.meters.clone()));
         ui.set_tiles(ModelRc::from(b.tiles.clone()));
         ui.set_rows(ModelRc::from(b.rows.clone()));
+        ui.set_perf_devices(ModelRc::from(b.perf_devices.clone()));
         Rc::new(RefCell::new(b))
     }
 
     pub fn apply(&mut self, ui: &MainWindow, frame: Frame) {
+        // Built for a page the user has since left: the next frame is already on its way.
+        if frame.page != self.controls.page() {
+            return;
+        }
+        match frame.page {
+            Page::Overview => self.apply_overview(ui, frame),
+            Page::Performance => {
+                if let Some(perf) = frame.perf {
+                    self.apply_perf(ui, perf);
+                }
+            }
+        }
+    }
+
+    fn apply_perf(&mut self, ui: &MainWindow, p: PerfFrame) {
+        let (device, range) = self.controls.perf();
+        if p.requested != device || p.range != range {
+            return; // asked for before the user picked another device or range
+        }
+        if p.selected != device {
+            self.controls.adopt_device(&p.selected); // that device is gone: CPU stands in, and stays
+        }
+        sync_model(&*self.perf_devices, p.devices.iter().map(|d| DeviceData {
+            id: d.id.as_str().into(), title: d.title.as_str().into(), value: d.value.as_str().into(), spark: d.spark.as_str().into(),
+        }).collect());
+        ui.set_perf_selected(p.selected.as_str().into());
+        ui.set_perf_title(p.title.as_str().into());
+        ui.set_perf_subtitle(p.subtitle.as_str().into());
+        self.last_perf = Some(p);
+    }
+
+    fn apply_overview(&mut self, ui: &MainWindow, frame: Frame) {
         sync_model(&*self.meters, frame.meters.iter().map(|m| MeterData {
             label: m.label.into(), value: m.value.clone().into(), sub: m.sub.clone().into(), spark: m.spark.clone().into(), available: m.available,
         }).collect());

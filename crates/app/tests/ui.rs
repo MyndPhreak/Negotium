@@ -1,4 +1,7 @@
 use i_slint_backend_testing::ElementHandle;
+use negotium::DeviceData;
+use negotium::controls::Page;
+use negotium::perf::{DeviceView, PerfFrame};
 use negotium::{MainWindow, MeterData, RowData};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::cell::RefCell;
@@ -509,4 +512,119 @@ fn a_key_pressed_inside_a_row_reasserts_a_missed_keyboard_freeze() {
     assert!(!controls.frozen());
     key(&ui, slint::platform::Key::Shift); // e.g. the start of Shift+F10, or Space
     assert!(controls.frozen(), "the capture phase re-freezes before the key acts");
+}
+
+// ---- Plan 3a: layout ----
+
+#[test]
+fn the_meters_do_not_grow_when_the_first_tiles_and_rows_arrive() {
+    // The real app shows the window at its preferred size with meters only; the top-5 tiles and
+    // the rows come a tick later. Spare height must go to the list from the first frame on, or
+    // the meter cards visibly grow (110 -> 303 px) a second after the app opens.
+    let filled = window(); // initialises the backend; lends its meters and rows
+    let ui = MainWindow::new().unwrap();
+    ui.set_meters(filled.get_meters());
+    ui.show().unwrap();
+    let measure = || {
+        let cpu = El::find_by_accessible_label(&ui, "CPU meter").next().expect("cpu meter");
+        let search = El::find_by_accessible_label(&ui, "Search apps and processes").next().expect("search box");
+        (cpu.size().height, search.absolute_position().y)
+    };
+    let (meter_h, search_y) = measure();
+    let tiles: Vec<negotium::TileData> = (0..5)
+        .map(|i| negotium::TileData { id: i, name: format!("App {i}").into(), value: "5%".into(), weight: 1.0, hung: false })
+        .collect();
+    ui.set_tiles(ModelRc::new(VecModel::from(tiles)));
+    ui.set_top_caption("Top CPU users".into());
+    ui.set_rows(filled.get_rows());
+    let (meter_h2, search_y2) = measure();
+    assert_eq!((meter_h2, search_y2), (meter_h, search_y), "meter height and search box position stay put");
+    assert!(meter_h < 130.0, "the meters keep their natural height: {meter_h}");
+    let rail = El::find_by_accessible_label(&ui, "Performance page").next().expect("rail item");
+    assert_eq!(rail.size().height, 56.0, "the rail gives no spare height to its buttons");
+}
+
+// ---- Plan 3a: pages ----
+
+#[test]
+fn the_rail_switches_pages() {
+    let ui = window();
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_select_page(move |i| *p.borrow_mut() = Some(i));
+    let perf = El::find_by_accessible_label(&ui, "Performance page").next().expect("rail item");
+    assert_eq!(perf.accessible_checked(), Some(false));
+    perf.invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(1));
+    ui.set_page(1);
+    assert_eq!(perf.accessible_checked(), Some(true));
+    let overview = El::find_by_accessible_label(&ui, "Overview page").next().expect("rail item");
+    assert_eq!(overview.accessible_checked(), Some(false));
+}
+
+fn device(id: &str, title: &str) -> DeviceData {
+    DeviceData { id: id.into(), title: title.into(), value: "1%".into(), spark: "M 0 100".into() }
+}
+
+#[test]
+fn clicking_a_device_selects_it() {
+    let ui = shown_window();
+    ui.set_page(1);
+    ui.set_perf_devices(ModelRc::new(VecModel::from(vec![device("cpu", "CPU"), device("memory", "Memory")])));
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_select_device(move |id| *p.borrow_mut() = Some(id.to_string()));
+    let memory = El::find_by_accessible_label(&ui, "Memory performance").next().expect("device button");
+    assert_eq!(memory.size().height, 60.0, "the device list gives no spare height to its buttons");
+    memory.invoke_accessible_default_action();
+    assert_eq!(picked.borrow().as_deref(), Some("memory"));
+    ui.set_perf_selected("memory".into());
+    assert_eq!(memory.accessible_checked(), Some(true));
+}
+
+fn perf_frame(requested: &str, selected: &str) -> Frame {
+    let devices = vec![
+        DeviceView { id: "cpu".into(), title: "CPU".into(), ..Default::default() },
+        DeviceView { id: "memory".into(), title: "Memory".into(), ..Default::default() },
+    ];
+    let title = if selected == "cpu" { "CPU" } else { "Memory" };
+    let perf = PerfFrame { devices, requested: requested.into(), selected: selected.into(), title: title.into(), ..Default::default() };
+    Frame { page: Page::Performance, perf: Some(perf), ..Default::default() }
+}
+
+#[test]
+fn performance_frames_fill_the_page_and_leave_the_app_list_alone() {
+    use slint::Model;
+    let (ui, controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, frame(vec![row_view(1, "Editor", ""), row_view(2, "Browser", "")]));
+    controls.set_page(Page::Performance);
+    b.apply(&ui, perf_frame("cpu", "cpu"));
+    assert_eq!(shown_ids(&ui), [1, 2], "the hidden Overview keeps its rows");
+    assert_eq!(ui.get_perf_title(), "CPU");
+    assert_eq!(ui.get_perf_devices().row_count(), 2);
+    assert_eq!(ui.get_perf_selected(), "cpu");
+}
+
+#[test]
+fn a_frame_for_another_page_or_device_is_dropped() {
+    let (ui, controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    controls.set_page(Page::Performance);
+    controls.select_device("memory");
+    b.apply(&ui, perf_frame("cpu", "cpu")); // built just before the click on Memory
+    assert_eq!(ui.get_perf_title(), "", "a stale device's frame is not shown");
+    b.apply(&ui, frame(vec![row_view(1, "Editor", "")])); // an Overview frame while Performance shows
+    assert!(shown_ids(&ui).is_empty());
+}
+
+#[test]
+fn a_vanished_device_falls_back_to_cpu_and_the_fallback_sticks() {
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Performance);
+    controls.select_device("disk:2 F:");
+    bridge.borrow_mut().apply(&ui, perf_frame("disk:2 F:", "cpu"));
+    assert_eq!(ui.get_perf_selected(), "cpu");
+    assert_eq!(ui.get_perf_title(), "CPU");
+    assert_eq!(controls.perf().0, "cpu", "a re-plugged disk doesn't snatch the page back");
 }

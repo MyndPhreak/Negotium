@@ -120,6 +120,29 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    {
+        let (controls, weak, b) = (controls.clone(), weak.clone(), bridge.clone());
+        ui.on_select_page(move |i| {
+            let page = negotium::controls::Page::from_index(i);
+            controls.set_page(page);
+            if page != negotium::controls::Page::Overview {
+                // The hidden list can't report pointer-leave: release the hover freeze here.
+                b.borrow_mut().set_hover(false);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_page(page.index());
+            }
+        });
+    }
+    {
+        let (controls, weak) = (controls.clone(), weak.clone());
+        ui.on_select_device(move |id| {
+            controls.select_device(&id);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_perf_selected(id);
+            }
+        });
+    }
     // The list freezes (rows keep their index) while the pointer is over it or a row menu is open.
     {
         let b = bridge.clone();

@@ -48,6 +48,9 @@ pub struct Frame {
     pub targets: HashMap<i32, Target>,
     pub all_procs: Vec<(u32, i64, u32)>,
     pub admin_banner: bool,
+    /// The page this frame was built for; only that page's fields are filled.
+    pub page: crate::controls::Page,
+    pub perf: Option<crate::perf::PerfFrame>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -122,7 +125,9 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     let now = snap.taken_at_ms;
     let since = now.saturating_sub(span);
     let spark = |key: Series, max: f32| graph::line(history.points(&key, since), now, span, max, SPARK_SECONDS as usize);
-    let mem_total = t.memory.as_ref().map(|m| m.total as f32).unwrap_or(0.0);
+    // A zero total is no reading (as on the Memory page): "Unavailable", never 100% in use.
+    let memory = t.memory.as_ref().filter(|m| m.total > 0);
+    let mem_total = memory.map(|m| m.total as f32).unwrap_or(0.0);
     let net_max = history.points(&Series::NetTotal, since).filter_map(|(_, v)| v).fold(0.0f32, f32::max).max(t.net_bps.unwrap_or(0.0) as f32);
     vec![
         MeterView {
@@ -134,10 +139,10 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
         },
         MeterView {
             label: "Memory",
-            value: t.memory.as_ref().map(|m| format::pct(m.in_use() as f32 / m.total.max(1) as f32 * 100.0)).unwrap_or_default(),
-            sub: t.memory.as_ref().map(|m| format::gb_of(m.in_use(), m.total)).unwrap_or_default(),
+            value: memory.map(|m| format::pct(m.in_use() as f32 / m.total as f32 * 100.0)).unwrap_or_default(),
+            sub: memory.map(|m| format::gb_of(m.in_use(), m.total)).unwrap_or_default(),
             spark: spark(Series::MemUsed, mem_total),
-            available: t.memory.is_some(),
+            available: memory.is_some(),
         },
         MeterView {
             label: "Disk",
@@ -271,7 +276,17 @@ pub fn build_frame(
 
     let all_procs = snap.processes.iter().map(|p| (p.pid, p.create_time, p.parent_pid)).collect();
     let admin_banner = !elevated && snap.processes.iter().any(|p| p.pid > 4 && p.image_path.is_none());
-    Frame { meters: meters(snap, history), tiles, caption: caption(metric).to_string(), rows: out_rows, targets, all_procs, admin_banner }
+    Frame {
+        meters: meters(snap, history),
+        tiles,
+        caption: caption(metric).to_string(),
+        rows: out_rows,
+        targets,
+        all_procs,
+        admin_banner,
+        page: crate::controls::Page::Overview,
+        perf: None,
+    }
 }
 
 pub fn visible_rows(rows: &[RowView], expanded: &HashSet<i32>, search: &str) -> Vec<RowView> {
@@ -346,6 +361,14 @@ mod tests {
         s.totals.gpus = Some(vec![gpu("unknown", f32::NAN, 90.0), gpu("known", 0.0, 55.0)]);
         let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "55 °C", "unknown utilization never beats a known one");
+    }
+
+    #[test]
+    fn a_memory_total_of_zero_shows_the_meter_unavailable() {
+        let mut s = snap(Some(1.0));
+        s.totals.memory = Some(MemoryTotals::default());
+        let f = build_frame(&mut IdMap::new(), &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
+        assert!(!f.meters[1].available, "total 0 is unknown, not 100% in use: {:?}", f.meters[1]);
     }
 
     #[test]

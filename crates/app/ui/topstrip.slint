@@ -7,6 +7,7 @@ export component TopStrip inherits VerticalLayout {
     in property <string> caption;
     in property <bool> interactive: true;
     callback open(int);
+    vertical-stretch: 0; // see MetersRow: spare height belongs to the app list
     spacing: 4px;
     Text { text: caption; color: Theme.muted; font-size: 11px; }
     HorizontalLayout {
