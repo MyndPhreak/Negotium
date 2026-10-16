@@ -18,7 +18,9 @@ pub use terminate::{end_many, end_process};
 use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBreakOnTermination};
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,
+};
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -29,6 +31,8 @@ pub enum ActionError {
     AccessDenied,
     /// Windows flags the process BreakOnTermination: ending it bugchecks the machine.
     Critical,
+    /// The user declined a prompt (ERROR_CANCELLED), such as the UAC prompt.
+    Cancelled,
     Other(String),
 }
 
@@ -40,6 +44,7 @@ impl std::fmt::Display for ActionError {
             ActionError::AlreadyExited => f.write_str("it already exited"),
             ActionError::AccessDenied => f.write_str("access denied"),
             ActionError::Critical => f.write_str("Windows marks the process as critical"),
+            ActionError::Cancelled => f.write_str("it was cancelled"),
             ActionError::Other(detail) => f.write_str(detail),
         }
     }
@@ -56,6 +61,7 @@ impl ActionError {
             ActionError::Critical => {
                 "Windows marks this process as critical \u{2014} ending it would crash the PC.".to_string()
             }
+            ActionError::Cancelled => format!("Couldn't change {what}: it was cancelled."),
             ActionError::Other(detail) => format!("Couldn't change {what}: {detail}."),
         }
     }
@@ -66,6 +72,8 @@ impl ActionError {
             ActionError::AccessDenied
         } else if code == ERROR_INVALID_PARAMETER.to_hresult() {
             ActionError::AlreadyExited
+        } else if code == ERROR_CANCELLED.to_hresult() {
+            ActionError::Cancelled
         } else {
             ActionError::Other(e.message().trim().to_string())
         }
@@ -168,6 +176,15 @@ mod tests {
     fn errors_display_as_their_bare_reason() {
         assert_eq!(ActionError::AccessDenied.to_string(), "access denied");
         assert_eq!(ActionError::Other("The system cannot find the file specified".into()).to_string(), "The system cannot find the file specified");
+    }
+
+    #[test]
+    fn a_cancelled_prompt_is_told_apart_from_other_failures() {
+        use windows::Win32::Foundation::ERROR_CANCELLED;
+        let cancelled = windows::core::Error::from(ERROR_CANCELLED.to_hresult());
+        assert_eq!(ActionError::from_win(&cancelled), ActionError::Cancelled);
+        assert_eq!(ActionError::Cancelled.to_string(), "it was cancelled");
+        assert_eq!(ActionError::Cancelled.message("Zoom", false), "Couldn't change Zoom: it was cancelled.");
     }
 
     #[test]

@@ -85,6 +85,7 @@ pub fn end_summary(name: &str, total: usize, failures: &[ActionError], elevated:
         ActionError::AccessDenied => "access denied".to_string(),
         ActionError::AlreadyExited => "already exited".to_string(),
         ActionError::Critical => "Windows marks it as critical".to_string(),
+        ActionError::Cancelled => "cancelled".to_string(),
         ActionError::Other(detail) => detail.trim_end_matches('.').to_string(),
     };
     let failed = failures.len();

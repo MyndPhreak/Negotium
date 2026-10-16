@@ -55,6 +55,15 @@ pub fn restart_args(page: Page) -> String {
     format!("--restarted --page={}", page.name())
 }
 
+/// The toast after a failed restart as admin: declining the UAC prompt (ERROR_CANCELLED) is a
+/// cancel; anything else says what went wrong.
+pub fn restart_failure_text(e: &negotium_actions::ActionError) -> String {
+    match e {
+        negotium_actions::ActionError::Cancelled => "Restart as admin was cancelled.".to_string(),
+        other => format!("Couldn't restart as admin: {}.", other.to_string().trim_end_matches('.')),
+    }
+}
+
 /// The page asked for with `--page=<name>`, if any. An unknown name asks for none (the Overview).
 pub fn page_from_args<I: IntoIterator<Item = String>>(args: I) -> Option<Page> {
     args.into_iter().find_map(|a| a.strip_prefix("--page=").and_then(Page::from_name))
@@ -201,6 +210,17 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_failed_restart_as_admin_says_why() {
+        use negotium_actions::ActionError;
+        assert_eq!(restart_failure_text(&ActionError::Cancelled), "Restart as admin was cancelled.");
+        assert_eq!(
+            restart_failure_text(&ActionError::Other("The system cannot find the file specified.".into())),
+            "Couldn't restart as admin: The system cannot find the file specified."
+        );
+        assert_eq!(restart_failure_text(&ActionError::AccessDenied), "Couldn't restart as admin: access denied.");
+    }
 
     #[test]
     fn interval_depends_on_visibility() {

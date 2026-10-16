@@ -514,14 +514,20 @@ fn main() -> Result<(), slint::PlatformError> {
             // own thread: an approval may still start the elevated instance, which waits for the
             // single-instance lock (`--restarted`) and then runs. `begin_exit` logs that case.
             std::thread::spawn(move || {
-                let ok = negotium_actions::restart_as_admin(&args, owner).is_ok();
+                let failure = negotium_actions::restart_as_admin(&args, owner).err();
                 // Fails only once the event loop is gone (already quitting): nothing left to do.
                 let _ = slint::invoke_from_event_loop(move || {
                     RESTART_PENDING.with(|p| p.set(false));
-                    if ok {
-                        begin_exit(&controls, &weak, &saver);
-                    } else if let Some(ui) = weak.upgrade() {
-                        ui.set_toast("Restart as admin was cancelled.".into());
+                    match failure {
+                        None => begin_exit(&controls, &weak, &saver),
+                        Some(e) => {
+                            if !matches!(e, negotium_actions::ActionError::Cancelled) {
+                                warn(&format!("restart as admin failed: {e}"));
+                            }
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_toast(negotium::controls::restart_failure_text(&e).into());
+                            }
+                        }
                     }
                 });
             });
