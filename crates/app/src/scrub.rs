@@ -19,9 +19,12 @@ pub struct ScrubView {
     pub empty: String,
 }
 
-pub fn scrub(history: &History, perf: &PerfFrame, fraction: f32) -> ScrubView {
-    // The same x -> time mapping the graph is drawn with (absolute columns, newest at x = 1000).
-    let t = graph::fraction_to_time(fraction, perf.window_end_ms, perf.span_ms);
+/// The top apps at the moment under the pointer, `fraction` of the way across a Performance
+/// graph whose right edge is drawn at collector time `view_end_ms`: `perf.window_end_ms` (the
+/// newest sample) while graphs stand still, or where the scrolling view is now (crate::smooth).
+pub fn scrub(history: &History, perf: &PerfFrame, view_end_ms: u64, fraction: f32) -> ScrubView {
+    // The same x -> time mapping the graph is drawn with (absolute columns, the right edge at view_end_ms).
+    let t = graph::fraction_to_time(fraction, view_end_ms, perf.span_ms);
     let found = at_column(history, perf, t);
     let at = found.as_ref().map_or(t, |(sample_t, _)| *sample_t as i64);
     let title = format!("Top apps at {}", format::clock(clock_at(perf, at)));
@@ -96,14 +99,24 @@ mod tests {
 
     #[test]
     fn names_the_moment_under_the_pointer_in_local_time() {
-        let v = scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Cpu), 0.5);
+        let v = scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Cpu), 61_000, 0.5);
         assert_eq!(v.title, "Top apps at 13:59:30");
         assert_eq!(v.rows, vec![("chrome".to_string(), "31.0%".to_string()), ("code".to_string(), "0.5%".to_string())]);
     }
 
     #[test]
+    fn a_scrolling_graph_maps_the_pointer_from_where_its_edge_is_drawn() {
+        let p = perf(61_000, 60_000, TWO_PM, Metric::Cpu);
+        // The view runs a second behind the newest sample: its right edge shows 60 s.
+        let v = scrub(&history(), &p, 60_000, 1.0);
+        assert_eq!(v.title, "Top apps at 13:59:59");
+        assert_eq!(v.rows[0], ("chrome".to_string(), "60.0%".to_string()));
+        assert_eq!(scrub(&history(), &p, 61_000, 1.0).title, "Top apps at 14:00:00");
+    }
+
+    #[test]
     fn values_are_formatted_for_the_pages_metric() {
-        let v = scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Memory), 1.0);
+        let v = scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Memory), 61_000, 1.0);
         assert_eq!(v.rows[0], ("chrome".to_string(), "40.0 MB".to_string()));
     }
 
@@ -115,7 +128,7 @@ mod tests {
 
     #[test]
     fn an_empty_stretch_of_the_hour_says_so_instead_of_borrowing_another_moment() {
-        let v = scrub(&history(), &perf(61_000, 3_600_000, TWO_PM, Metric::Cpu), 0.1);
+        let v = scrub(&history(), &perf(61_000, 3_600_000, TWO_PM, Metric::Cpu), 61_000, 0.1);
         assert!(v.rows.is_empty());
         assert_eq!(v.empty, "No history for this moment.");
         assert!(v.title.starts_with("Top apps at 13:"), "{}", v.title);
@@ -129,11 +142,11 @@ mod tests {
             h.push(s * 1_000, &SystemTotals::default(), &[app("late", 1.0, 0)]);
         }
         let p = perf(610_000, 600_000, TWO_PM, Metric::Cpu);
-        let mid = scrub(&h, &p, 0.5);
+        let mid = scrub(&h, &p, 610_000, 0.5);
         assert!(mid.rows.is_empty(), "{:?}", mid.rows);
         assert_eq!(mid.empty, "No history for this moment.");
         assert_eq!(mid.title, "Top apps at 13:55:00");
-        assert_eq!(scrub(&h, &p, 1.0).rows[0].0, "late");
+        assert_eq!(scrub(&h, &p, 610_000, 1.0).rows[0].0, "late");
     }
 
     /// The 1 h graph draws each 12 s column at its end with the column's largest value: the scrub
@@ -151,16 +164,16 @@ mod tests {
         p.scrub_series = Some(negotium_history::Series::Cpu);
         // Column 150 covers (1 800 s, 1 812 s] and is drawn at its end, 1 812 s.
         let at_column_end = 1_812_000.0 / 3_600_000.0;
-        let v = scrub(&h, &p, at_column_end);
+        let v = scrub(&h, &p, 3_600_000, at_column_end);
         assert_eq!(v.rows.first().map(|r| r.0.as_str()), Some("spike"), "{v:?}");
         assert_eq!(v.title, format!("Top apps at {}", format::clock(clock_at(&p, 1_806_000))));
         // Anywhere in the same column gives the same moment.
-        assert_eq!(scrub(&h, &p, 1_800_500.0 / 3_600_000.0), v);
+        assert_eq!(scrub(&h, &p, 3_600_000, 1_800_500.0 / 3_600_000.0), v);
     }
 
     #[test]
     fn network_pages_explain_the_missing_per_app_data() {
-        let v = scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Network), 0.5);
+        let v = scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Network), 61_000, 0.5);
         assert!(v.rows.is_empty());
         assert_eq!(v.empty, "Per-app network use isn't measured yet.");
     }

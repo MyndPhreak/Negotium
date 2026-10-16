@@ -2588,11 +2588,12 @@ fn the_graph_clock_stands_still_with_smooth_graphs_off_hidden_or_on_pages_withou
 #[test]
 fn a_run_cut_short_rests_on_the_newest_sample_when_scrolling_resumes() {
     let ui = shown_window();
+    negotium::smooth::install(&ui);
     let clock = ui.global::<GraphClock>();
     ui.invoke_scroll_from(-1_000.0, 1.0);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
-    assert!(clock.get_offset_ms() < 0.0);
+    assert!(clock.get_offset_ms() < 0.0 && clock.get_offset_ms() > -1_000.0, "a run under way: {}", clock.get_offset_ms());
     clock.set_shown(false);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // change handlers run
     clock.set_shown(true);
@@ -2703,4 +2704,64 @@ fn leaving_for_a_page_without_graphs_rests_the_view() {
     bridge.borrow_mut().set_page(&ui, Page::Performance);
     bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
     assert_eq!(clock.get_lead_ms(), -1_000.0, "back: from the sample on the edge");
+}
+
+// ---- Plan 3c Task 4: the scrub while graphs scroll ----
+
+#[test]
+fn a_scrub_maps_the_pointer_from_where_the_scrolling_graph_is_drawn() {
+    use slint::Model;
+    let (ui, controls, bridge) = bridged();
+    ui.global::<GraphClock>().set_smooth(true);
+    controls.set_page(Page::Performance);
+    bridge.borrow_mut().set_history(scrub_history());
+    bridge.borrow_mut().set_epoch(std::time::Instant::now() - std::time::Duration::from_millis(61_000));
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM - 1_000));
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
+    // The view trails its newest sample (61 s) by 1.25 s: the right edge shows the sample at 60 s.
+    bridge.borrow_mut().scrub(&ui, 1.0);
+    assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:59");
+    assert_eq!(ui.get_scrub_rows().row_data(0).unwrap().value, "60.0%");
+    ui.global::<GraphClock>().set_smooth(false);
+    bridge.borrow_mut().scrub(&ui, 1.0);
+    assert_eq!(ui.get_scrub_title(), "Top apps at 14:00:00", "standing still, the edge is the newest sample");
+}
+
+#[test]
+fn the_graph_timer_asks_a_scrub_to_follow_and_leaves_it_alone_otherwise() {
+    let ui = shown_window();
+    ui.set_page(1);
+    let follows = Rc::new(std::cell::Cell::new(0));
+    let f = follows.clone();
+    ui.on_scroll_follow(move || f.set(f.get() + 1));
+    ui.set_scrub_x(0.5);
+    ui.invoke_scroll_from(-5_000.0, 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1_000));
+    assert!(follows.get() >= 1, "the content moved under a still pointer: the card follows");
+    ui.set_scrub_x(-1.0);
+    let before = follows.get();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1_000));
+    assert_eq!(follows.get(), before, "no scrub, no follow-up");
+}
+
+/// PF6: a still pointer on a scrolling graph is asked to follow ~22 times a second; the card is
+/// rebuilt only when the sample or column under it changes.
+#[test]
+fn a_still_pointer_rebuilds_the_card_only_when_what_it_shows_changes() {
+    let (ui, controls, bridge) = bridged();
+    ui.global::<GraphClock>().set_smooth(true);
+    controls.set_page(Page::Performance);
+    bridge.borrow_mut().set_history(scrub_history());
+    bridge.borrow_mut().set_epoch(std::time::Instant::now() - std::time::Duration::from_millis(61_000));
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM - 1_000));
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
+    bridge.borrow_mut().scrub(&ui, 0.5);
+    let built = bridge.borrow().scrub_builds();
+    for _ in 0..20 {
+        bridge.borrow_mut().follow_scrub(&ui);
+    }
+    assert_eq!(bridge.borrow().scrub_builds(), built, "same sample under the pointer: no rebuild");
+    bridge.borrow_mut().scrub(&ui, 0.6);
+    assert!(bridge.borrow().scrub_builds() > built, "another moment: the card is rebuilt");
 }

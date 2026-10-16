@@ -12,8 +12,9 @@ pub const PAUSE_BREAK_MS: u64 = 10_000;
 /// trail its newest sample by up to `crate::smooth::SCROLL_MARGIN_MS`, and one pause further back
 /// always takes in the sample before that, so the line reaches the left edge wherever the view is.
 ///
-/// The 1 h graph can still fall short of its left edge by at most one 12 s column: history keeps
-/// exactly 1 h (ruling PF9), so there is nothing older to draw there.
+/// The 1 h graph can still fall short of its left edge by at most one 12 s column plus the scroll
+/// offset (under a pixel at 1 h): history keeps exactly 1 h (ruling PF9), so there is nothing
+/// older to draw there.
 pub const LEAD_MS: u64 = crate::smooth::SCROLL_MARGIN_MS + PAUSE_BREAK_MS;
 
 /// The graphs' right edge: the newest history sample, `fallback` (the tick) while there is none. At

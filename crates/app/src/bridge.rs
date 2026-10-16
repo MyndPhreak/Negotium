@@ -183,6 +183,10 @@ pub struct Bridge {
     history: Option<SharedHistory>,
     /// Where the pointer is across a Performance graph, while it hovers one.
     scrub_at: Option<f32>,
+    /// The card as last built, with the fraction it was built for: a still pointer on a scrolling
+    /// graph asks again every tick, and the card is rebuilt only when what it says changed (PF6).
+    scrub_shown: Option<(f32, crate::scrub::ScrubView)>,
+    scrub_builds: u32,
     scrub_rows: Rc<VecModel<ScrubRow>>,
     /// Collector time counts from here (the worker's epoch), so the scrolling view can be placed
     /// against real time.
@@ -230,6 +234,8 @@ impl Bridge {
             last_perf: None,
             history: None,
             scrub_at: None,
+            scrub_shown: None,
+            scrub_builds: 0,
             scrub_rows: Rc::new(VecModel::default()),
             epoch: Instant::now(),
             scroll: None,
@@ -431,18 +437,46 @@ impl Bridge {
         self.show_scrub(ui);
     }
 
+    /// Collector time at the right edge of the Performance graphs as drawn: where the scrolling
+    /// view is now (crate::smooth), else the newest sample.
+    fn view_end_ms(&self, ui: &MainWindow, perf: &PerfFrame) -> u64 {
+        match &self.scroll {
+            Some(run) if ui.global::<GraphClock>().get_live() => run.right_edge(self.collector_now_ms()).max(0.0).round() as u64,
+            _ => perf.window_end_ms,
+        }
+    }
+
+    /// The graph timer moved the view under a still pointer: the card follows to the moment now
+    /// under it.
+    pub fn follow_scrub(&mut self, ui: &MainWindow) {
+        self.show_scrub(ui);
+    }
+
+    /// How many times the card was rebuilt (for tests).
+    pub fn scrub_builds(&self) -> u32 {
+        self.scrub_builds
+    }
+
     /// Runs on the UI thread, which never waits for the worker: while the worker holds the history
     /// (or a panic left it poisoned, until the restarted worker resets it) the current card stays.
-    fn show_scrub(&self, ui: &MainWindow) {
+    fn show_scrub(&mut self, ui: &MainWindow) {
         let (Some(f), Some(perf), Some(history)) = (self.scrub_at, self.last_perf.as_ref(), self.history.as_ref()) else {
+            self.scrub_shown = None;
             ui.set_scrub_x(-1.0);
             return;
         };
+        let view_end = self.view_end_ms(ui, perf);
         let Ok(h) = history.try_lock() else {
             return;
         };
-        let view = crate::scrub::scrub(&h, perf, f);
+        let view = crate::scrub::scrub(&h, perf, view_end, f);
         drop(h);
+        // The same sample under the same pointer: nothing to rebuild.
+        if self.scrub_shown.as_ref().is_some_and(|(shown_f, shown)| *shown_f == f && *shown == view) {
+            return;
+        }
+        self.scrub_builds += 1;
+        self.scrub_shown = Some((f, view.clone()));
         ui.set_scrub_title(view.title.into());
         ui.set_scrub_empty(view.empty.into());
         sync_model(&*self.scrub_rows, view.rows.into_iter().map(|(name, value)| ScrubRow { name: name.into(), value: value.into() }).collect());

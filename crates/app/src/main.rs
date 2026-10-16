@@ -295,6 +295,14 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_scroll_follow(move || {
+            if let Some(ui) = weak.upgrade() {
+                b.borrow_mut().follow_scrub(&ui);
+            }
+        });
+    }
+    {
         let (controls, weak) = (controls.clone(), weak.clone());
         ui.on_select_range(move |i| {
             let range = negotium::perf::Range::from_index(i);

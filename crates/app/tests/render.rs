@@ -227,15 +227,13 @@ fn the_data_path_sits_in_a_clip_rectangle() {
     assert!(src.contains("clip:true;Path{"), "the data Path is not directly inside a clip rectangle");
 }
 
-/// Meters (CPU, Memory, Disk, GPU, Network) drawn with these sparklines, rendered: per meter the
-/// rows (absolute y) tinted by the accent away from its edges, and how many pixels beside the first
-/// meter, in the gap to the second, are tinted.
 /// Every data path scrolls with GraphClock (crate::smooth): one that didn't would stand still
 /// while the others move.
 #[test]
 fn every_data_path_scrolls_with_the_graph_clock() {
     for (file, body) in &data_paths() {
         assert!(body.contains("viewbox-x:"), "{file}: a data Path without viewbox-x: {body}");
+        assert!(body.contains("GraphClock.offset-ms"), "{file}: viewbox-x is not bound to GraphClock.offset-ms: {body}");
     }
 }
 
@@ -276,6 +274,9 @@ fn a_graph_scrolls_with_the_graph_clock() {
     assert!((scrolled - 0.75).abs() < 0.02, "{scrolled}");
 }
 
+/// Meters (CPU, Memory, Disk, GPU, Network) drawn with these sparklines, rendered: per meter the
+/// rows (absolute y) tinted by the accent away from its edges, and how many pixels beside the first
+/// meter, in the gap to the second, are tinted.
 fn render_sparks(sparks: [&str; 5]) -> (Vec<Vec<u32>>, usize) {
     software_backend();
     let ui = MainWindow::new().unwrap();

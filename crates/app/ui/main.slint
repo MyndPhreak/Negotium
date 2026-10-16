@@ -68,6 +68,10 @@ export component MainWindow inherits Window {
         running: GraphClock.live && root.page <= 1 && GraphClock.offset-ms < 0;
         triggered => {
             GraphClock.now = animation-tick();
+            // The view moved under a still pointer: the scrub card follows (crate::bridge).
+            if (root.scrub-x >= 0) {
+                root.scroll-follow();
+            }
         }
     }
     // A frame's graphs landed (crate::smooth::Scroll): the view's right edge starts `lead-ms`
@@ -110,6 +114,7 @@ export component MainWindow inherits Window {
     callback select-device(string);
     callback select-range(int);
     callback scrub(float);
+    callback scroll-follow();
     callback list-focus(bool);
     callback list-key(string) -> bool;
 
