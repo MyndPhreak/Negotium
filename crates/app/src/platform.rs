@@ -264,14 +264,23 @@ unsafe extern "system" fn subclass_proc(
 /// Whether a WM_SETTINGCHANGE names the colour scheme ("ImmersiveColorSet"). It is broadcast
 /// for many unrelated changes (locale, environment, policies); those name another area or none.
 fn is_colour_scheme_change(lparam: LPARAM) -> bool {
-    if lparam.0 == 0 {
+    const AREA: &str = "ImmersiveColorSet";
+    let p = lparam.0 as *const u16;
+    if p.is_null() {
         return false;
     }
-    let area = PCWSTR(lparam.0 as *const u16);
-    // SAFETY: for WM_SETTINGCHANGE a non-null lParam points to a NUL-terminated UTF-16 string (the
-    // changed area; the system marshals it across processes), valid while the message is handled.
-    let area = unsafe { area.as_wide() };
-    area.iter().copied().eq("ImmersiveColorSet".encode_utf16())
+    // At most AREA's length plus its NUL is read: the compare stops at the first difference,
+    // and a shorter string differs at its own NUL, so nothing past a terminator is ever read.
+    for (i, want) in AREA.encode_utf16().chain(std::iter::once(0)).enumerate() {
+        // SAFETY: trusted only because WM_SETTINGCHANGE is a system broadcast: the system
+        // marshals its lParam into this process as a NUL-terminated UTF-16 string (or null),
+        // valid while the message is handled. `i` never passes that string's NUL (see above).
+        let c = unsafe { p.add(i).read() };
+        if c != want {
+            return false;
+        }
+    }
+    true
 }
 
 /// Removes the mark set by [`mark_main_window`] (the instance is exiting).

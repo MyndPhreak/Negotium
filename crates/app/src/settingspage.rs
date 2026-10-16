@@ -3,7 +3,8 @@
 //! the UI thread (`settings::Saver`).
 use crate::controls::Controls;
 use crate::settings::{Saver, Settings, ThemeChoice, refresh_from_index};
-use crate::{MainWindow, platform, renderer};
+use crate::renderer::{self, Renderer};
+use crate::{MainWindow, platform};
 use slint::ComponentHandle;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -36,13 +37,16 @@ pub struct SettingsWiring {
     /// existed at launch.
     pub gpu_marker: PathBuf,
     pub fallback_recorded: bool,
+    /// The renderer this instance draws with: `Gpu` only if it was selected successfully.
+    pub running: Renderer,
 }
 
 impl SettingsWiring {
     /// Shows the GPU switch's launch state and connects the page's callbacks.
     pub fn install(self, ui: &MainWindow) {
         ui.set_settings_gpu_fallback(self.fallback_recorded);
-        ui.set_settings_gpu_at_launch(self.settings.borrow().gpu_rendering && !self.fallback_recorded);
+        ui.set_settings_gpu_running(self.running == Renderer::Gpu);
+        ui.set_settings_gpu_env_override(self.running == Renderer::FromEnv);
         let change = Rc::new(Change { settings: self.settings, saver: self.saver, weak: ui.as_weak() });
         {
             let (change, controls) = (change.clone(), self.controls);
@@ -76,24 +80,31 @@ impl SettingsWiring {
         {
             let marker = self.gpu_marker;
             ui.on_gpu_rendering_toggled(move |on| {
-                if let Some(ui) = change.apply(|s| s.gpu_rendering = on)
-                    && on
-                {
-                    // Turning it on clears the fallback marker: the next launch tries the GPU.
-                    ui.set_settings_gpu_fallback(false);
+                change.apply(|s| s.gpu_rendering = on);
+                if !on {
+                    return; // the saved choice is all it takes (`renderer::set_gpu_rendering`)
                 }
-                // A file operation: off the UI thread. If it fails, the next launch shows the
-                // fallback again, so the page never claims more than happened.
-                let marker = marker.clone();
+                // Turning it on clears the fallback marker, so the next launch tries the GPU. The
+                // explanation goes now; clearing is a file operation, so it runs off the UI
+                // thread, and if it fails the explanation comes back (`marker_not_cleared`).
+                change.weak.upgrade().inspect(|ui| ui.set_settings_gpu_fallback(false));
+                let (marker, weak) = (marker.clone(), change.weak.clone());
                 std::thread::spawn(move || {
                     if let Err(e) = renderer::set_gpu_rendering_at(&marker, on) {
                         crate::log::Log::new(crate::log::Log::default_path())
                             .warn(&format!("GPU rendering fallback marker not cleared: {e}"));
+                        let _ = weak.upgrade_in_event_loop(|ui| marker_not_cleared(&ui));
                     }
                 });
             });
         }
     }
+}
+
+/// The fallback marker could not be cleared: the next launch still draws with the CPU, so the
+/// switch shows off again with its explanation.
+pub fn marker_not_cleared(ui: &MainWindow) {
+    ui.set_settings_gpu_fallback(true);
 }
 
 /// One settings change: update the shared settings, show them, save them.

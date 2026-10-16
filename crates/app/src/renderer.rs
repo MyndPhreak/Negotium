@@ -16,9 +16,9 @@
 //!   carries on.
 //!
 //! The fallback is recorded in a marker file ([`fallback_path`]) and every later launch honours
-//! it. Only an explicit user action clears it ([`set_gpu_rendering`], for the Settings switch of
-//! a later task), so the renderer never flips back and forth. The marker stays the durable record
-//! of an automatic fallback (the watchdog writes it from a background thread just before
+//! it. Only an explicit user action clears it ([`set_gpu_rendering`]: the Settings page's "Use
+//! GPU rendering" switch), so the renderer never flips back and forth. The marker stays the
+//! durable record of an automatic fallback (the watchdog writes it from a background thread just before
 //! terminating); settings.json holds the user's own choice (`gpu_rendering`). The GPU is used only
 //! when the setting is on AND no marker exists. `SLINT_BACKEND` overrides all of it.
 use std::ffi::OsString;

@@ -1662,6 +1662,7 @@ fn a_system_theme_flip_changes_the_colours_only_with_theme_system() {
 // ---- Plan 3b Task 3: the Settings page ----
 
 use i_slint_backend_testing::AccessibleRole;
+use negotium::renderer::Renderer;
 use negotium::settings::{Settings, ThemeChoice};
 
 /// The switch labelled `label` (a row title Text may carry the same words).
@@ -1678,9 +1679,16 @@ fn radio(ui: &MainWindow, label: &str) -> El {
         .unwrap_or_else(|| panic!("no choice {label:?}"))
 }
 
-/// The Text showing `label` (a switch may carry the same words).
+/// The Text showing `label` (a switch may carry the same words). A row's title and description
+/// are not read out (their control carries them): find those with [`row_texts`].
 fn text(ui: &MainWindow, label: &str) -> Option<El> {
     El::find_by_accessible_label(ui, label).find(|e| e.accessible_role() == Some(AccessibleRole::Text))
+}
+
+/// The rects of every Settings row's `id` Text ("title" or "description"), top to bottom.
+fn row_texts(ui: &MainWindow, id: &str) -> Vec<Rect> {
+    use i_slint_backend_testing::ElementRoot;
+    ui.root_element().query_descendants().match_id(format!("SettingRow::{id}")).find_all().iter().map(rect_of).collect()
 }
 
 #[test]
@@ -1734,7 +1742,10 @@ fn later_version_settings_are_shown_disabled() {
         let s = switch(&ui, label);
         assert_eq!(s.accessible_enabled(), Some(false), "{label}");
         assert_eq!(s.accessible_checked(), Some(false), "{label}");
+        assert_eq!(s.accessible_description().as_deref(), Some("Coming in a later version"), "{label}");
+        assert!(s.computed_opacity() < 1.0, "{label}: the disabled switch is dimmed");
     }
+    assert_eq!(switch(&ui, "Always on top").computed_opacity(), 1.0, "an offered switch is not");
 }
 
 #[test]
@@ -1829,8 +1840,14 @@ fn saved(path: &std::path::Path, what: &str, f: impl Fn(&Settings) -> bool) {
     eventually(what, || matches!(negotium::settings::load(path), (s, negotium::settings::Loaded::File) if f(&s)));
 }
 
-/// The Settings page wired the way main.rs wires it, saving under `dir`.
-fn settings_wired(dir: &Scratch, s: Settings, fallback: bool) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>) {
+/// The Settings page wired the way main.rs wires it, saving under `dir`; this instance draws with
+/// `running`.
+fn settings_wired_with(
+    dir: &Scratch,
+    s: Settings,
+    fallback: bool,
+    running: Renderer,
+) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>) {
     let ui = shown_window();
     ui.set_page(3);
     let controls = Arc::new(Controls::default());
@@ -1846,9 +1863,16 @@ fn settings_wired(dir: &Scratch, s: Settings, fallback: bool) -> (MainWindow, Ar
         controls: controls.clone(),
         gpu_marker: marker,
         fallback_recorded: fallback,
+        running,
     }
     .install(&ui);
     (ui, controls, settings)
+}
+
+/// As [`settings_wired_with`], running what `decide` picks for `s` and `fallback`.
+fn settings_wired(dir: &Scratch, s: Settings, fallback: bool) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>) {
+    let running = negotium::renderer::decide(false, s.gpu_rendering, fallback, false).renderer;
+    settings_wired_with(dir, s, fallback, running)
 }
 
 #[test]
@@ -1967,12 +1991,151 @@ const REFRESH_DESC: &str = "How often numbers update while the window is open. I
 #[test]
 fn settings_rows_wrap_without_overlap_at_the_smallest_window() {
     let ui = settings_window(760, 440);
-    let theme = rect_of(&text(&ui, "Theme").expect("Theme title"));
-    let desc = rect_of(&text(&ui, REFRESH_DESC).expect("refresh description"));
+    let theme = row_texts(&ui, "title")[1];
+    let desc = row_texts(&ui, "description")[0];
     assert!(desc.3 > 20.0, "the long description wraps onto more lines: {desc:?}");
     assert!(desc.1 + desc.3 <= theme.1, "the next row starts below it: {desc:?} {theme:?}");
     let choice = rect_of(&radio(&ui, "5 s"));
     assert!(choice.0 >= desc.0 + desc.2, "the choices stay to the right of the text: {choice:?} {desc:?}");
     // Rail 76 px; the page's scrollbar gutter is 14 px.
     assert!(choice.0 + choice.2 <= 760.0 - 14.0, "and clear of the scrollbar gutter: {choice:?}");
+}
+
+// ---- Plan 3b Task 3, fix round 1 ----
+
+/// The rect of the Settings row holding the control whose log entry is `entry`.
+fn row_of(ui: &MainWindow, entry: &str) -> Rect {
+    use i_slint_backend_testing::ElementRoot;
+    let id = match entry {
+        e if e.starts_with("refresh") => "refresh-row",
+        e if e.starts_with("theme") => "theme-row",
+        "Always on top" => "top-row",
+        "Keep running in the tray when closed" => "tray-row",
+        _ => "gpu-row",
+    };
+    let rows = ui.root_element().query_descendants().match_id(format!("SettingsPage::{id}")).find_all();
+    rect_of(rows.first().unwrap_or_else(|| panic!("row {id}")))
+}
+
+/// Tabs (then Shift+Tabs) through the Settings page at the smallest window. Pressing Space after
+/// each move tells which control has focus (the page is not wired, so nothing changes); each
+/// one reached must lie inside the view, never below or above the fold.
+#[test]
+fn a_control_reached_with_tab_is_scrolled_into_view() {
+    use slint::platform::Key;
+    let ui = settings_window(760, 440);
+    // The GPU row at its tallest: with the fallback explanation.
+    ui.set_settings_gpu_fallback(true);
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let l = log.clone();
+    ui.on_refresh_chosen(move |i| l.borrow_mut().push(format!("refresh {i}")));
+    let l = log.clone();
+    ui.on_theme_chosen(move |i| l.borrow_mut().push(format!("theme {i}")));
+    let l = log.clone();
+    ui.on_always_on_top_toggled(move |_| l.borrow_mut().push("Always on top".into()));
+    let l = log.clone();
+    ui.on_tray_toggled(move |_| l.borrow_mut().push("Keep running in the tray when closed".into()));
+    let l = log.clone();
+    ui.on_gpu_rendering_toggled(move |_| l.borrow_mut().push("Use GPU rendering".into()));
+    let l = log.clone();
+    ui.on_select_page(move |i| l.borrow_mut().push(format!("page {i}")));
+    let in_view = |e: &El| {
+        let r = rect_of(e);
+        r.1 >= 0.0 && r.1 + r.3 <= 440.0
+    };
+    // Space acts on the focused control: its log entry names it.
+    let current = |ui: &MainWindow| {
+        log.borrow_mut().clear();
+        press_key(ui, Key::Space);
+        log.borrow().last().cloned()
+    };
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..30 {
+        press_key(&ui, Key::Tab);
+        let Some(now) = current(&ui) else { continue };
+        let control = match now.as_str() {
+            "refresh 0" => radio(&ui, "0.5 s"),
+            "refresh 1" => radio(&ui, "1 s"),
+            "refresh 2" => radio(&ui, "2 s"),
+            "refresh 3" => radio(&ui, "5 s"),
+            "theme 0" => radio(&ui, "System"),
+            "theme 1" => radio(&ui, "Light"),
+            "theme 2" => radio(&ui, "Dark"),
+            label if label.starts_with("page") => continue,
+            label => switch(&ui, label),
+        };
+        assert!(in_view(&control), "{now} is in view when focused: {:?}", rect_of(&control));
+        let row = row_of(&ui, &now);
+        assert!(row.1 >= 0.0 && row.1 + row.3 <= 440.0, "{now}: its whole row is in view: {row:?}");
+        seen.push(now.clone());
+        if now == "Use GPU rendering" {
+            break;
+        }
+    }
+    assert_eq!(seen.last().map(String::as_str), Some("Use GPU rendering"), "Tab reaches the last enabled control: {seen:?}");
+    assert!(seen.contains(&"Keep running in the tray when closed".to_string()), "{seen:?}");
+    // And back up: the first choice comes back into view.
+    let mut back = None;
+    for _ in 0..30 {
+        press_key(&ui, Key::Backtab);
+        back = current(&ui);
+        if back.as_deref() == Some("refresh 0") {
+            break;
+        }
+    }
+    assert_eq!(back.as_deref(), Some("refresh 0"), "Shift+Tab reaches the first choice");
+    assert!(in_view(&radio(&ui, "0.5 s")), "the first choice is back in view");
+    let row = row_of(&ui, "refresh 0");
+    assert!(row.1 >= 0.0, "with its whole row: {row:?}");
+}
+
+#[test]
+fn screen_readers_hear_each_setting_once_with_its_description() {
+    let ui = shown_window();
+    ui.set_page(3);
+    let group = El::find_by_accessible_label(&ui, "Refresh rate")
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Groupbox))
+        .expect("the refresh choices are a labelled group");
+    assert_eq!(group.accessible_description().as_deref(), Some(REFRESH_DESC));
+    let tray = switch(&ui, "Keep running in the tray when closed");
+    assert!(tray.accessible_description().is_some_and(|d| d.starts_with("Closing the window keeps Negotium")));
+    for label in ["Refresh rate", "Keep running in the tray when closed", "Dark"] {
+        assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
+    }
+    assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
+    assert_eq!(row_texts(&ui, "title").len(), 8, "the titles are still drawn");
+}
+
+#[test]
+fn a_marker_that_cannot_be_cleared_brings_the_fallback_back() {
+    let dir = Scratch::new("stuck-marker");
+    let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), true);
+    switch(&ui, "Use GPU rendering").invoke_accessible_default_action();
+    assert!(text(&ui, FALLBACK_NOTE).is_none());
+    // What the clearing thread posts back when the removal fails.
+    negotium::settingspage::marker_not_cleared(&ui);
+    assert_eq!(switch(&ui, "Use GPU rendering").accessible_checked(), Some(false), "the next launch is still CPU");
+    assert!(text(&ui, FALLBACK_NOTE).is_some(), "and the page says why again");
+}
+
+#[test]
+fn the_restart_note_compares_with_the_renderer_in_use() {
+    // Settings say GPU, but this instance draws with the CPU (the GPU could not be selected):
+    // the switch is on and the GPU arrives only with a restart.
+    let dir = Scratch::new("running-cpu");
+    let (ui, ..) = settings_wired_with(&dir, Settings::default(), false, Renderer::Software);
+    assert_eq!(switch(&ui, "Use GPU rendering").accessible_checked(), Some(true));
+    assert!(text(&ui, RESTART_NOTE).is_some());
+    switch(&ui, "Use GPU rendering").invoke_accessible_default_action();
+    assert!(text(&ui, RESTART_NOTE).is_none(), "off matches what runs: no restart needed");
+}
+
+#[test]
+fn slint_backend_overrides_the_gpu_switch_and_says_so() {
+    let dir = Scratch::new("env");
+    let (ui, ..) = settings_wired_with(&dir, Settings::default(), false, Renderer::FromEnv);
+    assert!(text(&ui, "Overridden by SLINT_BACKEND.").is_some());
+    switch(&ui, "Use GPU rendering").invoke_accessible_default_action();
+    assert!(text(&ui, "Overridden by SLINT_BACKEND.").is_some(), "instead of the restart note");
+    assert!(text(&ui, RESTART_NOTE).is_none());
 }

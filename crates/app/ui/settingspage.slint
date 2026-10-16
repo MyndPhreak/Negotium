@@ -6,17 +6,22 @@ import { FocusButton } from "focusbutton.slint";
 // requested state), so a refused change never leaves it showing the wrong state.
 export component Toggle inherits FocusButton {
     in property <string> label;
+    // Read out after the label (the row's description).
+    in property <string> description;
     in property <bool> checked;
     callback toggled(bool);
     width: 40px;
     height: 20px;
     vertical-stretch: 0;
     border-radius: 10px;
+    // Disabled (a later version, or under a modal): dimmed as a whole.
+    opacity: root.interactive ? 1 : 0.5;
     background: root.checked && root.interactive ? Theme.accent : transparent;
     border-width: root.focused ? 2px : (root.checked && root.interactive ? 0px : 1px);
-    border-color: root.focused ? Theme.text : (root.interactive ? Theme.muted : Theme.card-border);
+    border-color: root.focused ? Theme.text : Theme.muted;
     accessible-role: switch;
     accessible-label: root.label;
+    accessible-description: root.description;
     accessible-checkable: true;
     accessible-checked: root.checked;
     accessible-enabled: root.interactive;
@@ -27,7 +32,7 @@ export component Toggle inherits FocusButton {
         width: 12px;
         height: 12px;
         border-radius: 6px;
-        background: !root.interactive ? Theme.card-border : (root.checked ? Theme.on-accent : Theme.muted);
+        background: root.checked && root.interactive ? Theme.on-accent : Theme.muted;
     }
 }
 
@@ -38,7 +43,8 @@ component ChoiceButton inherits FocusButton {
     vertical-stretch: 0;
     min-width: 56px;
     border-radius: 4px;
-    background: root.selected ? Theme.accent : (root.hovered ? Theme.card : transparent);
+    // The hover tint must show on a card, which is itself Theme.card.
+    background: root.selected ? Theme.accent : (root.hovered ? Theme.text.with-alpha(0.08) : transparent);
     border-width: root.focused ? 2px : 1px;
     border-color: root.focused ? Theme.text : Theme.card-border;
     accessible-role: radio-button;
@@ -55,34 +61,50 @@ component ChoiceButton inherits FocusButton {
             font-size: 12px;
             vertical-alignment: center;
             horizontal-alignment: center;
+            // The button already carries the label.
+            accessible-role: none;
         }
     }
 }
 
-// One choice out of a few, as a row of buttons.
-export component Choice inherits HorizontalLayout {
+// One choice out of a few, as a row of buttons, announced as a group ("Refresh rate").
+export component Choice inherits Rectangle {
+    in property <string> label;
+    in property <string> description;
     in property <[string]> options;
     in property <int> selected;
     in property <bool> interactive: true;
     callback chosen(int);
-    spacing: 4px;
-    alignment: start;
+    // One of the buttons got keyboard focus.
+    callback focus-gained();
     vertical-stretch: 0;
-    max-width: 16384px; // see MetersRow: repeaters must not cap the window width
-    for o[i] in root.options : ChoiceButton {
-        label: o;
-        selected: i == root.selected;
-        interactive: root.interactive;
-        activated => { root.chosen(i); }
+    accessible-role: groupbox;
+    accessible-label: root.label;
+    accessible-description: root.description;
+    HorizontalLayout {
+        spacing: 4px;
+        alignment: start;
+        max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+        for o[i] in root.options : ChoiceButton {
+            label: o;
+            selected: i == root.selected;
+            interactive: root.interactive;
+            activated => { root.chosen(i); }
+            focus-gained => { root.focus-gained(); }
+        }
     }
 }
 
 // A card: title and description on the left (the description wraps), the control on the right,
-// and an optional one-line note under the description.
+// and an optional one-line note under the description. The control carries the title as its
+// label and the description as its accessible description, so those two Texts are not read
+// out again; the note is.
 export component SettingRow inherits Rectangle {
     in property <string> title;
     in property <string> description;
     in property <string> note;
+    // False for a setting that is not offered yet: its title is dimmed.
+    in property <bool> available: true;
     min-height: 64px;
     vertical-stretch: 0;
     border-radius: Theme.radius;
@@ -96,8 +118,21 @@ export component SettingRow inherits Rectangle {
             horizontal-stretch: 1;
             alignment: center;
             spacing: 2px;
-            Text { text: root.title; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; }
-            if root.description != "" : Text { text: root.description; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+            title := Text {
+                text: root.title;
+                color: root.available ? Theme.text : Theme.muted;
+                font-size: 13px;
+                font-weight: 600;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            if root.description != "" : description := Text {
+                text: root.description;
+                color: Theme.muted;
+                font-size: 11px;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
             if root.note != "" : Text { text: root.note; color: Theme.text; font-size: 11px; wrap: word-wrap; }
         }
         VerticalLayout {
@@ -113,11 +148,12 @@ export component SettingsPage inherits VerticalLayout {
     in property <int> theme;
     in property <bool> always-on-top;
     in property <bool> keep-in-tray;
-    // The saved GPU choice, whether an automatic fallback to the CPU is recorded, and what the
-    // switch showed when this instance started (crate::settingspage).
+    // The saved GPU choice; whether an automatic fallback to the CPU is recorded; whether this
+    // instance draws with the GPU; whether SLINT_BACKEND chose the renderer (crate::settingspage).
     in property <bool> gpu-rendering;
     in property <bool> gpu-fallback;
-    in property <bool> gpu-at-launch;
+    in property <bool> gpu-running;
+    in property <bool> gpu-env-override;
     in property <bool> interactive: true;
     callback refresh-chosen(int);
     callback theme-chosen(int);
@@ -127,6 +163,19 @@ export component SettingsPage inherits VerticalLayout {
     // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
     property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
     max-width: 16384px;
+
+    // Scrolls the least distance that shows the whole row at absolute `y` with height `h` (its top
+    // if it is taller than the view), so a control reached with Tab is never out of sight.
+    function reveal(y: length, h: length) {
+        let top = y - sv.absolute-position.y;
+        let lowest = min(0px, sv.visible-height - sv.content-height);
+        if (top < 0) {
+            sv.content-y = min(0px, sv.content-y - top);
+        } else if (top + h > sv.visible-height) {
+            sv.content-y = max(lowest, sv.content-y - min(top, top + h - sv.visible-height));
+        }
+    }
+
     sv := ScrollView {
         // Content width: the view less a gutter the scrollbar always gets (as on the Performance
         // page). Not visible-width: the wrapped descriptions' height decides whether the
@@ -142,74 +191,91 @@ export component SettingsPage inherits VerticalLayout {
             // Spare height stays empty below the last row.
             alignment: start;
             Text { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 600; vertical-stretch: 0; }
-            SettingRow {
+            refresh-row := SettingRow {
                 title: "Refresh rate";
                 description: "How often numbers update while the window is open. In the tray Negotium updates every 2 s, or slower if you choose a slower rate.";
                 Choice {
+                    label: refresh-row.title;
+                    description: refresh-row.description;
                     options: ["0.5 s", "1 s", "2 s", "5 s"];
                     selected: root.refresh;
                     interactive: root.interactive;
                     chosen(i) => { root.refresh-chosen(i); }
+                    focus-gained => { root.reveal(refresh-row.absolute-position.y, refresh-row.height); }
                 }
             }
-            SettingRow {
+            theme-row := SettingRow {
                 title: "Theme";
                 description: "System follows Windows' light or dark mode.";
                 Choice {
+                    label: theme-row.title;
+                    description: theme-row.description;
                     options: ["System", "Light", "Dark"];
                     selected: root.theme;
                     interactive: root.interactive;
                     chosen(i) => { root.theme-chosen(i); }
+                    focus-gained => { root.reveal(theme-row.absolute-position.y, theme-row.height); }
                 }
             }
-            SettingRow {
+            top-row := SettingRow {
                 title: "Always on top";
                 description: "Keep Negotium above other windows.";
                 Toggle {
-                    label: "Always on top";
+                    label: top-row.title;
+                    description: top-row.description;
                     checked: root.always-on-top;
                     interactive: root.interactive;
                     toggled(on) => { root.always-on-top-toggled(on); }
+                    focus-gained => { root.reveal(top-row.absolute-position.y, top-row.height); }
                 }
             }
-            SettingRow {
+            tray-row := SettingRow {
                 title: "Keep running in the tray when closed";
                 description: "Closing the window keeps Negotium in the notification area: history keeps recording and reopening is instant.";
                 Toggle {
-                    label: "Keep running in the tray when closed";
+                    label: tray-row.title;
+                    description: tray-row.description;
                     checked: root.keep-in-tray;
                     interactive: root.interactive;
                     toggled(on) => { root.tray-toggled(on); }
+                    focus-gained => { root.reveal(tray-row.absolute-position.y, tray-row.height); }
                 }
             }
-            SettingRow {
+            gpu-row := SettingRow {
                 title: "Use GPU rendering";
                 description: "Draw the window with the graphics card: smoother resizing. Turn off if the window shows glitches.";
                 note: root.gpu-fallback
                     ? "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again."
-                    : (root.gpu-shown != root.gpu-at-launch ? "Takes effect when Negotium restarts." : "");
+                    : root.gpu-env-override
+                    ? "Overridden by SLINT_BACKEND."
+                    : (root.gpu-shown != root.gpu-running ? "Takes effect when Negotium restarts." : "");
                 Toggle {
-                    label: "Use GPU rendering";
+                    label: gpu-row.title;
+                    description: gpu-row.description;
                     checked: root.gpu-shown;
                     interactive: root.interactive;
                     toggled(on) => { root.gpu-rendering-toggled(on); }
+                    focus-gained => { root.reveal(gpu-row.absolute-position.y, gpu-row.height); }
                 }
             }
             Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
-            SettingRow {
+            admin-row := SettingRow {
                 title: "Admin mode";
                 description: "Start with admin rights without a prompt.";
-                Toggle { label: "Admin mode"; checked: false; interactive: false; }
+                available: false;
+                Toggle { label: admin-row.title; description: "Coming in a later version"; checked: false; interactive: false; }
             }
-            SettingRow {
+            hotkey-row := SettingRow {
                 title: "Open on Ctrl+Shift+Esc";
                 description: "Open Negotium instead of Task Manager.";
-                Toggle { label: "Open on Ctrl+Shift+Esc"; checked: false; interactive: false; }
+                available: false;
+                Toggle { label: hotkey-row.title; description: "Coming in a later version"; checked: false; interactive: false; }
             }
-            SettingRow {
+            temp-row := SettingRow {
                 title: "CPU temperature add-on";
                 description: "Show the CPU temperature (installs the PawnIO driver from its publisher).";
-                Toggle { label: "CPU temperature add-on"; checked: false; interactive: false; }
+                available: false;
+                Toggle { label: temp-row.title; description: "Coming in a later version"; checked: false; interactive: false; }
             }
         }
     }

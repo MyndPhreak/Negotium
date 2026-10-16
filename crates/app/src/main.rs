@@ -112,9 +112,18 @@ fn main() -> Result<(), slint::PlatformError> {
             (selector.backend_name("winit".into()).renderer_name("software".into()), "software")
         }
     };
-    if let Err(e) = selector.select() {
-        warn(&format!("{name} renderer unavailable, using Slint's default: {e}"));
-    }
+    // The renderer this instance draws with, for the Settings page. A failed selection leaves
+    // Slint's default, which is not known to be the GPU.
+    let running = match selector.select() {
+        Ok(()) => decision.renderer,
+        Err(e) => {
+            warn(&format!("{name} renderer unavailable, using Slint's default: {e}"));
+            match decision.renderer {
+                renderer::Renderer::FromEnv => renderer::Renderer::FromEnv,
+                _ => renderer::Renderer::Software,
+            }
+        }
+    };
     // The choice is made: keep SLINT_BACKEND (the user's, or the watchdog's winit-software) out of
     // the processes Negotium starts (Open file location, Run new task). No other thread runs yet.
     platform::remove_env_var("SLINT_BACKEND");
@@ -134,15 +143,18 @@ fn main() -> Result<(), slint::PlatformError> {
     platform::apply_accent(&ui);
     // Settings in effect for this run; the Settings page changes them and saves to `settings_path`.
     let settings = Rc::new(RefCell::new(settings));
-    negotium::settingspage::apply_settings(&ui, &settings.borrow());
+    // Copied out: no borrow is held while the theme is applied (window calls).
+    let initial = settings.borrow().clone();
+    negotium::settingspage::apply_settings(&ui, &initial);
     let controls = Arc::new(Controls::default());
-    controls.set_refresh_ms(settings.borrow().refresh_ms);
+    controls.set_refresh_ms(initial.refresh_ms);
     negotium::settingspage::SettingsWiring {
         settings: settings.clone(),
         saver: settings::Saver::new(settings_path),
         controls: controls.clone(),
         gpu_marker: renderer::fallback_path(),
         fallback_recorded,
+        running,
     }
     .install(&ui);
     let bridge = Bridge::install(&ui, controls.clone());
@@ -465,7 +477,8 @@ fn main() -> Result<(), slint::PlatformError> {
                             ShellEvent::Activate => show_main(&controls, &weak),
                             ShellEvent::SettingsChanged => {
                                 if let Some(ui) = weak.upgrade() {
-                                    platform::on_settings_changed(&ui, settings.borrow().theme);
+                                    let theme = settings.borrow().theme;
+                                    platform::on_settings_changed(&ui, theme);
                                 }
                             }
                         });

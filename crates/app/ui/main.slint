@@ -82,8 +82,9 @@ export component MainWindow inherits Window {
 
     // Settings (crate::settings::Settings, shown by crate::settingspage): refresh index (0.5 / 1 /
     // 2 / 5 s), theme index (System / Light / Dark), the switches. `on-top` is both the window's
-    // state and the switch's. The GPU switch also needs whether an automatic fallback is recorded
-    // and what it showed at launch (a change takes effect on the next launch).
+    // state and the switch's. The GPU switch also needs whether an automatic fallback is recorded,
+    // whether this instance draws with the GPU and whether SLINT_BACKEND chose the renderer (a
+    // change takes effect on the next launch).
     in-out property <int> settings-refresh: 1;
     in-out property <int> settings-theme: 0;
     in-out property <bool> on-top;
@@ -91,7 +92,8 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-keep-in-tray: true;
     in-out property <bool> settings-gpu-rendering: true;
     in-out property <bool> settings-gpu-fallback;
-    in property <bool> settings-gpu-at-launch: true;
+    in property <bool> settings-gpu-running: true;
+    in property <bool> settings-gpu-env-override;
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback always-on-top-toggled(bool);
@@ -264,7 +266,8 @@ export component MainWindow inherits Window {
                     keep-in-tray: root.settings-keep-in-tray;
                     gpu-rendering: root.settings-gpu-rendering;
                     gpu-fallback: root.settings-gpu-fallback;
-                    gpu-at-launch: root.settings-gpu-at-launch;
+                    gpu-running: root.settings-gpu-running;
+                    gpu-env-override: root.settings-gpu-env-override;
                     interactive: !root.modal-open;
                     refresh-chosen(i) => { root.refresh-chosen(i); }
                     theme-chosen(i) => { root.theme-chosen(i); }
