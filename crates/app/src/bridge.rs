@@ -279,6 +279,8 @@ impl Bridge {
                     self.apply_perf(ui, perf);
                 }
             }
+            // The worker builds no frame for these (nothing on them changes per tick).
+            Page::Startup | Page::Settings => {}
         }
     }
 

@@ -96,10 +96,11 @@ fn main() -> Result<(), slint::PlatformError> {
         settings::Loaded::Unreadable(why) => warn(&format!("settings.json could not be read, using defaults: {why}")),
         settings::Loaded::Defaults | settings::Loaded::File => {}
     }
+    let fallback_recorded = renderer::fallback_recorded();
     let decision = renderer::decide(
         std::env::var_os("SLINT_BACKEND").is_some(),
         settings.gpu_rendering,
-        renderer::fallback_recorded(),
+        fallback_recorded,
         relaunched,
     );
     let selector = slint::BackendSelector::new();
@@ -131,12 +132,19 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     let ui = MainWindow::new()?;
     platform::apply_accent(&ui);
-    // Settings in effect for this run; Task 3's page changes them and saves to `settings_path`.
+    // Settings in effect for this run; the Settings page changes them and saves to `settings_path`.
     let settings = Rc::new(RefCell::new(settings));
-    platform::apply_theme(&ui, settings.borrow().theme);
-    ui.set_on_top(settings.borrow().always_on_top);
+    negotium::settingspage::apply_settings(&ui, &settings.borrow());
     let controls = Arc::new(Controls::default());
     controls.set_refresh_ms(settings.borrow().refresh_ms);
+    negotium::settingspage::SettingsWiring {
+        settings: settings.clone(),
+        saver: settings::Saver::new(settings_path),
+        controls: controls.clone(),
+        gpu_marker: renderer::fallback_path(),
+        fallback_recorded,
+    }
+    .install(&ui);
     let bridge = Bridge::install(&ui, controls.clone());
 
     // Worker -> UI thread through a latest-frame slot: one wakeup is posted only when the slot was
@@ -455,13 +463,9 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                             ShellEvent::TaskbarCreated => {}
                             ShellEvent::Activate => show_main(&controls, &weak),
-                            // The system theme or accent may have changed. The scheme, title bar
-                            // and Mica are re-applied for the chosen theme, which only moves them
-                            // when it is System (settings::effective_dark).
                             ShellEvent::SettingsChanged => {
                                 if let Some(ui) = weak.upgrade() {
-                                    platform::apply_accent(&ui);
-                                    platform::apply_theme(&ui, settings.borrow().theme);
+                                    platform::on_settings_changed(&ui, settings.borrow().theme);
                                 }
                             }
                         });

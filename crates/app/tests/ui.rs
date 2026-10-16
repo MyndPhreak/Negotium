@@ -1658,3 +1658,321 @@ fn a_system_theme_flip_changes_the_colours_only_with_theme_system() {
     }
 }
 
+
+// ---- Plan 3b Task 3: the Settings page ----
+
+use i_slint_backend_testing::AccessibleRole;
+use negotium::settings::{Settings, ThemeChoice};
+
+/// The switch labelled `label` (a row title Text may carry the same words).
+fn switch(ui: &MainWindow, label: &str) -> El {
+    El::find_by_accessible_label(ui, label)
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Switch))
+        .unwrap_or_else(|| panic!("no switch {label:?}"))
+}
+
+/// The choice button labelled `label` (its Text child carries the same label, PF11).
+fn radio(ui: &MainWindow, label: &str) -> El {
+    El::find_by_accessible_label(ui, label)
+        .find(|e| e.accessible_role() == Some(AccessibleRole::RadioButton))
+        .unwrap_or_else(|| panic!("no choice {label:?}"))
+}
+
+/// The Text showing `label` (a switch may carry the same words).
+fn text(ui: &MainWindow, label: &str) -> Option<El> {
+    El::find_by_accessible_label(ui, label).find(|e| e.accessible_role() == Some(AccessibleRole::Text))
+}
+
+#[test]
+fn the_settings_page_reports_each_choice() {
+    let ui = shown_window();
+    ui.set_page(3);
+    ui.set_settings_keep_in_tray(true);
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let l = log.clone();
+    ui.on_refresh_chosen(move |i| l.borrow_mut().push(format!("refresh {i}")));
+    let l = log.clone();
+    ui.on_theme_chosen(move |i| l.borrow_mut().push(format!("theme {i}")));
+    let l = log.clone();
+    ui.on_always_on_top_toggled(move |on| l.borrow_mut().push(format!("top {on}")));
+    let l = log.clone();
+    ui.on_tray_toggled(move |on| l.borrow_mut().push(format!("tray {on}")));
+    let l = log.clone();
+    ui.on_gpu_rendering_toggled(move |on| l.borrow_mut().push(format!("gpu {on}")));
+    radio(&ui, "2 s").invoke_accessible_default_action();
+    radio(&ui, "Dark").invoke_accessible_default_action();
+    switch(&ui, "Always on top").invoke_accessible_default_action();
+    switch(&ui, "Keep running in the tray when closed").invoke_accessible_default_action();
+    switch(&ui, "Use GPU rendering").invoke_accessible_default_action();
+    assert_eq!(*log.borrow(), ["refresh 2", "theme 2", "top true", "tray false", "gpu false"]);
+    // The owner sets the state; a switch or choice never changes itself.
+    assert_eq!(switch(&ui, "Keep running in the tray when closed").accessible_checked(), Some(true));
+    assert_eq!(radio(&ui, "1 s").accessible_checked(), Some(true));
+    assert_eq!(radio(&ui, "2 s").accessible_checked(), Some(false));
+}
+
+#[test]
+fn choices_and_switches_show_the_current_settings() {
+    let ui = shown_window();
+    ui.set_page(3);
+    ui.set_settings_theme(1);
+    ui.set_on_top(true);
+    let light = radio(&ui, "Light");
+    assert_eq!(light.accessible_checked(), Some(true));
+    assert_eq!(radio(&ui, "System").accessible_checked(), Some(false));
+    assert_eq!(switch(&ui, "Always on top").accessible_checked(), Some(true));
+    ui.set_on_top(false);
+    assert_eq!(switch(&ui, "Always on top").accessible_checked(), Some(false), "one always-on-top state (PF16)");
+}
+
+#[test]
+fn later_version_settings_are_shown_disabled() {
+    let ui = shown_window();
+    ui.set_page(3);
+    assert!(text(&ui, "Coming in a later version").is_some());
+    for label in ["Admin mode", "Open on Ctrl+Shift+Esc", "CPU temperature add-on"] {
+        let s = switch(&ui, label);
+        assert_eq!(s.accessible_enabled(), Some(false), "{label}");
+        assert_eq!(s.accessible_checked(), Some(false), "{label}");
+    }
+}
+
+#[test]
+fn an_open_modal_disables_the_settings() {
+    let ui = shown_window();
+    ui.set_page(3);
+    let picked = Rc::new(RefCell::new(Vec::new()));
+    let p = picked.clone();
+    ui.on_theme_chosen(move |i| p.borrow_mut().push(i));
+    let p = picked.clone();
+    ui.on_always_on_top_toggled(move |_| p.borrow_mut().push(-1));
+    ui.set_details_visible(true);
+    assert_eq!(radio(&ui, "Dark").accessible_enabled(), Some(false));
+    assert_eq!(switch(&ui, "Always on top").accessible_enabled(), Some(false));
+    radio(&ui, "Dark").invoke_accessible_default_action();
+    switch(&ui, "Always on top").invoke_accessible_default_action();
+    assert!(picked.borrow().is_empty(), "nothing beneath a modal acts");
+}
+
+#[test]
+fn the_rail_reaches_settings() {
+    let ui = window();
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_select_page(move |i| *p.borrow_mut() = Some(i));
+    El::find_by_accessible_label(&ui, "Settings page").next().expect("rail item").invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(3));
+    ui.set_page(3);
+    assert_eq!(El::find_by_accessible_label(&ui, "Settings page").next().unwrap().accessible_checked(), Some(true));
+}
+
+#[test]
+fn a_frame_never_lands_on_the_settings_page() {
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Settings);
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, frame(vec![row_view(1, "Editor", "")]));
+    b.apply(&ui, Frame { page: Page::Settings, ..Default::default() });
+    assert!(shown_ids(&ui).is_empty(), "an Overview frame is dropped while Settings shows");
+}
+
+#[test]
+fn apply_settings_sets_every_wired_property() {
+    let ui = window();
+    let s = Settings { refresh_ms: 5000, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: false };
+    negotium::settingspage::apply_settings(&ui, &s);
+    assert!(ui.get_on_top());
+    assert_eq!(ui.get_settings_refresh(), 3);
+    assert_eq!(ui.get_settings_theme(), 2);
+    assert!(!ui.get_settings_keep_in_tray());
+    assert!(!ui.get_settings_gpu_rendering());
+    assert!(ui.global::<negotium::Theme>().get_dark(), "the theme is applied, not just shown");
+    let s = Settings { theme: ThemeChoice::Light, ..Settings::default() };
+    negotium::settingspage::apply_settings(&ui, &s);
+    assert!(!ui.get_on_top());
+    assert_eq!(ui.get_settings_refresh(), 1);
+    assert_eq!(ui.get_settings_theme(), 1);
+    assert!(ui.get_settings_keep_in_tray());
+    assert!(ui.get_settings_gpu_rendering());
+    assert!(!ui.global::<negotium::Theme>().get_dark());
+}
+
+/// A fresh temp directory, removed when dropped.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("negotium-ui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Waits (up to 5 s) until `f` holds.
+fn eventually(what: &str, f: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !f() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Waits until the saved settings file holds what `f` expects.
+fn saved(path: &std::path::Path, what: &str, f: impl Fn(&Settings) -> bool) {
+    eventually(what, || matches!(negotium::settings::load(path), (s, negotium::settings::Loaded::File) if f(&s)));
+}
+
+/// The Settings page wired the way main.rs wires it, saving under `dir`.
+fn settings_wired(dir: &Scratch, s: Settings, fallback: bool) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>) {
+    let ui = shown_window();
+    ui.set_page(3);
+    let controls = Arc::new(Controls::default());
+    let settings = Rc::new(RefCell::new(s));
+    let marker = dir.0.join("renderer-fallback");
+    if fallback {
+        negotium::renderer::record_fallback_at(&marker).unwrap();
+    }
+    negotium::settingspage::apply_settings(&ui, &settings.borrow());
+    negotium::settingspage::SettingsWiring {
+        settings: settings.clone(),
+        saver: negotium::settings::Saver::new(dir.0.join("settings.json")),
+        controls: controls.clone(),
+        gpu_marker: marker,
+        fallback_recorded: fallback,
+    }
+    .install(&ui);
+    (ui, controls, settings)
+}
+
+#[test]
+fn a_choice_applies_at_once_shows_and_is_saved() {
+    let dir = Scratch::new("apply");
+    let path = dir.0.join("settings.json");
+    let (ui, controls, settings) = settings_wired(&dir, Settings { theme: ThemeChoice::Light, ..Settings::default() }, false);
+
+    radio(&ui, "0.5 s").invoke_accessible_default_action();
+    assert_eq!(controls.interval(), std::time::Duration::from_millis(500), "the worker ticks faster at once");
+    assert_eq!(radio(&ui, "0.5 s").accessible_checked(), Some(true));
+    saved(&path, "refresh 500 ms", |s| s.refresh_ms == 500);
+
+    radio(&ui, "Dark").invoke_accessible_default_action();
+    assert!(ui.global::<negotium::Theme>().get_dark(), "the theme applies at once");
+    assert_eq!(radio(&ui, "Dark").accessible_checked(), Some(true));
+    saved(&path, "theme dark", |s| s.theme == ThemeChoice::Dark);
+
+    switch(&ui, "Always on top").invoke_accessible_default_action();
+    assert!(ui.get_on_top(), "the window goes on top at once");
+    assert_eq!(switch(&ui, "Always on top").accessible_checked(), Some(true));
+    saved(&path, "always on top", |s| s.always_on_top);
+
+    switch(&ui, "Keep running in the tray when closed").invoke_accessible_default_action();
+    assert!(!settings.borrow().keep_in_tray, "the close handler reads the shared settings");
+    assert_eq!(switch(&ui, "Keep running in the tray when closed").accessible_checked(), Some(false));
+    saved(&path, "every choice", |s| {
+        *s == Settings { refresh_ms: 500, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: true }
+    });
+}
+
+const FALLBACK_NOTE: &str =
+    "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
+const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";
+
+#[test]
+fn the_gpu_switch_takes_effect_on_the_next_launch() {
+    let dir = Scratch::new("gpu");
+    let path = dir.0.join("settings.json");
+    let (ui, _controls, settings) = settings_wired(&dir, Settings::default(), false);
+    let gpu = || switch(&ui, "Use GPU rendering");
+    assert_eq!(gpu().accessible_checked(), Some(true));
+    assert!(text(&ui, RESTART_NOTE).is_none() && text(&ui, FALLBACK_NOTE).is_none(), "no note at launch");
+    gpu().invoke_accessible_default_action();
+    assert_eq!(gpu().accessible_checked(), Some(false));
+    assert!(!settings.borrow().gpu_rendering);
+    assert!(text(&ui, RESTART_NOTE).is_some(), "turning it off says when it applies");
+    saved(&path, "gpu off", |s| !s.gpu_rendering);
+    gpu().invoke_accessible_default_action();
+    assert_eq!(gpu().accessible_checked(), Some(true));
+    assert!(text(&ui, RESTART_NOTE).is_none(), "back to what this launch uses: nothing to restart for");
+    saved(&path, "gpu on", |s| s.gpu_rendering);
+}
+
+#[test]
+fn after_an_automatic_fallback_the_gpu_switch_is_off_and_turning_it_on_tries_again() {
+    let dir = Scratch::new("fallback");
+    let path = dir.0.join("settings.json");
+    let marker = dir.0.join("renderer-fallback");
+    let (ui, _controls, settings) = settings_wired(&dir, Settings::default(), true);
+    let gpu = || switch(&ui, "Use GPU rendering");
+    assert_eq!(gpu().accessible_checked(), Some(false), "the fallback shows the switch off");
+    assert!(text(&ui, FALLBACK_NOTE).is_some(), "and says why");
+    assert!(text(&ui, RESTART_NOTE).is_none());
+    gpu().invoke_accessible_default_action();
+    assert_eq!(gpu().accessible_checked(), Some(true));
+    assert!(text(&ui, FALLBACK_NOTE).is_none(), "the explanation goes");
+    assert!(text(&ui, RESTART_NOTE).is_some(), "the GPU is tried on the next launch");
+    assert!(settings.borrow().gpu_rendering);
+    eventually("the fallback marker is cleared", || !negotium::renderer::fallback_recorded_at(&marker));
+    saved(&path, "gpu on", |s| s.gpu_rendering);
+}
+
+/// The rect of each setting control on the page, by label.
+fn settings_rects(ui: &MainWindow) -> Vec<(String, Rect)> {
+    let mut out = Vec::new();
+    for l in ["0.5 s", "5 s", "System", "Dark"] {
+        out.push((l.to_string(), rect_of(&radio(ui, l))));
+    }
+    for l in ["Always on top", "Keep running in the tray when closed", "Use GPU rendering", "Admin mode", "CPU temperature add-on"] {
+        out.push((l.to_string(), rect_of(&switch(ui, l))));
+    }
+    out
+}
+
+/// The Settings page alone at `w` × `h`.
+fn settings_window(w: u32, h: u32) -> MainWindow {
+    thread_local! { static BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if !BACKEND.with(|b| b.replace(true)) {
+        i_slint_backend_testing::init_no_event_loop();
+    }
+    let ui = MainWindow::new().unwrap();
+    ui.window().set_size(PhysicalSize::new(w, h));
+    ui.set_page(3);
+    ui.show().unwrap();
+    ui
+}
+
+#[test]
+fn a_tall_window_leaves_the_settings_their_size_and_place() {
+    let measure = |h: u32| {
+        let ui = settings_window(1000, h);
+        (settings_rects(&ui), rect_of(&text(&ui, "Settings").expect("page title")))
+    };
+    let (short, short_title) = measure(1300);
+    let (tall, tall_title) = measure(2400);
+    assert_eq!(short_title, tall_title, "the title stays at the top");
+    assert_eq!(short, tall, "no setting moves or grows in a taller window");
+    for (label, r) in &tall {
+        assert!(r.3 <= 30.0, "{label} keeps its fixed height: {r:?}");
+    }
+}
+
+const REFRESH_DESC: &str = "How often numbers update while the window is open. In the tray Negotium updates every 2 s, or slower if you choose a slower rate.";
+
+#[test]
+fn settings_rows_wrap_without_overlap_at_the_smallest_window() {
+    let ui = settings_window(760, 440);
+    let theme = rect_of(&text(&ui, "Theme").expect("Theme title"));
+    let desc = rect_of(&text(&ui, REFRESH_DESC).expect("refresh description"));
+    assert!(desc.3 > 20.0, "the long description wraps onto more lines: {desc:?}");
+    assert!(desc.1 + desc.3 <= theme.1, "the next row starts below it: {desc:?} {theme:?}");
+    let choice = rect_of(&radio(&ui, "5 s"));
+    assert!(choice.0 >= desc.0 + desc.2, "the choices stay to the right of the text: {choice:?} {desc:?}");
+    // Rail 76 px; the page's scrollbar gutter is 14 px.
+    assert!(choice.0 + choice.2 <= 760.0 - 14.0, "and clear of the scrollbar gutter: {choice:?}");
+}

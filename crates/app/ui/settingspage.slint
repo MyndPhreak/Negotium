@@ -1,0 +1,216 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { FocusButton } from "focusbutton.slint";
+
+// An on/off switch. `checked` is owned by the caller: the switch only asks (`toggled` with the
+// requested state), so a refused change never leaves it showing the wrong state.
+export component Toggle inherits FocusButton {
+    in property <string> label;
+    in property <bool> checked;
+    callback toggled(bool);
+    width: 40px;
+    height: 20px;
+    vertical-stretch: 0;
+    border-radius: 10px;
+    background: root.checked && root.interactive ? Theme.accent : transparent;
+    border-width: root.focused ? 2px : (root.checked && root.interactive ? 0px : 1px);
+    border-color: root.focused ? Theme.text : (root.interactive ? Theme.muted : Theme.card-border);
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.interactive;
+    activated => { root.toggled(!root.checked); }
+    Rectangle {
+        x: root.checked ? root.width - 16px : 4px;
+        y: 4px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: !root.interactive ? Theme.card-border : (root.checked ? Theme.on-accent : Theme.muted);
+    }
+}
+
+component ChoiceButton inherits FocusButton {
+    in property <string> label;
+    in property <bool> selected;
+    height: 30px;
+    vertical-stretch: 0;
+    min-width: 56px;
+    border-radius: 4px;
+    background: root.selected ? Theme.accent : (root.hovered ? Theme.card : transparent);
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.text : Theme.card-border;
+    accessible-role: radio-button;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-enabled: root.interactive;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.on-accent : Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// One choice out of a few, as a row of buttons.
+export component Choice inherits HorizontalLayout {
+    in property <[string]> options;
+    in property <int> selected;
+    in property <bool> interactive: true;
+    callback chosen(int);
+    spacing: 4px;
+    alignment: start;
+    vertical-stretch: 0;
+    max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+    for o[i] in root.options : ChoiceButton {
+        label: o;
+        selected: i == root.selected;
+        interactive: root.interactive;
+        activated => { root.chosen(i); }
+    }
+}
+
+// A card: title and description on the left (the description wraps), the control on the right,
+// and an optional one-line note under the description.
+export component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <string> note;
+    min-height: 64px;
+    vertical-stretch: 0;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    background: Theme.card;
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 16px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text { text: root.title; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; }
+            if root.description != "" : Text { text: root.description; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+            if root.note != "" : Text { text: root.note; color: Theme.text; font-size: 11px; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            @children
+        }
+    }
+}
+
+export component SettingsPage inherits VerticalLayout {
+    in property <int> refresh;
+    in property <int> theme;
+    in property <bool> always-on-top;
+    in property <bool> keep-in-tray;
+    // The saved GPU choice, whether an automatic fallback to the CPU is recorded, and what the
+    // switch showed when this instance started (crate::settingspage).
+    in property <bool> gpu-rendering;
+    in property <bool> gpu-fallback;
+    in property <bool> gpu-at-launch;
+    in property <bool> interactive: true;
+    callback refresh-chosen(int);
+    callback theme-chosen(int);
+    callback always-on-top-toggled(bool);
+    callback tray-toggled(bool);
+    callback gpu-rendering-toggled(bool);
+    // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
+    property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
+    max-width: 16384px;
+    sv := ScrollView {
+        // Content width: the view less a gutter the scrollbar always gets (as on the Performance
+        // page). Not visible-width: the wrapped descriptions' height decides whether the
+        // scrollbar shows, so a width that depended on the scrollbar could flip back and forth.
+        property <length> content-w: max(0px, self.width - 14px);
+        content-width: self.content-w;
+        content-height: max(self.visible-height, body.preferred-height);
+        body := VerticalLayout {
+            width: sv.content-w;
+            height: sv.content-height;
+            padding: 24px;
+            spacing: 10px;
+            // Spare height stays empty below the last row.
+            alignment: start;
+            Text { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 600; vertical-stretch: 0; }
+            SettingRow {
+                title: "Refresh rate";
+                description: "How often numbers update while the window is open. In the tray Negotium updates every 2 s, or slower if you choose a slower rate.";
+                Choice {
+                    options: ["0.5 s", "1 s", "2 s", "5 s"];
+                    selected: root.refresh;
+                    interactive: root.interactive;
+                    chosen(i) => { root.refresh-chosen(i); }
+                }
+            }
+            SettingRow {
+                title: "Theme";
+                description: "System follows Windows' light or dark mode.";
+                Choice {
+                    options: ["System", "Light", "Dark"];
+                    selected: root.theme;
+                    interactive: root.interactive;
+                    chosen(i) => { root.theme-chosen(i); }
+                }
+            }
+            SettingRow {
+                title: "Always on top";
+                description: "Keep Negotium above other windows.";
+                Toggle {
+                    label: "Always on top";
+                    checked: root.always-on-top;
+                    interactive: root.interactive;
+                    toggled(on) => { root.always-on-top-toggled(on); }
+                }
+            }
+            SettingRow {
+                title: "Keep running in the tray when closed";
+                description: "Closing the window keeps Negotium in the notification area: history keeps recording and reopening is instant.";
+                Toggle {
+                    label: "Keep running in the tray when closed";
+                    checked: root.keep-in-tray;
+                    interactive: root.interactive;
+                    toggled(on) => { root.tray-toggled(on); }
+                }
+            }
+            SettingRow {
+                title: "Use GPU rendering";
+                description: "Draw the window with the graphics card: smoother resizing. Turn off if the window shows glitches.";
+                note: root.gpu-fallback
+                    ? "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again."
+                    : (root.gpu-shown != root.gpu-at-launch ? "Takes effect when Negotium restarts." : "");
+                Toggle {
+                    label: "Use GPU rendering";
+                    checked: root.gpu-shown;
+                    interactive: root.interactive;
+                    toggled(on) => { root.gpu-rendering-toggled(on); }
+                }
+            }
+            Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
+            SettingRow {
+                title: "Admin mode";
+                description: "Start with admin rights without a prompt.";
+                Toggle { label: "Admin mode"; checked: false; interactive: false; }
+            }
+            SettingRow {
+                title: "Open on Ctrl+Shift+Esc";
+                description: "Open Negotium instead of Task Manager.";
+                Toggle { label: "Open on Ctrl+Shift+Esc"; checked: false; interactive: false; }
+            }
+            SettingRow {
+                title: "CPU temperature add-on";
+                description: "Show the CPU temperature (installs the PawnIO driver from its publisher).";
+                Toggle { label: "CPU temperature add-on"; checked: false; interactive: false; }
+            }
+        }
+    }
+}

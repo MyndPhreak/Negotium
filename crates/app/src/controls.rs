@@ -13,13 +13,21 @@ pub enum Page {
     #[default]
     Overview = 0,
     Performance = 1,
+    Startup = 2,
+    Settings = 3,
 }
 
 impl Page {
-    pub const ALL: [Page; 2] = [Page::Overview, Page::Performance];
+    pub const ALL: [Page; 4] = [Page::Overview, Page::Performance, Page::Startup, Page::Settings];
 
+    /// Unknown indexes fall back to the Overview.
     pub fn from_index(i: i32) -> Page {
-        Self::ALL[(i.max(0) as usize).min(Self::ALL.len() - 1)]
+        match i {
+            1 => Page::Performance,
+            2 => Page::Startup,
+            3 => Page::Settings,
+            _ => Page::Overview,
+        }
     }
 
     pub fn index(self) -> i32 {
@@ -233,7 +241,9 @@ mod tests {
         c.adopt_device("cpu");
         assert!(!c.wait(Duration::from_millis(20)), "a fallback adopted from a frame needs no new frame");
         assert_eq!(c.perf().0, "cpu");
-        assert_eq!(Page::from_index(9), Page::Performance);
+        assert_eq!(Page::ALL.map(Page::index), [0, 1, 2, 3]);
+        assert_eq!(Page::from_index(3), Page::Settings);
+        assert_eq!(Page::from_index(9), Page::Overview, "unknown pages fall back to the Overview");
         assert_eq!(Page::from_index(-2), Page::Overview);
     }
 

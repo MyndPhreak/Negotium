@@ -23,8 +23,9 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, GetPropW, GetWindowThreadProcessId, IsIconic,
-    MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SW_RESTORE, SetForegroundWindow, SetPropW,
-    ShowWindow, WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE,
+    MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
+    WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
@@ -90,6 +91,14 @@ pub fn apply_theme_with(ui: &MainWindow, theme: ThemeChoice, system_dark: bool) 
     apply_window_chrome(ui);
 }
 
+/// [`ShellEvent::SettingsChanged`]: the system theme or accent changed. The accent is re-read and
+/// the chosen theme re-applied, which only moves the colours when it is System
+/// (`settings::effective_dark`); the title bar and Mica are re-asserted either way.
+pub fn on_settings_changed(ui: &MainWindow, theme: ThemeChoice) {
+    apply_accent(ui);
+    apply_theme(ui, theme);
+}
+
 fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
     let handle = ui.window().window_handle();
     let raw = handle.window_handle().ok()?.as_raw();
@@ -116,6 +125,12 @@ pub fn apply_window_chrome(ui: &MainWindow) -> bool {
         )
     }
     .is_ok();
+    // The caption keeps its old colours until the non-client area is redrawn: ask for that now
+    // (no move, size, z-order or activation change).
+    // SAFETY: plain call on our own window handle.
+    let _ = unsafe {
+        SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+    };
     // SAFETY: as above; DWMSBT_MAINWINDOW is a DWM_SYSTEMBACKDROP_TYPE (i32).
     let mica_ok = unsafe {
         DwmSetWindowAttribute(
@@ -157,8 +172,8 @@ pub enum ShellEvent {
     TaskbarCreated,
     /// A second launch asked this instance to show itself.
     Activate,
-    /// The system theme or accent colour may have changed (WM_SETTINGCHANGE,
-    /// WM_DWMCOLORIZATIONCOLORCHANGED).
+    /// The system theme or accent colour may have changed: WM_SETTINGCHANGE for
+    /// "ImmersiveColorSet" (light/dark mode) or WM_DWMCOLORIZATIONCOLORCHANGED (accent).
     SettingsChanged,
 }
 
@@ -238,12 +253,25 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
-    } else if msg == WM_SETTINGCHANGE || msg == WM_DWMCOLORIZATIONCOLORCHANGED {
+    } else if (msg == WM_SETTINGCHANGE && is_colour_scheme_change(lparam)) || msg == WM_DWMCOLORIZATIONCOLORCHANGED {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::SettingsChanged) };
     }
     // SAFETY: forwards to the next procedure in the subclass chain.
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// Whether a WM_SETTINGCHANGE names the colour scheme ("ImmersiveColorSet"). It is broadcast
+/// for many unrelated changes (locale, environment, policies); those name another area or none.
+fn is_colour_scheme_change(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return false;
+    }
+    let area = PCWSTR(lparam.0 as *const u16);
+    // SAFETY: for WM_SETTINGCHANGE a non-null lParam points to a NUL-terminated UTF-16 string (the
+    // changed area; the system marshals it across processes), valid while the message is handled.
+    let area = unsafe { area.as_wide() };
+    area.iter().copied().eq("ImmersiveColorSet".encode_utf16())
 }
 
 /// Removes the mark set by [`mark_main_window`] (the instance is exiting).
@@ -401,7 +429,7 @@ mod tests {
 
     #[test]
     fn shell_messages_reach_the_main_window_hook() {
-        use windows::Win32::UI::WindowsAndMessaging::{WM_DWMCOLORIZATIONCOLORCHANGED, WM_SETTINGCHANGE};
+        use windows::Win32::UI::WindowsAndMessaging::WM_DWMCOLORIZATIONCOLORCHANGED;
         let hwnd = hidden_window();
         let seen = Rc::new(RefCell::new(Vec::new()));
         let s = seen.clone();
@@ -410,14 +438,35 @@ mod tests {
         unsafe {
             SendMessageW(hwnd, activate_message(), Some(WPARAM(0)), Some(LPARAM(0)));
             SendMessageW(hwnd, taskbar_created_message(), Some(WPARAM(0)), Some(LPARAM(0)));
-            SendMessageW(hwnd, WM_SETTINGCHANGE, Some(WPARAM(0)), Some(LPARAM(0)));
             SendMessageW(hwnd, WM_DWMCOLORIZATIONCOLORCHANGED, Some(WPARAM(0)), Some(LPARAM(0)));
             let _ = DestroyWindow(hwnd);
         }
-        assert_eq!(
-            *seen.borrow(),
-            [ShellEvent::Activate, ShellEvent::TaskbarCreated, ShellEvent::SettingsChanged, ShellEvent::SettingsChanged]
-        );
+        assert_eq!(*seen.borrow(), [ShellEvent::Activate, ShellEvent::TaskbarCreated, ShellEvent::SettingsChanged]);
+    }
+
+    #[test]
+    fn only_a_colour_scheme_setting_change_reaches_the_hook() {
+        use windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE;
+        let hwnd = hidden_window();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        assert!(install_window_hooks(hwnd, move |e| s.borrow_mut().push(e)));
+        let send = |area: Option<PCWSTR>| {
+            let lparam = LPARAM(area.map_or(0, |a| a.as_ptr() as isize));
+            // SAFETY: synchronous send to our own window; `area` is a NUL-terminated literal.
+            unsafe { SendMessageW(hwnd, WM_SETTINGCHANGE, Some(WPARAM(0)), Some(lparam)) };
+        };
+        send(None);
+        send(Some(w!("intl")));
+        send(Some(w!("Environment")));
+        send(Some(w!("ImmersiveColorSetX")));
+        assert!(seen.borrow().is_empty(), "unrelated or unnamed setting changes are ignored");
+        send(Some(w!("ImmersiveColorSet")));
+        assert_eq!(*seen.borrow(), [ShellEvent::SettingsChanged], "a colour scheme change reaches the hook");
+        // SAFETY: our own test window.
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
     }
 
     #[test]
@@ -426,17 +475,6 @@ mod tests {
         assert!(!dark_from(Some(1)), "AppsUseLightTheme = 1: light");
         assert!(!dark_from(Some(7)), "any other value is not 0: light");
         assert!(!dark_from(None), "missing value (older Windows, policy): light, as Windows itself defaults");
-    }
-
-    #[test]
-    fn a_system_theme_flip_moves_only_the_system_choice() {
-        use crate::settings::{ThemeChoice, effective_dark};
-        // Review Focus 5: what SettingsChanged re-applies, for each choice, before and after a flip.
-        let follows = |t: ThemeChoice| effective_dark(t, false) != effective_dark(t, true);
-        assert!(follows(ThemeChoice::System), "System follows the flip");
-        assert!(!follows(ThemeChoice::Light), "Light stays light");
-        assert!(!follows(ThemeChoice::Dark), "Dark stays dark");
-        assert!(!effective_dark(ThemeChoice::Light, true) && effective_dark(ThemeChoice::Dark, false));
     }
 
     #[test]

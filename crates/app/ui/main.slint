@@ -6,6 +6,7 @@ import { AppList, RowData } from "applist.slint";
 import { Banner, Toast, Modal } from "overlays.slint";
 import { Rail } from "rail.slint";
 import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
+import { SettingsPage } from "settingspage.slint";
 import { GraphData, ScrubRow } from "graph.slint";
 export { NegotiumTray } from "tray.slint";
 export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow }
@@ -20,7 +21,7 @@ export component MainWindow inherits Window {
     default-font-family: "Segoe UI Variable Text";
     background: Theme.window-bg;
 
-    // Page shown: 0 Overview, 1 Performance (crate::controls::Page).
+    // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings (crate::controls::Page).
     in-out property <int> page: 0;
     in property <[MeterData]> meters;
     in property <int> selected-metric;
@@ -79,9 +80,23 @@ export component MainWindow inherits Window {
     callback list-focus(bool);
     callback list-key(string) -> bool;
 
-    // Settings > Always on top.
-    in property <bool> on-top;
+    // Settings (crate::settings::Settings, shown by crate::settingspage): refresh index (0.5 / 1 /
+    // 2 / 5 s), theme index (System / Light / Dark), the switches. `on-top` is both the window's
+    // state and the switch's. The GPU switch also needs whether an automatic fallback is recorded
+    // and what it showed at launch (a change takes effect on the next launch).
+    in-out property <int> settings-refresh: 1;
+    in-out property <int> settings-theme: 0;
+    in-out property <bool> on-top;
     always-on-top: root.on-top;
+    in-out property <bool> settings-keep-in-tray: true;
+    in-out property <bool> settings-gpu-rendering: true;
+    in-out property <bool> settings-gpu-fallback;
+    in property <bool> settings-gpu-at-launch: true;
+    callback refresh-chosen(int);
+    callback theme-chosen(int);
+    callback always-on-top-toggled(bool);
+    callback tray-toggled(bool);
+    callback gpu-rendering-toggled(bool);
     // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
     // function, not a `changed` handler, so Theme.dark is current as soon as it returns.
     public function set-dark(dark: bool) {
@@ -234,6 +249,28 @@ export component MainWindow inherits Window {
                     scrub-empty: root.scrub-empty;
                     scrub-rows: root.scrub-rows;
                     scrub(f) => { root.scrub(f); }
+                }
+            }
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 3;
+                SettingsPage {
+                    refresh: root.settings-refresh;
+                    theme: root.settings-theme;
+                    always-on-top: root.on-top;
+                    keep-in-tray: root.settings-keep-in-tray;
+                    gpu-rendering: root.settings-gpu-rendering;
+                    gpu-fallback: root.settings-gpu-fallback;
+                    gpu-at-launch: root.settings-gpu-at-launch;
+                    interactive: !root.modal-open;
+                    refresh-chosen(i) => { root.refresh-chosen(i); }
+                    theme-chosen(i) => { root.theme-chosen(i); }
+                    always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
+                    tray-toggled(on) => { root.tray-toggled(on); }
+                    gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
                 }
             }
         }

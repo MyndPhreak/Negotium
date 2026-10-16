@@ -164,6 +164,8 @@ impl Source for LiveSource {
                 });
                 Some(Frame { page: Page::Performance, perf: Some(perf), ..Default::default() })
             }
+            // Nothing on these pages changes per tick.
+            Page::Startup | Page::Settings => None,
         }
     }
 }
@@ -241,6 +243,17 @@ mod tests {
         assert_eq!(perf.selected, "cpu");
         assert!(f.meters.is_empty() && f.tiles.is_empty() && f.rows.is_empty() && f.targets.is_empty(),
             "no Overview view while Performance shows");
+
+        // Nothing on the Startup and Settings pages changes per tick: no frame (PF12), while
+        // collection and history go on.
+        for page in [Page::Startup, Page::Settings] {
+            controls.set_page(page);
+            let before = source.history.lock().unwrap().len();
+            std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
+            assert!(source.next_frame(&controls).is_none(), "no frame is built for {page:?}");
+            assert!(source.history.lock().unwrap().len() > before, "{page:?}: collection and history keep running");
+        }
+        controls.set_page(Page::Performance);
 
         controls.set_visible(false);
         let before = source.history.lock().unwrap().len();
