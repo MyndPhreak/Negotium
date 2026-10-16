@@ -101,6 +101,16 @@ fn read_history<R>(history: &SharedHistory, f: impl FnOnce(&History) -> R) -> R 
     result.unwrap_or_else(|p| std::panic::resume_unwind(p))
 }
 
+/// Offers the tick's sample to the history, which keeps at most one a second (P3-3). For a kept
+/// sample while the tray graph is wanted (`for_tray`), returns the tray's minute up to it, read
+/// under the same lock as the push that kept it.
+fn keep_sample(history: &SharedHistory, snap: &negotium_snapshot::Snapshot, rows: &[negotium_model::AppRow], for_tray: bool) -> Option<TraySample> {
+    write_history(history, |h| {
+        let kept = h.push(snap.taken_at_ms, &snap.totals, rows);
+        (kept && for_tray).then(|| TraySample::from_history(h, snap.taken_at_ms, snap.totals.cpu_pct))
+    })
+}
+
 pub struct LiveSource {
     collector: Collector,
     info: SystemInfo,
@@ -155,12 +165,7 @@ impl Source for LiveSource {
             self.log.warn(e);
         }
         let rows = self.model.update(&snap);
-        // The tray's minute is read under the same lock as the push that kept the sample.
-        let for_tray = controls.tray_cpu() && self.tray.is_some();
-        let tray_sample = write_history(&self.history, |h| {
-            let kept = h.push(snap.taken_at_ms, &snap.totals, &rows);
-            (kept && for_tray).then(|| TraySample::from_history(h, snap.taken_at_ms, snap.totals.cpu_pct))
-        });
+        let tray_sample = keep_sample(&self.history, &snap, &rows, controls.tray_cpu() && self.tray.is_some());
         // Every tick, visible or hidden, so the tray never waits on a stale answer (crate::tray, PF2).
         controls.set_shell_hung(crate::platform::shell_tray_hung());
         if let (Some(sample), Some(tray)) = (tray_sample, &self.tray) {
@@ -326,28 +331,37 @@ mod tests {
     fn the_tray_gets_one_cpu_sample_per_kept_sample_even_while_hidden() {
         let got: Arc<Mutex<Vec<crate::tray::TraySample>>> = Default::default();
         let sink_got = got.clone();
-        let mut source = LiveSource::new(SharedHistory::default(), Instant::now(), IdSeed::default())
+        let history = SharedHistory::default();
+        let mut source = LiveSource::new(history.clone(), Instant::now(), IdSeed::default())
             .with_tray(Arc::new(move |s| sink_got.lock().unwrap().push(s)));
         let dir = std::env::temp_dir().join(format!("negotium-worker-tray-{}", std::process::id()));
         source.log = crate::log::Log::new(dir.join("negotium.log"));
+        // An empty history keeps the next tick's sample whenever it lands (no wall-clock wait).
+        let empty = || *history.lock().unwrap() = History::new();
         let controls = Controls::default();
         controls.set_visible(false);
         source.next_frame(&controls);
         assert!(got.lock().unwrap().is_empty(), "off until Settings turns it on");
         controls.set_tray_cpu(true);
-        std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
+        empty();
         controls.set_shell_hung(true);
         assert!(source.next_frame(&controls).is_none(), "hidden in the tray: no frame");
         assert_eq!(controls.shell_hung(), crate::platform::shell_tray_hung(), "the taskbar's state is stored while hidden");
         let first = got.lock().unwrap().first().cloned().expect("but the tray gets the sample");
         assert_eq!(first.points.last().map(|p| p.0), Some(first.end_ms), "the minute up to this sample");
-        source.next_frame(&controls); // too soon: the history keeps no sample
-        assert_eq!(got.lock().unwrap().len(), 1, "one icon per kept sample");
         controls.set_tray_cpu(false);
-        std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
+        empty();
         source.next_frame(&controls);
         assert_eq!(got.lock().unwrap().len(), 1, "switched off: no more samples");
         let _ = std::fs::remove_dir_all(dir);
+        // One icon per kept sample, at pinned collector times: a tick too soon after the last kept
+        // sample (MIN_SPACING_MS) gets none.
+        let (h, at) = (SharedHistory::default(), |t: u64| negotium_snapshot::Snapshot { taken_at_ms: t, ..Default::default() });
+        let spacing = negotium_history::MIN_SPACING_MS;
+        assert!(keep_sample(&h, &at(10_000), &[], true).is_some_and(|s| s.end_ms == 10_000), "kept: an icon");
+        assert!(keep_sample(&h, &at(10_000 + spacing - 1), &[], true).is_none(), "too soon: not kept, no icon");
+        assert!(keep_sample(&h, &at(10_000 + spacing), &[], false).is_none(), "kept, but the tray graph is off");
+        assert!(keep_sample(&h, &at(10_000 + 2 * spacing), &[], true).is_some(), "the next kept sample: an icon");
     }
 
     #[test]
