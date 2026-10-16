@@ -2,7 +2,7 @@
 use crate::perf::Range;
 use negotium_model::Metric;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -34,6 +34,8 @@ pub struct Controls {
     perf: Mutex<(String, Range)>,
     frozen: AtomicBool,
     visible: AtomicBool,
+    /// Refresh interval while visible (Settings), milliseconds.
+    refresh_ms: AtomicU32,
     stop: AtomicBool,
     /// Expanded app row ids and whether a search is active: the worker builds child rows only
     /// for those (spec section 8: no per-process formatting for rows nobody can see).
@@ -52,6 +54,7 @@ impl Default for Controls {
             perf: Mutex::new(("cpu".to_string(), Range::Minute)),
             frozen: AtomicBool::new(false),
             visible: AtomicBool::new(true),
+            refresh_ms: AtomicU32::new(1000),
             stop: AtomicBool::new(false),
             child_rows: Mutex::new((HashSet::new(), false)),
             woken: Mutex::new(false),
@@ -103,8 +106,16 @@ impl Controls {
     pub fn visible(&self) -> bool {
         self.visible.load(Ordering::Relaxed)
     }
+    /// Sets the refresh rate (Settings) and wakes the worker, so it takes effect at once. The
+    /// history still keeps at most one sample per second (`negotium_history::MIN_SPACING_MS`).
+    pub fn set_refresh_ms(&self, ms: u32) {
+        self.refresh_ms.store(ms.max(100), Ordering::Relaxed);
+        self.poke();
+    }
+    /// The chosen rate while visible; hidden in the tray, 2 s or the chosen rate if slower (spec 4.2).
     pub fn interval(&self) -> Duration {
-        if self.visible() { Duration::from_secs(1) } else { Duration::from_secs(2) }
+        let refresh = self.refresh_ms.load(Ordering::Relaxed).max(100) as u64;
+        Duration::from_millis(if self.visible() { refresh } else { refresh.max(2000) })
     }
     /// Shares which apps need child rows. Wakes the worker when more are needed (an expand, or a
     /// search starting), so they show without waiting for the next tick.
@@ -159,6 +170,21 @@ mod tests {
         assert_eq!(c.interval(), Duration::from_secs(1));
         c.set_visible(false);
         assert_eq!(c.interval(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_refresh_rate_applies_while_visible_and_never_speeds_up_the_tray() {
+        let c = Controls::default();
+        c.set_refresh_ms(500);
+        assert!(c.wait(Duration::from_millis(20)), "a new rate takes effect at once");
+        c.set_visible(true);
+        assert_eq!(c.interval(), Duration::from_millis(500));
+        c.set_visible(false);
+        assert_eq!(c.interval(), Duration::from_secs(2), "hidden: 2 s (spec 4.2)");
+        c.set_refresh_ms(5000);
+        assert_eq!(c.interval(), Duration::from_secs(5), "hidden never ticks faster than chosen");
+        c.set_visible(true);
+        assert_eq!(c.interval(), Duration::from_secs(5));
     }
 
     #[test]

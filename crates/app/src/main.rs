@@ -53,7 +53,7 @@ fn make_tray(controls: &Arc<Controls>, weak: &slint::Weak<MainWindow>) -> Result
 fn main() -> Result<(), slint::PlatformError> {
     // One instance per session. A second launch shows the running one (even from the tray) and
     // exits; a restart (as admin) waits for the old instance to finish quitting.
-    let restarted = std::env::args().any(|a| a == "--restarted");
+    let restarted = std::env::args_os().any(|a| a == "--restarted");
     let wait = if restarted { Duration::from_secs(10) } else { Duration::ZERO };
     let _instance = match platform::claim_instance(platform::INSTANCE_MUTEX, wait) {
         Some(lock) => lock,
@@ -79,13 +79,18 @@ fn main() -> Result<(), slint::PlatformError> {
     // (crate::renderer; docs/benchmarks/README.md, "Renderer").
     let relaunched = std::env::args_os().any(|a| a == renderer::FALLBACK_ARG);
     // Read once, before the window shows (allowed on the UI thread).
-    let (settings, loaded) = settings::load(&settings::default_path());
+    let settings_path = settings::default_path();
+    let (settings, loaded) = settings::load(&settings_path);
     match &loaded {
         settings::Loaded::Recovered(why) => {
             warn(&format!("settings.json was unusable and was set aside as settings.json.bad: {why}"));
         }
         settings::Loaded::Partial(fields) => warn(&format!(
             "settings.json had invalid fields ({}); they use their defaults and the original is in settings.json.bad",
+            fields.join(", ")
+        )),
+        settings::Loaded::PartialNotKept(fields, why) => warn(&format!(
+            "settings.json had invalid fields ({}); they use their defaults, and the original could not be copied to settings.json.bad: {why}",
             fields.join(", ")
         )),
         settings::Loaded::Unreadable(why) => warn(&format!("settings.json could not be read, using defaults: {why}")),
@@ -113,9 +118,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // the processes Negotium starts (Open file location, Run new task). No other thread runs yet.
     platform::remove_env_var("SLINT_BACKEND");
     // Armed before the window is created: creating it already probes OpenGL.
-    let watchdog = decision
-        .watchdog
-        .then(|| renderer::Watchdog::arm(renderer::WATCHDOG_TIMEOUT, renderer::relaunch_in_software).0);
+    // The relaunch (exe path, arguments) is resolved now, so the stall path only spawns.
+    let watchdog = decision.watchdog.then(|| {
+        let relaunch = renderer::SoftwareRelaunch::resolve();
+        renderer::Watchdog::arm(renderer::WATCHDOG_TIMEOUT, move || relaunch.run()).0
+    });
     // Whether the tray icon may be created: not while the watchdog could still replace this
     // instance (it terminates without cleanup and would orphan the icon).
     let tray_allowed = {
@@ -123,10 +130,13 @@ fn main() -> Result<(), slint::PlatformError> {
         move || watchdog.as_ref().is_none_or(|w| w.resolved())
     };
     let ui = MainWindow::new()?;
-    if let Some((r, g, b)) = platform::read_accent() {
-        ui.global::<negotium::Theme>().set_accent(slint::Color::from_rgb_u8(r, g, b));
-    }
+    platform::apply_accent(&ui);
+    // Settings in effect for this run; Task 3's page changes them and saves to `settings_path`.
+    let settings = Rc::new(RefCell::new(settings));
+    platform::apply_theme(&ui, settings.borrow().theme);
+    ui.set_on_top(settings.borrow().always_on_top);
     let controls = Arc::new(Controls::default());
+    controls.set_refresh_ms(settings.borrow().refresh_ms);
     let bridge = Bridge::install(&ui, controls.clone());
 
     // Worker -> UI thread through a latest-frame slot: one wakeup is posted only when the slot was
@@ -249,21 +259,21 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_dismiss_banner(move || b.borrow_mut().dismiss_banner());
     }
 
-    // Close hides to tray (spec 5.5); the worker slows to 2 s while hidden. With --exit-on-close
-    // (benchmark use only) it quits instead, so a WM_CLOSE from the bench ends the process.
-    let exit_on_close = std::env::args().any(|a| a == "--exit-on-close");
+    // Close hides to tray (spec 5.5) while "Keep running in tray" is on; the worker then ticks every
+    // 2 s (or slower, Controls::interval). Otherwise, or with --exit-on-close (benchmark use only),
+    // it quits, so a WM_CLOSE from the bench ends the process.
+    let exit_on_close = std::env::args_os().any(|a| a == "--exit-on-close");
     {
-        let controls = controls.clone();
-        let b = bridge.clone();
-        let close_weak = weak.clone();
+        let (controls, b, close_weak, settings) = (controls.clone(), bridge.clone(), weak.clone(), settings.clone());
         ui.window().on_close_requested(move || {
-            if exit_on_close {
-                begin_exit(&controls, &close_weak);
-                return slint::CloseRequestResponse::HideWindow;
+            match settings::close_action(settings.borrow().keep_in_tray, exit_on_close) {
+                settings::CloseAction::Exit => begin_exit(&controls, &close_weak),
+                settings::CloseAction::HideToTray => {
+                    controls.set_visible(false);
+                    // A hidden window cannot report pointer-leave, so release the hover freeze here.
+                    b.borrow_mut().set_hover(false);
+                }
             }
-            controls.set_visible(false);
-            // A hidden window cannot report pointer-leave, so release the hover freeze here.
-            b.borrow_mut().set_hover(false);
             slint::CloseRequestResponse::HideWindow
         });
     }
@@ -429,11 +439,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 platform::apply_window_chrome(&ui);
                 let hooked = {
                     let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
-                    let tray_allowed = tray_allowed.clone();
+                    let (tray_allowed, settings) = (tray_allowed.clone(), settings.clone());
                     platform::install_window_hooks(hwnd, move |event| {
                         // The hook runs inside the window procedure: act from the event loop instead.
                         let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
-                        let tray_allowed = tray_allowed.clone();
+                        let (tray_allowed, settings) = (tray_allowed.clone(), settings.clone());
                         slint::Timer::single_shot(Duration::ZERO, move || match event {
                             // Explorer restarted (perhaps ended from this very list): add the icon again.
                             // Before the watchdog resolves, the first creation below adds it.
@@ -445,6 +455,15 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                             ShellEvent::TaskbarCreated => {}
                             ShellEvent::Activate => show_main(&controls, &weak),
+                            // The system theme or accent may have changed. The scheme, title bar
+                            // and Mica are re-applied for the chosen theme, which only moves them
+                            // when it is System (settings::effective_dark).
+                            ShellEvent::SettingsChanged => {
+                                if let Some(ui) = weak.upgrade() {
+                                    platform::apply_accent(&ui);
+                                    platform::apply_theme(&ui, settings.borrow().theme);
+                                }
+                            }
                         });
                     })
                 };

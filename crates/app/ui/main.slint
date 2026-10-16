@@ -1,3 +1,4 @@
+import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { MetersRow, MeterData } from "meters.slint";
 import { TopStrip, TileData } from "topstrip.slint";
@@ -77,6 +78,15 @@ export component MainWindow inherits Window {
     callback scrub(float);
     callback list-focus(bool);
     callback list-key(string) -> bool;
+
+    // Settings > Always on top.
+    in property <bool> on-top;
+    always-on-top: root.on-top;
+    // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
+    // function, not a `changed` handler, so Theme.dark is current as soon as it returns.
+    public function set-dark(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
 
     // Scrolls the app list so row `i` is fully visible.
     public function ensure-row-visible(i: int) {

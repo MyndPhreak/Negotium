@@ -1,6 +1,8 @@
 //! Window setup on the UI thread (allowed by the Global Constraints): Mica backdrop, title-bar
-//! theme and the user's accent colour; the main-window hooks for tray re-creation and
+//! theme, the colour scheme and the user's accent colour (re-applied when the system theme or
+//! accent changes); the main-window hooks for tray re-creation and
 //! activation; and the single-instance lock.
+use crate::settings::{ThemeChoice, effective_dark};
 use crate::{MainWindow, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::ComponentHandle;
@@ -22,7 +24,7 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, GetPropW, GetWindowThreadProcessId, IsIconic,
     MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SW_RESTORE, SetForegroundWindow, SetPropW,
-    ShowWindow, WM_NCDESTROY,
+    ShowWindow, WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
@@ -31,22 +33,61 @@ pub fn accent_from_dword(v: u32) -> (u8, u8, u8) {
     ((v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, ((v >> 16) & 0xFF) as u8)
 }
 
-pub fn read_accent() -> Option<(u8, u8, u8)> {
+/// Reads a REG_DWORD under HKEY_CURRENT_USER; `None` if it is missing or of another type.
+fn read_hkcu_dword(subkey: PCWSTR, value_name: PCWSTR) -> Option<u32> {
     let mut value = 0u32;
     let mut size = std::mem::size_of::<u32>() as u32;
-    // SAFETY: `value`/`size` are valid for a REG_DWORD read.
+    // SAFETY: `value`/`size` are valid for a REG_DWORD read; both names are NUL-terminated literals.
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
-            w!("Software\\Microsoft\\Windows\\DWM"),
-            w!("AccentColor"),
+            subkey,
+            value_name,
             RRF_RT_REG_DWORD,
             None,
             Some(&mut value as *mut u32 as *mut c_void),
             Some(&mut size),
         )
     };
-    (status == ERROR_SUCCESS).then(|| accent_from_dword(value))
+    (status == ERROR_SUCCESS).then_some(value)
+}
+
+pub fn read_accent() -> Option<(u8, u8, u8)> {
+    read_hkcu_dword(w!("Software\\Microsoft\\Windows\\DWM"), w!("AccentColor")).map(accent_from_dword)
+}
+
+/// Sets `Theme.accent` to the user's accent colour; keeps the current one if it can't be read.
+pub fn apply_accent(ui: &MainWindow) {
+    if let Some((r, g, b)) = read_accent() {
+        ui.global::<Theme>().set_accent(slint::Color::from_rgb_u8(r, g, b));
+    }
+}
+
+/// `AppsUseLightTheme`: 0 means dark. Missing (older Windows, removed by policy) means light,
+/// which is what Windows itself assumes.
+pub fn dark_from(apps_use_light_theme: Option<u32>) -> bool {
+    apps_use_light_theme == Some(0)
+}
+
+/// Whether Windows apps use the dark theme (Settings > Personalization > Colors).
+pub fn system_prefers_dark() -> bool {
+    dark_from(read_hkcu_dword(
+        w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+        w!("AppsUseLightTheme"),
+    ))
+}
+
+/// Applies a theme choice: the colour scheme (immediately, through `set-dark`), then the title bar
+/// and Mica to match (a no-op until the native window exists; the chrome timer applies it then).
+pub fn apply_theme(ui: &MainWindow, theme: ThemeChoice) {
+    apply_theme_with(ui, theme, system_prefers_dark());
+}
+
+/// [`apply_theme`] with the system's preference given, so a system flip can be tested. With
+/// Light or Dark chosen the result ignores `system_dark` (`settings::effective_dark`).
+pub fn apply_theme_with(ui: &MainWindow, theme: ThemeChoice, system_dark: bool) {
+    ui.invoke_set_dark(effective_dark(theme, system_dark));
+    apply_window_chrome(ui);
 }
 
 fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
@@ -58,8 +99,9 @@ fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
     }
 }
 
-/// Applies the dark/light title bar and the Mica backdrop. Returns true (and sets
-/// `Theme.mica`) only if both DWM calls succeed.
+/// Applies the dark/light title bar (from `Theme.dark`) and the Mica backdrop. `Theme.mica`
+/// follows the backdrop call alone: a failed dark-mode call leaves the title bar's colour wrong,
+/// not the content's background. Returns true only if both DWM calls succeed.
 pub fn apply_window_chrome(ui: &MainWindow) -> bool {
     let Some(hwnd) = hwnd_of(ui) else { return false };
     let dark = BOOL::from(ui.global::<Theme>().get_dark());
@@ -84,9 +126,8 @@ pub fn apply_window_chrome(ui: &MainWindow) -> bool {
         )
     }
     .is_ok();
-    let applied = dark_ok && mica_ok;
-    ui.global::<Theme>().set_mica(applied);
-    applied
+    ui.global::<Theme>().set_mica(mica_ok);
+    dark_ok && mica_ok
 }
 
 /// The main window's native handle, once it exists.
@@ -116,6 +157,9 @@ pub enum ShellEvent {
     TaskbarCreated,
     /// A second launch asked this instance to show itself.
     Activate,
+    /// The system theme or accent colour may have changed (WM_SETTINGCHANGE,
+    /// WM_DWMCOLORIZATIONCOLORCHANGED).
+    SettingsChanged,
 }
 
 // Cached: the subclass compares every message the main window receives against these.
@@ -139,7 +183,8 @@ const SUBCLASS_ID: usize = 0x4E45_474F; // "NEGO"
 type Hook = Box<dyn Fn(ShellEvent)>;
 
 /// Subclasses the main window: `on_event` runs (on the UI thread, inside the window procedure)
-/// for TaskbarCreated and the activation message. Also lets both messages through UIPI, so a
+/// for TaskbarCreated, the activation message and theme or accent changes (both broadcast to
+/// top-level windows, so they need no UIPI exemption). Also lets both messages through UIPI, so a
 /// non-elevated Explorer or second launch can still reach an elevated instance. Returns false
 /// if subclassing failed.
 pub fn install_window_hooks(hwnd: HWND, on_event: impl Fn(ShellEvent) + 'static) -> bool {
@@ -193,6 +238,9 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
+    } else if msg == WM_SETTINGCHANGE || msg == WM_DWMCOLORIZATIONCOLORCHANGED {
+        // SAFETY: as above.
+        unsafe { (*hook)(ShellEvent::SettingsChanged) };
     }
     // SAFETY: forwards to the next procedure in the subclass chain.
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
@@ -353,6 +401,7 @@ mod tests {
 
     #[test]
     fn shell_messages_reach_the_main_window_hook() {
+        use windows::Win32::UI::WindowsAndMessaging::{WM_DWMCOLORIZATIONCOLORCHANGED, WM_SETTINGCHANGE};
         let hwnd = hidden_window();
         let seen = Rc::new(RefCell::new(Vec::new()));
         let s = seen.clone();
@@ -361,9 +410,33 @@ mod tests {
         unsafe {
             SendMessageW(hwnd, activate_message(), Some(WPARAM(0)), Some(LPARAM(0)));
             SendMessageW(hwnd, taskbar_created_message(), Some(WPARAM(0)), Some(LPARAM(0)));
+            SendMessageW(hwnd, WM_SETTINGCHANGE, Some(WPARAM(0)), Some(LPARAM(0)));
+            SendMessageW(hwnd, WM_DWMCOLORIZATIONCOLORCHANGED, Some(WPARAM(0)), Some(LPARAM(0)));
             let _ = DestroyWindow(hwnd);
         }
-        assert_eq!(*seen.borrow(), [ShellEvent::Activate, ShellEvent::TaskbarCreated]);
+        assert_eq!(
+            *seen.borrow(),
+            [ShellEvent::Activate, ShellEvent::TaskbarCreated, ShellEvent::SettingsChanged, ShellEvent::SettingsChanged]
+        );
+    }
+
+    #[test]
+    fn apps_use_dark_only_when_the_light_flag_is_zero() {
+        assert!(dark_from(Some(0)), "AppsUseLightTheme = 0: dark");
+        assert!(!dark_from(Some(1)), "AppsUseLightTheme = 1: light");
+        assert!(!dark_from(Some(7)), "any other value is not 0: light");
+        assert!(!dark_from(None), "missing value (older Windows, policy): light, as Windows itself defaults");
+    }
+
+    #[test]
+    fn a_system_theme_flip_moves_only_the_system_choice() {
+        use crate::settings::{ThemeChoice, effective_dark};
+        // Review Focus 5: what SettingsChanged re-applies, for each choice, before and after a flip.
+        let follows = |t: ThemeChoice| effective_dark(t, false) != effective_dark(t, true);
+        assert!(follows(ThemeChoice::System), "System follows the flip");
+        assert!(!follows(ThemeChoice::Light), "Light stays light");
+        assert!(!follows(ThemeChoice::Dark), "Dark stays dark");
+        assert!(!effective_dark(ThemeChoice::Light, true) && effective_dark(ThemeChoice::Dark, false));
     }
 
     #[test]

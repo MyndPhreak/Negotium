@@ -1628,3 +1628,33 @@ fn shift_f10_with_nothing_focused_highlights_the_list_then_opens_its_menu() {
 fn the_menu_key_with_nothing_focused_highlights_the_list_then_opens_its_menu() {
     the_menu_key_with_nothing_focused_highlights_first_then_opens(menu_key);
 }
+
+// ---- Plan 3b: settings ----
+
+#[test]
+fn set_dark_switches_the_theme_at_once() {
+    let ui = window();
+    ui.invoke_set_dark(true);
+    assert!(ui.global::<negotium::Theme>().get_dark());
+    ui.invoke_set_dark(false);
+    assert!(!ui.global::<negotium::Theme>().get_dark());
+}
+
+#[test]
+fn a_system_theme_flip_changes_the_colours_only_with_theme_system() {
+    use negotium::platform::apply_theme_with;
+    use negotium::settings::ThemeChoice;
+    let ui = window();
+    let dark = |ui: &MainWindow| ui.global::<negotium::Theme>().get_dark();
+    for (choice, expect) in [(ThemeChoice::Light, false), (ThemeChoice::Dark, true)] {
+        for system_dark in [false, true, false] {
+            apply_theme_with(&ui, choice, system_dark);
+            assert_eq!(dark(&ui), expect, "{choice:?} ignores a system flip to dark = {system_dark}");
+        }
+    }
+    for system_dark in [false, true, false] {
+        apply_theme_with(&ui, ThemeChoice::System, system_dark);
+        assert_eq!(dark(&ui), system_dark, "System follows the flip to dark = {system_dark}");
+    }
+}
+

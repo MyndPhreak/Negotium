@@ -101,6 +101,9 @@ pub enum Loaded {
     /// Some fields were invalid (their names) and took their defaults; the valid ones were kept.
     /// The original text was copied to settings.json.bad, so it survives the next save.
     Partial(Vec<String>),
+    /// As `Partial`, but the original could not be copied to settings.json.bad (the reason): the
+    /// next save replaces it.
+    PartialNotKept(Vec<String>, String),
     /// The file could not be read or set aside (the reason): defaults are used and the file is
     /// left untouched.
     Unreadable(String),
@@ -143,8 +146,10 @@ pub fn load(path: &Path) -> (Settings, Loaded) {
     if bad.is_empty() {
         (s, Loaded::File)
     } else {
-        let _ = std::fs::copy(path, path.with_extension("json.bad"));
-        (s, Loaded::Partial(bad))
+        match std::fs::copy(path, path.with_extension("json.bad")) {
+            Ok(_) => (s, Loaded::Partial(bad)),
+            Err(e) => (s, Loaded::PartialNotKept(bad, e.to_string())),
+        }
     }
 }
 
@@ -310,6 +315,23 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(p.with_extension("json.bad")).unwrap(), text, "the original survives");
         assert!(p.exists(), "the file itself is not removed");
+    }
+
+    #[test]
+    fn a_bad_field_whose_original_cannot_be_kept_says_so() {
+        let dir = TempDir::new("nocopy");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"theme": 7, "refresh_ms": 2000}"#).unwrap();
+        std::fs::create_dir(p.with_extension("json.bad")).unwrap(); // the copy cannot land
+        let (s, how) = load(&p);
+        assert_eq!(s.refresh_ms, 2000);
+        match how {
+            Loaded::PartialNotKept(fields, why) => {
+                assert_eq!(fields, vec!["theme".to_string()]);
+                assert!(!why.is_empty());
+            }
+            other => panic!("expected PartialNotKept, got {other:?}"),
+        }
     }
 
     #[test]

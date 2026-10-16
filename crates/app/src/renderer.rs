@@ -11,7 +11,9 @@
 //!   that the UI thread showed neither a frame nor a heartbeat for [`WATCHDOG_TIMEOUT`], records
 //!   the fallback, relaunches the exe with the software renderer and terminates this process.
 //!   A window that renders nothing because it is minimised (occluded) keeps its heartbeat, so it
-//!   is not mistaken for a stall.
+//!   is not mistaken for a stall, and time the machine spent asleep is not counted as silence
+//!   ([`Clock`]). If the relaunch cannot start, the watchdog stands down and this instance
+//!   carries on.
 //!
 //! The fallback is recorded in a marker file ([`fallback_path`]) and every later launch honours
 //! it. Only an explicit user action clears it ([`set_gpu_rendering`], for the Settings switch of
@@ -170,6 +172,43 @@ pub fn verdict(
     }
 }
 
+/// A poll that comes this much later than its interval means the machine was asleep (or the
+/// watchdog thread was starved): that interval is lost time, not silence, so a suspend early in
+/// the launch can't trigger a permanent fallback.
+pub const SUSPEND_SLACK: Duration = Duration::from_secs(2);
+
+/// The watchdog's own sense of time: awake time since arming (each poll's interval, except one
+/// that overshoots by more than [`SUSPEND_SLACK`], which counts as a single ordinary poll), and
+/// when, in awake time, it first and last saw the heartbeat count change. Driven by the watchdog
+/// thread with real instants; tests drive it with made-up ones.
+pub struct Clock {
+    prev: Instant,
+    awake: Duration,
+    beats: u64,
+    first_beat: Option<Duration>,
+    last_beat: Option<Duration>,
+}
+
+impl Clock {
+    pub fn new(armed_at: Instant) -> Self {
+        Self { prev: armed_at, awake: Duration::ZERO, beats: 0, first_beat: None, last_beat: None }
+    }
+
+    /// One poll at `now` (polls are `poll` apart), with `beats` heartbeats seen so far.
+    pub fn observe(&mut self, now: Instant, beats: u64, poll: Duration, timeout: Duration) -> Verdict {
+        let gap = now.saturating_duration_since(self.prev);
+        self.prev = now;
+        self.awake += if gap > poll + SUSPEND_SLACK { poll } else { gap };
+        if beats != self.beats {
+            self.beats = beats;
+            self.first_beat.get_or_insert(self.awake);
+            self.last_beat = Some(self.awake);
+        }
+        let since = |at: Option<Duration>| at.map(|at| self.awake - at);
+        verdict(self.awake, since(self.first_beat), since(self.last_beat), timeout)
+    }
+}
+
 const ARMED: u8 = 0;
 const PRESENTED: u8 = 1;
 const STOOD_DOWN: u8 = 2;
@@ -177,17 +216,8 @@ const FIRED: u8 = 3;
 
 struct Shared {
     state: AtomicU8,
-    armed_at: Instant,
-    /// Milliseconds since `armed_at`, plus one; 0 means no heartbeat yet.
-    first_beat: AtomicU64,
-    last_beat: AtomicU64,
-}
-
-impl Shared {
-    fn since(&self, beat: &AtomicU64, now: Instant) -> Option<Duration> {
-        let at = beat.load(Ordering::SeqCst).checked_sub(1)?;
-        Some(now.saturating_duration_since(self.armed_at + Duration::from_millis(at)))
-    }
+    /// Heartbeats so far; the watchdog thread notes when the count changes ([`Clock`]).
+    beats: AtomicU64,
 }
 
 /// Guards the first frame from its own thread. The UI thread reports a heartbeat
@@ -197,17 +227,16 @@ impl Shared {
 pub struct Watchdog(Arc<Shared>);
 
 impl Watchdog {
-    /// Starts the watchdog thread. `on_stall` runs at most once, from that thread. Dropping every
-    /// handle stands the watchdog down.
-    pub fn arm(timeout: Duration, on_stall: impl FnOnce() + Send + 'static) -> (Watchdog, JoinHandle<()>) {
-        let shared = Arc::new(Shared {
-            state: AtomicU8::new(ARMED),
-            armed_at: Instant::now(),
-            first_beat: AtomicU64::new(0),
-            last_beat: AtomicU64::new(0),
-        });
+    /// Starts the watchdog thread. `on_stall` runs at most once, from that thread, and returns
+    /// whether a replacement instance was started (production terminates instead of returning
+    /// true). When it returns false the watchdog stands down: this instance carries on, and may
+    /// create its tray icon if its window ever appears. Dropping every handle stands the
+    /// watchdog down.
+    pub fn arm(timeout: Duration, on_stall: impl FnOnce() -> bool + Send + 'static) -> (Watchdog, JoinHandle<()>) {
+        let shared = Arc::new(Shared { state: AtomicU8::new(ARMED), beats: AtomicU64::new(0) });
         let weak: Weak<Shared> = Arc::downgrade(&shared);
         let poll = (timeout / 20).clamp(Duration::from_millis(1), Duration::from_millis(100));
+        let mut clock = Clock::new(Instant::now());
         let thread = std::thread::Builder::new()
             .name("negotium-renderer-watchdog".into())
             .spawn(move || {
@@ -217,17 +246,16 @@ impl Watchdog {
                     if w.state.load(Ordering::SeqCst) != ARMED {
                         return;
                     }
-                    let now = Instant::now();
-                    let since_arm = now.saturating_duration_since(w.armed_at);
-                    let to = match verdict(since_arm, w.since(&w.first_beat, now), w.since(&w.last_beat, now), timeout) {
+                    let to = match clock.observe(Instant::now(), w.beats.load(Ordering::SeqCst), poll, timeout) {
                         Verdict::Wait => continue,
                         Verdict::Healthy => STOOD_DOWN,
                         Verdict::Fire => FIRED,
                     };
                     let won = w.state.compare_exchange(ARMED, to, Ordering::SeqCst, Ordering::SeqCst).is_ok();
-                    drop(w);
-                    if won && to == FIRED {
-                        on_stall();
+                    if won && to == FIRED && !on_stall() {
+                        // No replacement is coming: never leave the state Fired, or no tray icon
+                        // would ever be created.
+                        w.state.store(STOOD_DOWN, Ordering::SeqCst);
                     }
                     return;
                 }
@@ -238,9 +266,7 @@ impl Watchdog {
 
     /// The UI thread is alive (called from a UI-thread timer).
     pub fn heartbeat(&self) {
-        let at = self.0.armed_at.elapsed().as_millis() as u64 + 1;
-        let _ = self.0.first_beat.compare_exchange(0, at, Ordering::SeqCst, Ordering::SeqCst);
-        self.0.last_beat.store(at, Ordering::SeqCst);
+        self.0.beats.fetch_add(1, Ordering::SeqCst);
     }
 
     /// The first frame was presented. False if the watchdog has already fired: this instance is
@@ -264,31 +290,57 @@ impl Watchdog {
     }
 }
 
-/// The stall callback: records the fallback, relaunches this exe with the software renderer and
-/// terminates this process (no DLL detach: a wedged GL driver could hang an orderly exit), which
-/// releases the single-instance lock the relaunch waits for. The stalled instance has no tray
-/// icon yet (it is created once the watchdog has resolved), so none is orphaned.
-/// If the relaunch cannot start, this instance keeps waiting: the window may still appear, and
-/// the next launch uses software anyway.
-pub fn relaunch_in_software() {
-    let log = |msg: &str| crate::log::Log::new(crate::log::Log::default_path()).warn(msg);
-    if let Err(e) = record_fallback() {
-        log(&format!("renderer fallback could not be recorded: {e}"));
+/// The stall callback, resolved when the watchdog is armed (before the window exists), so the
+/// stall path only writes the marker and the log and spawns: [`SoftwareRelaunch::run`].
+pub struct SoftwareRelaunch {
+    exe: Result<PathBuf, String>,
+    args: Vec<OsString>,
+    marker: PathBuf,
+    log: PathBuf,
+}
+
+impl SoftwareRelaunch {
+    /// This exe, this launch's arguments plus [`RESTARTED_ARG`] and [`FALLBACK_ARG`], the marker
+    /// at [`fallback_path`] and the default log.
+    pub fn resolve() -> Self {
+        Self {
+            exe: std::env::current_exe().map_err(|e| e.to_string()),
+            args: relaunch_args(std::env::args_os().skip(1)),
+            marker: fallback_path(),
+            log: crate::log::Log::default_path(),
+        }
     }
-    log(&format!(
-        "the UI thread showed no frame and no heartbeat for {} s; relaunching with the software renderer",
-        WATCHDOG_TIMEOUT.as_secs()
-    ));
-    let spawned = std::env::current_exe().and_then(|exe| {
-        std::process::Command::new(exe)
-            .args(relaunch_args(std::env::args_os().skip(1)))
-            .env("SLINT_BACKEND", SOFTWARE_BACKEND)
-            .spawn()
-    });
-    match spawned {
-        // The marker and the log are written and closed above.
-        Ok(_) => crate::platform::terminate_self(),
-        Err(e) => log(&format!("software relaunch failed: {e}")),
+
+    /// Records the fallback, relaunches the exe with the software renderer and terminates this
+    /// process (no DLL detach: a wedged GL driver could hang an orderly exit), which releases the
+    /// single-instance lock the relaunch waits for. The stalled instance has no tray icon yet (it
+    /// is created once the watchdog has resolved), so none is orphaned.
+    /// Returns false only if the relaunch could not start: this instance then carries on (the
+    /// window may still appear), and the next launch uses software anyway.
+    pub fn run(self) -> bool {
+        let mut log = crate::log::Log::new(self.log);
+        if let Err(e) = record_fallback_at(&self.marker) {
+            log.warn(&format!("renderer fallback could not be recorded: {e}"));
+        }
+        log.warn(&format!(
+            "the UI thread showed no frame and no heartbeat for {} s; relaunching with the software renderer",
+            WATCHDOG_TIMEOUT.as_secs()
+        ));
+        let spawned = self.exe.and_then(|exe| {
+            std::process::Command::new(exe)
+                .args(&self.args)
+                .env("SLINT_BACKEND", SOFTWARE_BACKEND)
+                .spawn()
+                .map_err(|e| e.to_string())
+        });
+        match spawned {
+            // The marker and the log are written and closed above.
+            Ok(_) => crate::platform::terminate_self(),
+            Err(e) => {
+                log.warn(&format!("software relaunch failed ({e}); this instance carries on"));
+                false
+            }
+        }
     }
 }
 
@@ -391,11 +443,13 @@ mod tests {
         assert_eq!(relaunch_args(args(&[RESTARTED_ARG])), args(&[RESTARTED_ARG, FALLBACK_ARG]));
     }
 
-    fn counting() -> (Arc<std::sync::atomic::AtomicUsize>, impl FnOnce() + Send + 'static) {
+    fn counting() -> (Arc<std::sync::atomic::AtomicUsize>, impl FnOnce() -> bool + Send + 'static) {
         let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let m = n.clone();
+        // `true`: the replacement started (production terminates instead of returning).
         (n, move || {
             m.fetch_add(1, Ordering::SeqCst);
+            true
         })
     }
 
@@ -423,6 +477,107 @@ mod tests {
         assert_eq!(verdict(s(10), Some(s(10)), Some(Duration::ZERO), T), Verdict::Healthy);
         // A late start: beating, but not yet for a whole timeout.
         assert_eq!(verdict(s(12), Some(s(4)), Some(Duration::ZERO), T), Verdict::Wait);
+    }
+
+    const POLL: Duration = Duration::from_millis(100);
+
+    /// Feeds `clock` polls `POLL` apart for `span`, with `beats` heartbeats each poll (0: silent),
+    /// and returns the last verdict, stopping early at anything but Wait.
+    fn run_for(clock: &mut Clock, now: &mut Instant, beats: &mut u64, per_poll: u64, span: Duration) -> Verdict {
+        let end = *now + span;
+        let mut v = Verdict::Wait;
+        while *now < end {
+            *now += POLL;
+            *beats += per_poll;
+            v = clock.observe(*now, *beats, POLL, T);
+            if v != Verdict::Wait {
+                break;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn the_clock_fires_after_a_timeout_of_silence() {
+        let start = Instant::now();
+        let (mut clock, mut now, mut beats) = (Clock::new(start), start, 0);
+        assert_eq!(run_for(&mut clock, &mut now, &mut beats, 0, s(9)), Verdict::Wait);
+        assert_eq!(run_for(&mut clock, &mut now, &mut beats, 0, s(2)), Verdict::Fire);
+        assert_eq!(now - start, s(10), "fires once ten seconds of silence have passed");
+    }
+
+    #[test]
+    fn a_suspend_is_lost_time_not_silence() {
+        let start = Instant::now();
+        let (mut clock, mut now, mut beats) = (Clock::new(start), start, 0);
+        // Asleep 2 s into the launch, before the first frame or heartbeat.
+        assert_eq!(run_for(&mut clock, &mut now, &mut beats, 0, s(2)), Verdict::Wait);
+        now += s(3600);
+        assert_eq!(clock.observe(now, beats, POLL, T), Verdict::Wait, "an hour asleep is not a stall");
+        // Back awake, the UI thread beats: no fire, and it resolves healthy in awake time.
+        assert_eq!(run_for(&mut clock, &mut now, &mut beats, 1, s(9)), Verdict::Wait);
+        assert_eq!(run_for(&mut clock, &mut now, &mut beats, 1, s(2)), Verdict::Healthy);
+    }
+
+    #[test]
+    fn real_silence_on_both_sides_of_a_suspend_still_fires() {
+        let start = Instant::now();
+        let (mut clock, mut now, mut beats) = (Clock::new(start), start, 0);
+        assert_eq!(run_for(&mut clock, &mut now, &mut beats, 0, s(6)), Verdict::Wait);
+        now += s(600);
+        assert_eq!(clock.observe(now, beats, POLL, T), Verdict::Wait);
+        // 6 s + one poll for the lost interval + this: ten awake seconds of silence.
+        assert_eq!(run_for(&mut clock, &mut now, &mut beats, 0, s(5)), Verdict::Fire);
+    }
+
+    #[test]
+    fn a_late_poll_within_the_slack_counts_in_full() {
+        let start = Instant::now();
+        let mut clock = Clock::new(start);
+        // A busy machine delays every poll by 1.9 s: still ordinary time, so silence adds up.
+        for ms in [2000, 4000, 6000, 8000, 9900] {
+            assert_eq!(clock.observe(start + Duration::from_millis(ms), 0, POLL, T), Verdict::Wait, "{ms} ms");
+        }
+        assert_eq!(clock.observe(start + s(10), 0, POLL, T), Verdict::Fire);
+        // Beyond the slack (2 s over the poll) the interval is lost instead.
+        let mut clock = Clock::new(start);
+        assert_eq!(clock.observe(start + s(9), 0, POLL, T), Verdict::Wait, "9 s: lost, counted as one poll");
+        assert_eq!(clock.observe(start + Duration::from_millis(9500), 0, POLL, T), Verdict::Wait);
+    }
+
+    #[test]
+    fn a_failed_relaunch_stands_the_watchdog_down() {
+        let (w, thread) = Watchdog::arm(Duration::from_millis(20), || false);
+        thread.join().unwrap();
+        assert!(w.resolved(), "no replacement is coming: this instance carries on and may add its tray icon");
+        assert!(w.presented(), "a later first frame is welcome");
+    }
+
+    #[test]
+    fn the_relaunch_is_resolved_up_front_with_its_flags() {
+        let r = SoftwareRelaunch::resolve();
+        assert!(r.exe.is_ok());
+        assert!(r.args.ends_with(&[OsString::from(RESTARTED_ARG), OsString::from(FALLBACK_ARG)]));
+    }
+
+    #[test]
+    fn a_relaunch_that_cannot_start_records_the_fallback_logs_and_returns() {
+        for (name, exe) in [
+            ("missing", Ok(std::env::temp_dir().join("negotium-no-such-dir").join("missing.exe"))),
+            ("unresolved", Err("current_exe failed".to_string())),
+        ] {
+            let dir = temp_marker(&format!("relaunch-{name}"));
+            let relaunch = SoftwareRelaunch {
+                exe,
+                args: vec![],
+                marker: dir.path(),
+                log: dir.0.join("negotium.log"),
+            };
+            assert!(!relaunch.run(), "{name}: reports that no replacement started");
+            assert!(fallback_recorded_at(&dir.path()), "{name}: later launches still use software");
+            let log = std::fs::read_to_string(dir.0.join("negotium.log")).unwrap();
+            assert!(log.contains("software relaunch failed"), "{name}: {log}");
+        }
     }
 
     #[test]
