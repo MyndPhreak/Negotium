@@ -269,6 +269,20 @@ impl Saver {
 mod tests {
     use super::*;
 
+    /// The benchmark writes these keys (crates/bench `APP_FIELDS` / `settings_json`); the tolerant
+    /// loader silently ignores a renamed one, so this pins them.
+    #[test]
+    fn the_bench_settings_keys_are_fields_the_app_loads() {
+        let dir = std::env::temp_dir().join(format!("negotium-settings-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"smooth_graphs":false,"tray_cpu":false,"keep_in_tray":false}"#).unwrap();
+        let (s, loaded) = load(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(loaded, Loaded::File);
+        assert!(!s.smooth_graphs && !s.tray_cpu && !s.keep_in_tray, "{s:?}");
+    }
+
     #[test]
     fn the_benchmark_can_name_its_own_settings_file() {
         use std::ffi::OsString;

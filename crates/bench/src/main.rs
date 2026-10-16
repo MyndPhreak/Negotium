@@ -44,6 +44,10 @@ struct Report {
     /// How a Negotium run was started (renderer, switches, page, hidden).
     #[serde(skip_serializing_if = "Option::is_none")]
     run: Option<NegotiumRun>,
+    /// The renderer the run really drew with: the requested one, or "software (fell back from gpu)"
+    /// if a GPU run's watchdog fell back (marker or log line in the scratch directory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renderer_used: Option<String>,
     /// `cpu_pct` x logical processors: the share of one core, spec section 8's unit.
     cpu_one_core_pct: Summary,
     /// The busiest GPU engine's utilisation attributed to the process, %.
@@ -102,6 +106,41 @@ impl NegotiumRun {
         args.extend(self.page.as_ref().map(|p| format!("--page={p}")));
         args.join(" ")
     }
+}
+
+/// The pages `--page=` knows (the app's `Page::name`s). A typo would silently open the Overview
+/// while the report named the typed page, so anything else is an error. Returns the lower-case name.
+fn valid_page(name: &str) -> Result<String> {
+    const PAGES: [&str; 4] = ["overview", "performance", "startup", "settings"];
+    let lower = name.to_ascii_lowercase();
+    if name.chars().any(char::is_whitespace) || !PAGES.contains(&lower.as_str()) {
+        bail!("--page takes one of {}, not {name:?}", PAGES.join(", "));
+    }
+    Ok(lower)
+}
+
+/// What a finished run left in its scratch directory (`<scratch>\settings.json` and the app's
+/// `<scratch>\Negotium\...`): whether the GPU renderer fell back to software.
+#[derive(Debug, Default, PartialEq)]
+struct RunFiles {
+    renderer_fell_back: bool,
+}
+
+/// Fails loudly if the app complained about the run's settings file (its loader is per-field
+/// tolerant, so an invalid value would otherwise fall back to a default and the run would measure
+/// something other than its report says), and notes a renderer fallback.
+fn check_run_files(scratch: &Path) -> Result<RunFiles> {
+    let bad = scratch.join("settings.json.bad");
+    if bad.exists() {
+        bail!("the app set the run's settings aside ({}): the bench's settings do not match the app's", bad.display());
+    }
+    let app_dir = scratch.join("Negotium");
+    let log = std::fs::read_to_string(app_dir.join("logs").join("negotium.log")).unwrap_or_default();
+    if let Some(line) = log.lines().find(|l| l.contains("settings.json")) {
+        bail!("the app complained about the run's settings: {line}");
+    }
+    let fell_back = app_dir.join("renderer-fallback").exists() || log.contains("relaunching with the software renderer");
+    Ok(RunFiles { renderer_fell_back: fell_back })
 }
 
 fn on_off(v: &str) -> Result<bool> {
@@ -176,7 +215,7 @@ fn main() -> Result<()> {
             "--renderer" => run.renderer = Some(args.next().context("--renderer gpu|software")?),
             "--smooth" => run.smooth_graphs = on_off(&args.next().context("--smooth on|off")?)?,
             "--tray-cpu" => run.tray_cpu = on_off(&args.next().context("--tray-cpu on|off")?)?,
-            "--page" => run.page = Some(args.next().context("--page NAME")?),
+            "--page" => run.page = Some(valid_page(&args.next().context("--page NAME")?)?),
             "--hidden" => run.hidden = true,
             "--out" => out = Some(args.next().context("--out FILE")?),
             other => bail!("unknown argument {other}"),
@@ -255,8 +294,18 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // Before the child ends and the scratch directory goes: what the app made of the run's settings.
+    let files = scratch.as_ref().map(|d| check_run_files(d.path())).transpose();
     target.finish(run.hidden)?;
     drop(scratch);
+    let files = files?;
+    let renderer_used = files.map(|f| match (run.renderer.as_deref(), f.renderer_fell_back) {
+        (Some("gpu"), true) => {
+            eprintln!("warning: the GPU renderer fell back to software during this run; its numbers are software numbers");
+            "software (fell back from gpu)".to_string()
+        }
+        (r, _) => r.unwrap_or("gpu").to_string(),
+    });
 
     // A hidden run is ended by the bench, so Negotium writes no frame stats.
     let frame_stats = if is_negotium && !run.hidden {
@@ -285,6 +334,7 @@ fn main() -> Result<()> {
         responsiveness_timeouts: timeouts,
         frame_stats,
         run: is_negotium.then(|| run.clone()),
+        renderer_used,
         cpu_one_core_pct: summary(&cpu.iter().map(|c| c * logical_cpus() as f64).collect::<Vec<_>>()),
         gpu_pct: summary(&gpu),
         memory,
@@ -336,13 +386,18 @@ impl Launched {
         unsafe { WaitForSingleObject(self.handle, timeout_ms) == WAIT_OBJECT_0 }
     }
 
-    /// Closes the window to the tray (Negotium hides instead of exiting when `--exit-on-close` is
-    /// absent) and checks that it did: the window is gone and the process still runs.
-    fn hide_to_tray(&mut self) -> Result<()> {
+    /// Waits (if needed) until the window has been open for `CLOSE_SETTLE`, then asks it to close.
+    fn settle_and_post_close(&self) -> Result<()> {
         if let Some(appeared) = self.appeared {
             std::thread::sleep(CLOSE_SETTLE.saturating_sub(appeared.elapsed()));
         }
-        self.post_close().context("PostMessageW WM_CLOSE")?;
+        self.post_close().context("PostMessageW WM_CLOSE")
+    }
+
+    /// Closes the window to the tray (Negotium hides instead of exiting when `--exit-on-close` is
+    /// absent) and checks that it did: the window is gone and the process still runs.
+    fn hide_to_tray(&mut self) -> Result<()> {
+        self.settle_and_post_close()?;
         let hwnd = self.hwnd().context("target window not found")?;
         let deadline = Instant::now() + Duration::from_secs(5);
         // SAFETY: a read-only query on a window handle; a destroyed window just reports not visible.
@@ -376,10 +431,7 @@ impl Launched {
     /// Waits (if needed) until the window has been open for `CLOSE_SETTLE`, asks it to close and
     /// waits up to 10 s for the process to exit.
     fn close(mut self) -> Result<()> {
-        if let Some(appeared) = self.appeared {
-            std::thread::sleep(CLOSE_SETTLE.saturating_sub(appeared.elapsed()));
-        }
-        self.post_close().context("PostMessageW WM_CLOSE")?;
+        self.settle_and_post_close()?;
         if !self.wait_exited(10_000) {
             bail!("pid {} did not exit after WM_CLOSE", self.pid);
         }
@@ -616,6 +668,52 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&run.settings_json()).unwrap();
         assert_eq!(v["keep_in_tray"], true);
         assert_eq!(v["tray_cpu"], true);
+    }
+
+    #[test]
+    fn page_names_are_checked_not_trusted() {
+        assert_eq!(valid_page("Performance").unwrap(), "performance");
+        for ok in ["overview", "startup", "settings"] {
+            assert_eq!(valid_page(ok).unwrap(), ok);
+        }
+        for bad in ["perfomance", "", "performance ", " settings", "start up", "over\tview", "performance --smooth"] {
+            assert!(valid_page(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Literal copy of the field names in the app's `settings::load` (`field!(...)`). The app ignores
+    /// a key it does not know, so a rename there must fail here; the app has the twin test
+    /// `the_bench_settings_keys_are_fields_the_app_loads`.
+    const APP_FIELDS: [&str; 7] = ["refresh_ms", "theme", "always_on_top", "keep_in_tray", "gpu_rendering", "smooth_graphs", "tray_cpu"];
+
+    #[test]
+    fn the_settings_keys_are_fields_the_app_knows() {
+        for hidden in [false, true] {
+            let run = NegotiumRun { hidden, ..NegotiumRun::default() };
+            let v: serde_json::Value = serde_json::from_str(&run.settings_json()).unwrap();
+            for key in v.as_object().unwrap().keys() {
+                assert!(APP_FIELDS.contains(&key.as_str()), "{key} is not a settings field of the app");
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_whose_settings_the_app_complained_about_fails_and_a_fallback_is_noted() {
+        let root = std::env::temp_dir().join(format!("negotium-bench-runfiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let logs = root.join("Negotium").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        assert_eq!(check_run_files(&root).unwrap(), RunFiles::default(), "nothing logged is fine");
+        std::fs::write(logs.join("negotium.log"), "1 WARN worker restarted\n").unwrap();
+        assert!(!check_run_files(&root).unwrap().renderer_fell_back);
+        std::fs::write(root.join("Negotium").join("renderer-fallback"), "x").unwrap();
+        assert!(check_run_files(&root).unwrap().renderer_fell_back);
+        std::fs::write(logs.join("negotium.log"), "1 WARN settings.json had invalid fields (tray_cpu); they use their defaults\n").unwrap();
+        assert!(check_run_files(&root).is_err());
+        std::fs::write(logs.join("negotium.log"), "").unwrap();
+        std::fs::write(root.join("settings.json.bad"), "{}").unwrap();
+        assert!(check_run_files(&root).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
