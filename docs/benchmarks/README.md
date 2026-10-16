@@ -151,6 +151,9 @@ tick, one-core CPU, mean over 60 s (these runs predate R9, which changes nothing
 | on | Overview | 1.27 (4.6) | 65.7 |
 | on | Performance | 1.12 (3.1) | 77.5 |
 
+The bench ends a hidden run with `TerminateProcess`, so Negotium never removes its notification-area
+icon: a ghost icon may remain until the pointer hovers over it, and the bench says so after the run.
+
 Spec §8 asks for ≤ 0.2 % of one core in the tray. That is **not met**, and not because of Plan 3c:
 the collector alone (graph off) costs about 0.9 % hidden at the 2 s tick, already over the target
 before 3c. The tray graph adds about 0.3 %. Follow-up: a slower or lighter collection while hidden.

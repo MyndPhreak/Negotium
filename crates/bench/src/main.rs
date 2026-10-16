@@ -143,6 +143,14 @@ fn check_run_files(scratch: &Path) -> Result<RunFiles> {
     Ok(RunFiles { renderer_fell_back: fell_back })
 }
 
+/// What the bench says after ending a run. A hidden run is terminated, so Negotium never removes
+/// its notification-area icon: Windows keeps showing it until the pointer passes over it.
+fn finish_note(hidden: bool) -> Option<&'static str> {
+    hidden.then_some(
+        "note: the hidden run was terminated, so its tray icon may remain in the notification area until the pointer hovers over it",
+    )
+}
+
 fn on_off(v: &str) -> Result<bool> {
     match v {
         "on" => Ok(true),
@@ -427,6 +435,7 @@ impl Launched {
             bail!("pid {} did not exit after TerminateProcess", self.pid);
         }
         self.armed = false;
+        println!("{}", finish_note(hidden).unwrap_or_default());
         Ok(())
     }
 
@@ -670,6 +679,13 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&run.settings_json()).unwrap();
         assert_eq!(v["keep_in_tray"], true);
         assert_eq!(v["tray_cpu"], true);
+    }
+
+    #[test]
+    fn a_hidden_run_warns_of_the_ghost_tray_icon_it_leaves() {
+        let note = finish_note(true).expect("a hidden run is terminated");
+        assert!(note.contains("tray icon") && note.contains("hover"), "{note}");
+        assert_eq!(finish_note(false), None, "a visible run exits on its own and removes its icon");
     }
 
     #[test]
