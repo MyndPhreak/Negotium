@@ -360,7 +360,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let (controls, b, close_weak, settings) = (controls.clone(), bridge.clone(), weak.clone(), settings.clone());
         let saver = saver.clone();
         ui.window().on_close_requested(move || {
-            match settings::close_action(settings.borrow().keep_in_tray, exit_on_close) {
+            // Copied out: no borrow is held across `begin_exit` and its flush.
+            let keep_in_tray = settings.borrow().keep_in_tray;
+            match settings::close_action(keep_in_tray, exit_on_close) {
                 settings::CloseAction::Exit => begin_exit(&controls, &close_weak, &saver),
                 settings::CloseAction::HideToTray => {
                     controls.set_visible(false);
