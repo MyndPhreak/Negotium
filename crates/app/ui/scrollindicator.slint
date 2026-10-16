@@ -5,8 +5,8 @@ import { Theme } from "theme.slint";
 // re-evaluated, even to the same value: on the app list each change in the row count, on the
 // Performance page each frame. Not animated. The owner turns the view's own scrollbar off, lays
 // this over the view's right edge (as tall as the view) only while the content overflows, and
-// binds `content-y` both ways. The wheel and the keys scroll the view itself; the bar can also
-// be dragged.
+// binds `content-y` both ways. The keys scroll the view itself, and so does the wheel over the
+// view; the wheel over the bar scrolls it here, and the bar can also be dragged.
 export component ScrollIndicator inherits Rectangle {
     in-out property <length> content-y;
     in property <length> visible-height;
@@ -23,6 +23,10 @@ export component ScrollIndicator inherits Rectangle {
             if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
                 self.grab-content-y = root.content-y;
             }
+        }
+        scroll-event(e) => {
+            root.content-y = clamp(root.content-y + e.delta-y, -root.overflow, 0px);
+            accept
         }
         moved => {
             if (self.pressed && root.track > thumb.height) {

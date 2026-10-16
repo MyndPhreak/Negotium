@@ -1361,6 +1361,22 @@ fn the_app_lists_scroll_indicator_follows_the_wheel_and_drags_the_list() {
     assert!(ui.get_list_scroll_y() < -100.0, "the wheel still scrolls the list");
     let moved = thumb(&ui).unwrap().absolute_position();
     assert!(moved.y > top.y + 10.0, "the indicator follows: {} then {}", top.y, moved.y);
+    // The wheel over the indicator's own strip scrolls the list too, and stops at the top.
+    let strip = (list.0 + list.2 - 3.0, list.1 + list.3 - 20.0);
+    let before = ui.get_list_scroll_y();
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(strip.0, strip.1), delta_x: 0.0, delta_y: -100.0 });
+    slint::platform::update_timers_and_animations();
+    assert!(ui.get_list_scroll_y() < before - 50.0, "over the indicator: {before} then {}", ui.get_list_scroll_y());
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(strip.0, strip.1), delta_x: 0.0, delta_y: 100_000.0 });
+    slint::platform::update_timers_and_animations();
+    assert_eq!(ui.get_list_scroll_y(), 0.0, "clamped at the top");
+    // Held, the bar has every pointer event (nothing falls through to the list): the wheel still scrolls.
+    let (at, held) = (LogicalPosition::new(strip.0, strip.1), slint::platform::PointerEventButton::Left);
+    ui.window().dispatch_event(WindowEvent::PointerPressed { position: at, button: held });
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: at, delta_x: 0.0, delta_y: -100.0 });
+    slint::platform::update_timers_and_animations();
+    assert_eq!(ui.get_list_scroll_y(), -100.0, "the wheel over a held bar");
+    ui.window().dispatch_event(WindowEvent::PointerReleased { position: at, button: held });
     // Dragged to the bottom: the list shows its last rows.
     let (tx, ty) = centre(&thumb(&ui).unwrap());
     let button = slint::platform::PointerEventButton::Left;
@@ -1395,6 +1411,22 @@ fn the_performance_details_indicator_appears_on_overflow_and_follows_the_wheel()
     slint::platform::update_timers_and_animations();
     let moved = thumbs(&ui)[0].absolute_position();
     assert!(moved.y > top.y + 10.0, "the indicator follows content-y: {} then {}", top.y, moved.y);
+    // The wheel over the indicator's own strip scrolls the details too, within their bounds.
+    let x = moved.x + 2.0;
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(x, 300.0), delta_x: 0.0, delta_y: -100_000.0 });
+    slint::platform::update_timers_and_animations();
+    let bottom = thumbs(&ui)[0].absolute_position();
+    assert!(bottom.y > moved.y + 10.0, "over the indicator: {} then {}", moved.y, bottom.y);
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(x, 300.0), delta_x: 0.0, delta_y: 100_000.0 });
+    slint::platform::update_timers_and_animations();
+    assert_eq!(thumbs(&ui)[0].absolute_position().y, top.y, "back at the top, and no further");
+    // Held, the bar has every pointer event (nothing falls through to the details): the wheel still scrolls.
+    let (at, held) = (LogicalPosition::new(x, 700.0), slint::platform::PointerEventButton::Left);
+    ui.window().dispatch_event(WindowEvent::PointerPressed { position: at, button: held });
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: at, delta_x: 0.0, delta_y: -400.0 });
+    slint::platform::update_timers_and_animations();
+    assert!(thumbs(&ui)[0].absolute_position().y > top.y + 10.0, "the wheel over a held bar");
+    ui.window().dispatch_event(WindowEvent::PointerReleased { position: at, button: held });
 }
 
 // Ruling PF1: frames only sync the current row; they never scroll the list.
