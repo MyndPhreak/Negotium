@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// Minimal row storage the sync can use. Deliberately has no "replace all".
+#[allow(clippy::len_without_is_empty)] // internal row-store abstraction; emptiness is never queried
 pub trait RowStore<T> {
     fn len(&self) -> usize;
     fn get(&self, i: usize) -> Option<T>;

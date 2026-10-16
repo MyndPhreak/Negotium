@@ -7,7 +7,7 @@ use negotium_collector::{ProcessReader, logical_cpus};
 use serde::Serialize;
 use stats::{Summary, summary};
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -214,7 +214,7 @@ impl Drop for Launched {
     }
 }
 
-fn launch(path: &PathBuf, args: Option<&str>) -> Result<Launched> {
+fn launch(path: &Path, args: Option<&str>) -> Result<Launched> {
     let file = HSTRING::from(path.as_os_str());
     let params = args.map(HSTRING::from);
     let mut info = SHELLEXECUTEINFOW {
@@ -305,7 +305,10 @@ fn wait_for_window(pid: u32) -> Result<HWND> {
 
 /// Waits `warmup` (excluded from the samples, so the launch burst does not skew them), then
 /// samples for `duration`.
-fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, usize)> {
+/// Three sample series plus a count (see `sample`).
+type Samples = (Vec<f64>, Vec<f64>, Vec<f64>, usize);
+
+fn sample(target: &Launched, warmup: Duration, duration: Duration) -> Result<Samples> {
     let pid = target.pid;
     let hwnd_bits = target.hwnd.context("target window not found")?;
     std::thread::sleep(warmup);
