@@ -88,6 +88,8 @@ pub enum RegValue {
     Binary(Vec<u8>),
     Dword(u32),
     Other,
+    /// Larger than `MAX_VALUE_BYTES`: skipped by `values`, not read.
+    TooLarge,
 }
 
 impl RegValue {
@@ -190,6 +192,11 @@ fn open(key: &RegKey, access: REG_SAM_FLAGS) -> Result<Option<Key>, ActionError>
     }
 }
 
+/// The largest value `values` reads; a larger one is listed as `RegValue::TooLarge`.
+pub const MAX_VALUE_BYTES: usize = 1 << 20;
+
+/// Every value of `key`, in Windows' order; one over `MAX_VALUE_BYTES` comes back as
+/// `RegValue::TooLarge` without its data.
 pub fn values(key: &RegKey) -> Result<Vec<(String, RegValue)>, ActionError> {
     let Some(k) = open(key, KEY_READ)? else {
         return Ok(Vec::new());
@@ -223,10 +230,36 @@ pub fn values(key: &RegKey) -> Result<Vec<(String, RegValue)>, ActionError> {
                 ));
                 index += 1;
             }
+            // Over the cap: listed by name as `TooLarge` (the name is read again without the
+            // data, as the failed call's name buffer isn't guaranteed).
+            ERROR_MORE_DATA if data_len as usize > MAX_VALUE_BYTES => {
+                let mut name_len = name.len() as u32;
+                // SAFETY: `name` is writable for `name_len` units; no data is requested.
+                let status = unsafe {
+                    RegEnumValueW(
+                        k.0,
+                        index,
+                        Some(PWSTR(name.as_mut_ptr())),
+                        &mut name_len,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                };
+                if status != ERROR_SUCCESS {
+                    return Err(error(status));
+                }
+                out.push((
+                    String::from_utf16_lossy(&name[..name_len as usize]),
+                    RegValue::TooLarge,
+                ));
+                index += 1;
+            }
             // A value larger than the buffer: grow it to the size Windows reported (or double it,
-            // should the value have grown meanwhile) and read the same index again.
+            // should the value have grown meanwhile), up to the cap, and read the same index again.
             ERROR_MORE_DATA => {
-                let wanted = (data_len as usize).max(data.len() * 2);
+                let wanted = (data_len as usize).max(data.len() * 2).min(MAX_VALUE_BYTES);
                 data.resize(wanted, 0);
             }
             ERROR_NO_MORE_ITEMS => break,

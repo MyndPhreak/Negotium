@@ -4,13 +4,18 @@
 use negotium_actions::ActionError;
 use negotium_actions::startup::registry::{self, Hive, RegKey};
 use negotium_actions::startup::{
-    StartupEntry, StartupRoots, StartupSource, list_startup, set_startup_enabled,
+    StartupEntry, StartupRoots, StartupSource, is_read_error, list_startup, set_startup_enabled,
+    write_shortcut,
 };
+use negotium_collector::VersionInfo;
 
 const PING: &str = r"C:\Windows\System32\PING.EXE";
 
+/// A registry sandbox under the test root and two fresh temp folders standing in for the
+/// per-user and all-users Startup folders; all removed on drop.
 struct Sandbox {
     base: RegKey,
+    dir: std::path::PathBuf,
     roots: StartupRoots,
 }
 
@@ -21,9 +26,18 @@ impl Sandbox {
             &format!(r"{}\{name}-{}", registry::TEST_ROOT, std::process::id()),
         );
         let _ = registry::delete_test_tree(&base);
+        let dir = std::env::temp_dir().join(format!(
+            "negotium-startup-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (user, machine) = (dir.join("user"), dir.join("machine"));
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&machine).unwrap();
         Self {
-            roots: StartupRoots::under(&base.path),
+            roots: StartupRoots::under(&base.path).with_folders(user, machine),
             base,
+            dir,
         }
     }
 }
@@ -31,6 +45,7 @@ impl Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = registry::delete_test_tree(&self.base);
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -226,7 +241,13 @@ fn unusual_run_commands_are_listed_and_toggle() {
             "PowerShell",
             r"powershell.exe -NoProfile -File C:\Nope\startup.ps1".to_string(),
         ),
-        ("Cmd", r"cmd /c start C:\Nope\x.exe".to_string()),
+        // `cmd` without ".exe" is still the host: what it starts (PING.EXE, whose description
+        // and publisher are readable) must not lend the entry its name.
+        ("Cmd", "cmd /c start PING.EXE -n 1 127.0.0.1".to_string()),
+        (
+            "Cmd exe",
+            r"C:\Windows\System32\cmd.exe /c echo hi".to_string(),
+        ),
         ("Gone", r"C:\Nope\gone.exe".to_string()),
         (
             "Unknown variable",
@@ -256,6 +277,7 @@ fn unusual_run_commands_are_listed_and_toggle() {
         "Rundll",
         "PowerShell",
         "Cmd",
+        "Cmd exe",
         "Spaced missing",
         "Gone",
         "Unknown variable",
@@ -303,11 +325,19 @@ fn missing_lists_are_empty_not_errors() {
     );
 }
 
-/// Review Focus 3: reading the all-users lists needs no admin, so the real lists read cleanly.
+/// Review Focus 3: reading the all-users lists and the Startup folders needs no admin, so the real
+/// lists read cleanly. "Skipped …" lines (say, a Run value that isn't a command) are information
+/// about one value, not read errors.
 #[test]
 fn the_real_lists_can_be_read_without_changing_them() {
-    let (entries, errors) = list_startup(&StartupRoots::system());
-    assert!(errors.is_empty(), "{errors:?}");
+    let roots = StartupRoots::system();
+    assert!(
+        roots.user_folder.is_some() && roots.machine_folder.is_some(),
+        "{roots:?}"
+    );
+    let (entries, errors) = list_startup(&roots);
+    let read_errors: Vec<&String> = errors.iter().filter(|e| is_read_error(e)).collect();
+    assert!(read_errors.is_empty(), "{read_errors:?}");
     for e in &entries {
         assert!(!e.name.is_empty() && !e.location.is_empty(), "{e:?}");
     }
@@ -354,16 +384,25 @@ fn an_unreadable_approved_key_still_lists_the_run_entries_and_says_so() {
         Hive::CurrentUser,
         &format!(r"{}\{}", sb.base.path, "k".repeat(300)),
     );
+    let folder = roots.user_folder.clone().unwrap();
+    std::fs::write(folder.join("tool.bat"), "@echo off").unwrap();
     let (entries, errors) = list_startup(&roots);
-    assert!(
-        find(&entries, "Tool").enabled,
-        "listed, with the default state"
-    );
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert!(
-        errors[0].starts_with(r"Couldn't read HKCU\") && !errors[0].contains("Other("),
-        "plain English: {errors:?}"
-    );
+    for key in ["Tool", "tool.bat"] {
+        assert!(
+            find(&entries, key).enabled,
+            "listed, with the default state"
+        );
+    }
+    assert_eq!(errors.len(), 2, "one per list: {errors:?}");
+    for (line, list) in errors.iter().zip([r"\Run: ", r"\StartupFolder: "]) {
+        assert!(
+            line.starts_with(r"Couldn't read HKCU\")
+                && line.contains(list)
+                && !line.contains("Other(")
+                && is_read_error(line),
+            "plain English: {errors:?}"
+        );
+    }
 }
 
 #[test]
@@ -377,7 +416,142 @@ fn large_run_values_are_read_whole_and_odd_ones_are_reported() {
     assert_eq!(entries.len(), 1);
     assert_eq!(find(&entries, "Big").command, long);
     assert_eq!(errors.len(), 1, "{errors:?}");
-    assert!(errors[0].contains("\"Number\""), "{errors:?}");
+    assert!(
+        errors[0].starts_with(r"Skipped Number in HKCU\") && !is_read_error(&errors[0]),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn values_over_a_megabyte_are_skipped_and_named() {
+    let sb = Sandbox::new("huge");
+    let r = &sb.roots;
+    let huge = format!(r"C:\Nope\huge.exe {}", "a".repeat(600_000)); // 1.2 MB as UTF-16
+    registry::set_string(&r.user_run, "Huge", &huge).unwrap();
+    registry::set_string(&r.user_run, "Small", r"C:\Nope\small.exe").unwrap();
+    let (entries, errors) = list_startup(r);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    find(&entries, "Small");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with(r"Skipped Huge in HKCU\") && errors[0].contains("1 MB"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn startup_folder_entries_resolve_shortcuts_and_toggle_under_startup_folder() {
+    let sb = Sandbox::new("folders");
+    let r = &sb.roots;
+    let user = r.user_folder.clone().unwrap();
+    write_shortcut(&user.join("Ping test.lnk"), PING, "-n 1 127.0.0.1").unwrap();
+    std::fs::write(user.join("desktop.ini"), "[.ShellClassInfo]").unwrap();
+    std::fs::write(user.join("notes.bat"), "@echo off").unwrap();
+    std::fs::write(
+        r.machine_folder.clone().unwrap().join("tool.bat"),
+        "@echo off",
+    )
+    .unwrap();
+
+    let (entries, errors) = list_startup(r);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(entries.len(), 3, "desktop.ini is not an entry: {entries:?}");
+    let ping = find(&entries, "Ping test.lnk").clone();
+    assert_eq!(ping.source, StartupSource::UserFolder);
+    assert!(
+        ping.command.to_ascii_uppercase().contains("PING.EXE") && ping.command.contains("-n 1"),
+        "{}",
+        ping.command
+    );
+    assert!(
+        ping.publisher.is_some(),
+        "the shortcut's target is read for the publisher"
+    );
+    let notes = find(&entries, "notes.bat");
+    assert_eq!(notes.name, "notes");
+    let tool = find(&entries, "tool.bat");
+    assert_eq!(tool.source, StartupSource::MachineFolder);
+    assert!(tool.source.needs_admin());
+
+    set_startup_enabled(r, &ping, false).unwrap();
+    assert_eq!(
+        approved(&r.user_approved.child("StartupFolder"), "Ping test.lnk")[0],
+        3
+    );
+    assert!(!find(&list_startup(r).0, "Ping test.lnk").enabled);
+}
+
+/// A shortcut to a host program, one whose target is gone and one that can't be resolved are
+/// listed under their own names without a publisher, and still toggle (the all-users folder
+/// under HKLM's StartupFolder key, here the sandbox's).
+#[test]
+fn host_and_broken_shortcuts_show_their_file_name() {
+    let sb = Sandbox::new("hostlinks");
+    let r = &sb.roots;
+    let user = r.user_folder.clone().unwrap();
+    let machine = r.machine_folder.clone().unwrap();
+    let cmd = format!(
+        r"{}\System32\cmd.exe",
+        std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string())
+    );
+    assert!(
+        VersionInfo::read(&cmd)
+            .and_then(|i| i.string("CompanyName"))
+            .is_some(),
+        "cmd.exe has a publisher of its own, which the host check hides"
+    );
+    write_shortcut(&user.join("Script.lnk"), &cmd, "/c echo hi").unwrap();
+    write_shortcut(&user.join("Gone.lnk"), r"C:\Nope\gone.exe", "").unwrap();
+    std::fs::write(machine.join("Broken.lnk"), b"not a shortcut").unwrap();
+
+    let (entries, errors) = list_startup(r);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    for (key, name) in [
+        ("Script.lnk", "Script"),
+        ("Gone.lnk", "Gone"),
+        ("Broken.lnk", "Broken"),
+    ] {
+        let e = find(&entries, key);
+        assert_eq!(
+            (e.name.as_str(), e.publisher.as_deref()),
+            (name, None),
+            "{e:?}"
+        );
+        assert!(e.enabled && e.changeable, "{e:?}");
+    }
+    let script = find(&entries, "Script.lnk");
+    assert!(
+        script
+            .command
+            .to_ascii_lowercase()
+            .ends_with(r"\cmd.exe /c echo hi"),
+        "{}",
+        script.command
+    );
+    let broken = find(&entries, "Broken.lnk").clone();
+    assert_eq!(broken.source, StartupSource::MachineFolder);
+    assert_eq!(broken.command, "");
+    set_startup_enabled(r, &broken, false).unwrap();
+    assert_eq!(
+        approved(&r.machine_approved.child("StartupFolder"), "Broken.lnk")[0],
+        3
+    );
+    assert!(!find(&list_startup(r).0, "Broken.lnk").enabled);
+}
+
+#[test]
+fn missing_startup_folders_are_empty_not_errors() {
+    let sb = Sandbox::new("nofolders");
+    let roots = sb
+        .roots
+        .clone()
+        .with_folders(sb.dir.join("no-user"), sb.dir.join("no-machine"));
+    let (entries, errors) = list_startup(&roots);
+    assert!(
+        entries.is_empty() && errors.is_empty(),
+        "{entries:?} {errors:?}"
+    );
 }
 
 #[test]

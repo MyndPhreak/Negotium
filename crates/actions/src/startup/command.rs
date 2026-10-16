@@ -16,11 +16,13 @@ const HOSTS: &[&str] = &[
     "msiexec",
 ];
 
-/// The quoted path, else the text up to and including the ".exe" that ends a word, else the first
-/// word; environment variables expanded; a bare file name taken from System32. `None` for an
-/// empty command.
+/// The quoted path; else a bare host program that starts the command (`cmd /c start x.exe` runs
+/// `cmd`, not `x.exe`); else the text up to and including the ".exe" that ends a word; else the
+/// first word. Environment variables are expanded; a bare file name is taken from System32, as an
+/// ".exe" when it has no extension. `None` for an empty command.
 pub fn exe_from_command(command: &str, system_root: &str) -> Option<String> {
     let c = command.trim();
+    let first = c.split_whitespace().next().unwrap_or("");
     let lower = c.to_ascii_lowercase();
     let exe_end = lower
         .match_indices(".exe")
@@ -28,22 +30,30 @@ pub fn exe_from_command(command: &str, system_root: &str) -> Option<String> {
         .find(|&end| c[end..].chars().next().is_none_or(char::is_whitespace));
     let raw = if let Some(rest) = c.strip_prefix('"') {
         rest.split('"').next().unwrap_or(rest)
+    } else if is_bare(first) && is_host_program(first) {
+        first
     } else if let Some(end) = exe_end {
         &c[..end]
     } else {
-        c.split_whitespace().next().unwrap_or("")
+        first
     };
     let path = expand_env(raw.trim(), |name| std::env::var(name).ok());
     if path.is_empty() {
         None
-    } else if path.contains(['\\', '/', ':']) {
+    } else if !is_bare(&path) {
         Some(path)
     } else {
+        let ext = if path.contains('.') { "" } else { ".exe" };
         Some(format!(
-            "{}\\System32\\{path}",
+            "{}\\System32\\{path}{ext}",
             system_root.trim_end_matches('\\')
         ))
     }
+}
+
+/// A file name with no folder or drive.
+fn is_bare(path: &str) -> bool {
+    !path.contains(['\\', '/', ':'])
 }
 
 /// Whether `exe` is one of the `HOSTS` (by file name, with or without ".exe", any case).
@@ -137,6 +147,41 @@ mod tests {
             exe_from_command(r"C:\Apps\my.exes\tool", r"C:\Windows").as_deref(),
             Some(r"C:\Apps\my.exes\tool"),
             "no word ends in .exe: the first word"
+        );
+    }
+
+    #[test]
+    fn a_bare_host_program_first_is_the_program_not_what_it_starts() {
+        for (command, exe) in [
+            (
+                r"cmd /c start C:\Nope\x.exe",
+                r"C:\Windows\System32\cmd.exe",
+            ),
+            ("CMD /c start ping.exe", r"C:\Windows\System32\CMD.exe"),
+            (
+                r"powershell -File C:\x\y.exe",
+                r"C:\Windows\System32\powershell.exe",
+            ),
+            (
+                "rundll32.exe shell32.dll,Control_RunDLL",
+                r"C:\Windows\System32\rundll32.exe",
+            ),
+        ] {
+            assert_eq!(
+                exe_from_command(command, r"C:\Windows").as_deref(),
+                Some(exe),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            exe_from_command(r"C:\Tools\cmd thing\app.exe /x", r"C:\Windows").as_deref(),
+            Some(r"C:\Tools\cmd thing\app.exe"),
+            "only a bare first word counts: a folder named cmd is not the host"
+        );
+        assert_eq!(
+            exe_from_command("tool /x", r"C:\Windows").as_deref(),
+            Some(r"C:\Windows\System32\tool.exe"),
+            "a bare name without an extension is looked up as an .exe"
         );
     }
 
