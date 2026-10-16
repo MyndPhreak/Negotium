@@ -9,7 +9,7 @@ use crate::worker::SharedHistory;
 use crate::{DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
 use negotium_actions::startup::StartupEntry;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -189,8 +189,9 @@ pub struct Bridge {
     scrub_builds: u32,
     scrub_rows: Rc<VecModel<ScrubRow>>,
     /// Collector time counts from here (the worker's epoch), so the scrolling view can be placed
-    /// against real time.
-    epoch: Instant,
+    /// against real time. Shared with `GraphClock.clock` (crate::smooth::install), so Slint moves
+    /// the view by the same clock.
+    epoch: Rc<Cell<Instant>>,
     /// Collector time fixed here instead of read from `epoch` (tests: edges that don't depend on
     /// wall time).
     fixed_now_ms: Option<f64>,
@@ -240,7 +241,7 @@ impl Bridge {
             scrub_shown: None,
             scrub_builds: 0,
             scrub_rows: Rc::new(VecModel::default()),
-            epoch: Instant::now(),
+            epoch: Rc::new(Cell::new(Instant::now())),
             fixed_now_ms: None,
             scroll: None,
             expanded: HashSet::new(),
@@ -271,7 +272,8 @@ impl Bridge {
         ui.set_perf_segments(ModelRc::from(b.perf_segments.clone()));
         ui.set_scrub_rows(ModelRc::from(b.scrub_rows.clone()));
         ui.set_startup_rows(ModelRc::from(b.startup_rows.clone()));
-        smooth::install(ui);
+        let epoch = b.epoch.clone();
+        smooth::install(ui, move || epoch.get().elapsed());
         Rc::new(RefCell::new(b))
     }
 
@@ -351,7 +353,7 @@ impl Bridge {
 
     /// The worker's collector epoch (`worker::spawn`).
     pub fn set_epoch(&mut self, epoch: Instant) {
-        self.epoch = epoch;
+        self.epoch.set(epoch);
     }
 
     /// Fixes collector time at `now_ms` instead of reading the clock, so a test places the
@@ -361,7 +363,7 @@ impl Bridge {
     }
 
     fn collector_now_ms(&self) -> f64 {
-        self.fixed_now_ms.unwrap_or_else(|| self.epoch.elapsed().as_secs_f64() * 1_000.0)
+        self.fixed_now_ms.unwrap_or_else(|| self.epoch.get().elapsed().as_secs_f64() * 1_000.0)
     }
 
     /// A frame's graphs landed with their newest sample at `newest_ms`. While graphs scroll, the

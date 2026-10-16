@@ -5,7 +5,8 @@ export struct ScrubRow { name: string, value: string }
 
 // The clock every time graph scrolls by (crate::smooth). Rust sets `smooth` (Settings > Smooth
 // graphs) and `shown` (the window is neither hidden to the tray nor minimised);
-// MainWindow.scroll-from starts a run when a frame lands, and MainWindow's timer advances `now`.
+// MainWindow.scroll-from starts a run when a frame lands, and MainWindow's timer advances `now`,
+// both from `clock()`.
 export global GraphClock {
     in property <bool> smooth: true;
     in property <bool> shown: true;
@@ -20,6 +21,11 @@ export global GraphClock {
     // The view's right edge relative to the newest sample, ms (<= 0): it never passes the newest
     // sample, and rests on it while graphs don't scroll.
     out property <float> offset-ms: live ? min(0, lead-ms + speed * ((now - anchor) / 1ms)) : 0;
+    // The time graphs scroll by, from the clock Rust supplies (crate::smooth::install: the
+    // collector's epoch, so the bridge's view edge and this one agree). Not `animation-tick()`:
+    // reading that marks an animation as running, and the backend then draws a second, identical
+    // frame for every timer tick.
+    callback clock() -> duration;
     // Redraws a second for a graph this many physical pixels wide over this many ms
     // (crate::smooth::redraw_hz; Rust implements it, crate::smooth::install).
     pure callback redraw-hz(width-px: float, span-ms: float, speed: float) -> float;

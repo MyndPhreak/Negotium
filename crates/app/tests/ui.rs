@@ -2597,10 +2597,15 @@ fn the_toast_shows_on_every_page() {
 
 use negotium::GraphClock;
 
+/// The testing backend's mocked time, as GraphClock's clock (crate::smooth::install).
+fn mocked_clock() -> std::time::Duration {
+    std::time::Duration::from_millis(i_slint_backend_testing::get_mocked_time())
+}
+
 #[test]
 fn the_graph_clock_runs_from_its_lead_to_the_newest_sample_and_stops_there() {
     let ui = shown_window();
-    negotium::smooth::install(&ui); // the timer's rate (Bridge::install does this in the app)
+    negotium::smooth::install(&ui, mocked_clock); // the timer's rate and clock (Bridge::install does this in the app)
     let clock = ui.global::<GraphClock>();
     assert!(clock.get_live(), "smooth graphs are on by default");
     ui.invoke_scroll_from(-1_000.0, 1.0);
@@ -2640,7 +2645,7 @@ fn the_graph_clock_stands_still_with_smooth_graphs_off_hidden_or_on_pages_withou
 #[test]
 fn a_run_cut_short_rests_on_the_newest_sample_when_scrolling_resumes() {
     let ui = shown_window();
-    negotium::smooth::install(&ui);
+    negotium::smooth::install(&ui, mocked_clock);
     let clock = ui.global::<GraphClock>();
     ui.invoke_scroll_from(-1_000.0, 1.0);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
@@ -2657,7 +2662,7 @@ fn a_run_cut_short_rests_on_the_newest_sample_when_scrolling_resumes() {
 #[test]
 fn graphs_are_redrawn_as_often_as_half_a_pixel_of_scrolling_needs_up_to_60_a_second() {
     let ui = shown_window(); // 1000 × 720
-    negotium::smooth::install(&ui);
+    negotium::smooth::install(&ui, mocked_clock);
     let overview = ui.get_scroll_interval();
     assert!((100..=400).contains(&overview), "1 min sparklines, ~150 px wide: {overview} ms");
     ui.set_page(1);
@@ -2669,6 +2674,24 @@ fn graphs_are_redrawn_as_often_as_half_a_pixel_of_scrolling_needs_up_to_60_a_sec
     ui.set_perf_span_ms(60_000.0);
     ui.window().set_size(PhysicalSize::new(5_120, 1_440));
     assert_eq!(ui.get_scroll_interval(), 16, "never more than about 60 frames a second");
+}
+
+/// The graph clock reads a clock Rust supplies, not `animation-tick()`: that call marks an
+/// animation as running, and the GPU backend then draws a second, identical frame for every timer
+/// tick (fix wave R9: a 22 Hz timer drew 45 frames a second).
+#[test]
+fn the_graph_timer_and_a_landing_frame_ask_for_no_extra_frame() {
+    let ui = shown_window();
+    negotium::smooth::install(&ui, mocked_clock);
+    let clock = ui.global::<GraphClock>();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    ui.invoke_scroll_from(-5_000.0, 1.0);
+    assert!(!ui.window().has_active_animations(), "a landing frame starts no animation");
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // the timer starts
+    let now = clock.get_now();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    assert!(clock.get_now() > now, "the timer ran");
+    assert!(!ui.window().has_active_animations(), "a timer tick starts no animation");
 }
 
 /// An epoch `ms` ago, and when it was taken, so assertions can allow for the time the test itself
@@ -2860,7 +2883,7 @@ fn the_smooth_graphs_switch_applies_at_once_and_is_saved() {
 fn switching_smooth_graphs_off_rests_on_the_newest_sample_without_a_jump() {
     let dir = Scratch::new("smooth-rest");
     let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
-    negotium::smooth::install(&ui);
+    negotium::smooth::install(&ui, mocked_clock);
     let clock = ui.global::<GraphClock>();
     ui.set_page(1); // the graph timer runs only on pages with graphs
     ui.invoke_scroll_from(-1_000.0, 1.0);
@@ -2962,7 +2985,7 @@ fn a_size_message_applies_a_change_once_from_the_event_loop() {
 #[test]
 fn the_graph_timer_stands_still_while_the_window_is_hidden_or_minimised() {
     let ui = shown_window();
-    negotium::smooth::install(&ui);
+    negotium::smooth::install(&ui, mocked_clock);
     let clock = ui.global::<GraphClock>();
     for (visible, minimised) in [(false, false), (true, true)] {
         negotium::smooth::set_shown(&ui, true, false);

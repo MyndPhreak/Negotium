@@ -596,3 +596,17 @@ fn a_performance_frame_draws_once() {
     let drawn = frames.run(100);
     assert!(drawn <= 2, "{drawn} frames for one Performance frame");
 }
+
+/// `animation-tick()` marks an animation as running whenever it is read, and the GPU backend then
+/// draws an extra, identical frame: the graph clock reads Rust's clock instead (fix wave R9).
+#[test]
+fn no_slint_source_reads_the_animation_tick() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "slint") {
+            let src = squeezed(&std::fs::read_to_string(&path).unwrap());
+            assert!(!src.contains("animation-tick("), "{} calls animation-tick()", path.display());
+        }
+    }
+}

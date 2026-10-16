@@ -67,7 +67,7 @@ export component MainWindow inherits Window {
         interval: root.scroll-interval;
         running: GraphClock.live && root.page <= 1 && GraphClock.offset-ms < 0;
         triggered => {
-            GraphClock.now = animation-tick();
+            GraphClock.now = GraphClock.clock();
             // The view moved under a still pointer: the scrub card follows (crate::bridge).
             if (root.scrub-x >= 0) {
                 root.scroll-follow();
@@ -79,7 +79,7 @@ export component MainWindow inherits Window {
     // the newest sample. A function, not a `changed` handler: the new paths and their offset
     // reach the same rendered frame.
     public function scroll-from(lead-ms: float, speed: float) {
-        GraphClock.anchor = animation-tick();
+        GraphClock.anchor = GraphClock.clock();
         GraphClock.now = GraphClock.anchor;
         GraphClock.lead-ms = lead-ms;
         GraphClock.speed = speed;
