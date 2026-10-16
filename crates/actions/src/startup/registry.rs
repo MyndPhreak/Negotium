@@ -1,6 +1,7 @@
 //! Registry helpers for the startup lists: read a key's values and subkeys, write one value.
 //! Paths are relative to a hive; a missing key reads as empty. Every write goes through `set`,
-//! which refuses anything outside the test sandbox until the app calls `allow_system_writes`.
+//! which refuses anything outside the test sandbox until the app calls `allow_system_writes`, and
+//! even then anything but the startup state keys a toggle writes (`may_write`).
 use crate::ActionError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::{
@@ -22,16 +23,59 @@ pub const TEST_ROOT: &str = r"Software\Negotium-Test";
 /// test, in any crate) can only write inside the test sandbox.
 static SYSTEM_WRITES: AtomicBool = AtomicBool::new(false);
 
-/// Lets this process write outside HKCU\Software\Negotium-Test\… (the real StartupApproved
-/// values). Called once, by the app's `main`; tests never call it.
+/// Lets this process write outside HKCU\Software\Negotium-Test\…: the real StartupApproved
+/// values and packaged task states only (`may_write`). Called once, by the app's `main`; tests never call it.
 pub fn allow_system_writes() {
     SYSTEM_WRITES.store(true, Ordering::SeqCst);
 }
 
-/// Whether a write to `key` would be attempted: inside the test sandbox always, elsewhere only
-/// after `allow_system_writes`. Pure: it never touches the registry.
+/// Whether a write to `key` would be attempted: inside the test sandbox always; after
+/// `allow_system_writes`, also the startup state keys the app writes (`is_startup_state_key`),
+/// and nothing else. Pure: it never touches the registry.
 pub fn may_write(key: &RegKey) -> bool {
-    in_test_root(key) || SYSTEM_WRITES.load(Ordering::SeqCst)
+    may_write_with(key, SYSTEM_WRITES.load(Ordering::SeqCst))
+}
+
+/// `may_write` with the unlock given, so both modes can be tested.
+fn may_write_with(key: &RegKey, unlocked: bool) -> bool {
+    in_test_root(key) || (unlocked && is_startup_state_key(key))
+}
+
+/// The keys a startup toggle writes outside the sandbox (defence in depth for the unlock):
+/// `…\Explorer\StartupApproved\{Run,Run32,StartupFolder}` under HKCU or HKLM, and a packaged
+/// task's key `HKCU\…\AppModel\SystemAppData\<family>\<task>`. Names compare case-insensitively;
+/// an empty component (a doubled or trailing backslash) never matches.
+fn is_startup_state_key(key: &RegKey) -> bool {
+    let parts: Vec<&str> = key.path.split('\\').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return false;
+    }
+    let under = |prefix: &str, extra: usize| {
+        let prefix: Vec<&str> = prefix.split('\\').collect();
+        parts.len() == prefix.len() + extra
+            && parts.iter().zip(&prefix).all(|(a, b)| a.eq_ignore_ascii_case(b))
+    };
+    let approved_list = under(super::APPROVED, 1)
+        && ["Run", "Run32", "StartupFolder"]
+            .iter()
+            .any(|l| parts[parts.len() - 1].eq_ignore_ascii_case(l));
+    approved_list || (is_packaged_task_key(key) && under(super::packaged::SYSTEM_APP_DATA, 2))
+}
+
+/// A packaged task's key (HKCU\…\SystemAppData\<family>\<task>) by its place, not its contents.
+fn is_packaged_task_key(key: &RegKey) -> bool {
+    let prefix = format!("{}\\", super::packaged::SYSTEM_APP_DATA);
+    key.hive == Hive::CurrentUser
+        && key
+            .path
+            .get(..prefix.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(&prefix))
+}
+
+/// Value `name` may be written to `key` (once the key itself may be): outside the sandbox, a
+/// packaged task's key takes only its `State`.
+fn value_allowed(key: &RegKey, name: &str) -> bool {
+    in_test_root(key) || !is_packaged_task_key(key) || name.eq_ignore_ascii_case("State")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -169,9 +213,9 @@ fn in_test_root(key: &RegKey) -> bool {
         && !key.path[prefix.len()..].trim_matches('\\').is_empty()
 }
 
-/// Refuses a write `may_write` rejects.
-fn guard_write(key: &RegKey) -> Result<(), ActionError> {
-    if !may_write(key) {
+/// Refuses a write `may_write` (or, for value `name`, `value_allowed`) rejects.
+fn guard_write(key: &RegKey, name: &str) -> Result<(), ActionError> {
+    if !may_write(key) || !value_allowed(key, name) {
         return Err(ActionError::Other(format!(
             "writing {} is not allowed in this process",
             key.display()
@@ -366,7 +410,7 @@ fn set_value(h: &Key, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(
 /// Writes value `name` of `key` (its hive and subkey), creating the key. One of the two writers;
 /// both check `guard_write` first.
 fn set(key: &RegKey, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(), ActionError> {
-    guard_write(key)?;
+    guard_write(key, name)?;
     let mut h = HKEY::default();
     let path = HSTRING::from(key.path.as_str());
     // SAFETY: creates or opens the key for writing into a writable local; the handle is owned by `Key`.
@@ -392,7 +436,7 @@ fn set(key: &RegKey, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<()
 /// Writes DWORD `name` of `key` only if the key exists: `Ok(false)` when it doesn't, and nothing
 /// is created. The other writer; `guard_write` comes first.
 pub fn set_existing_dword(key: &RegKey, name: &str, value: u32) -> Result<bool, ActionError> {
-    guard_write(key)?;
+    guard_write(key, name)?;
     let Some(h) = open(key, KEY_SET_VALUE)? else {
         return Ok(false);
     };
@@ -471,18 +515,123 @@ mod tests {
         )));
     }
 
+    const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved";
+    const APP_DATA: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData";
+
+    /// The keys the app writes once unlocked: the StartupApproved lists (both hives) and a
+    /// packaged task's key (HKCU).
+    fn startup_state_keys() -> Vec<RegKey> {
+        let mut keys = Vec::new();
+        for hive in [Hive::CurrentUser, Hive::LocalMachine] {
+            for list in ["Run", "Run32", "StartupFolder"] {
+                keys.push(RegKey::new(hive, &format!(r"{APPROVED}\{list}")));
+            }
+        }
+        keys.push(RegKey::new(
+            Hive::CurrentUser,
+            &format!(r"{APP_DATA}\Contoso.App_8wekyb3d8bbwe\Boot"),
+        ));
+        // Names compare case-insensitively, as Windows does.
+        keys.push(RegKey::new(
+            Hive::LocalMachine,
+            &format!(r"{}\run", APPROVED.to_uppercase()),
+        ));
+        keys
+    }
+
+    /// Keys never written, unlocked or not.
+    fn other_keys() -> Vec<RegKey> {
+        let k = RegKey::new;
+        vec![
+            k(Hive::CurrentUser, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            k(Hive::LocalMachine, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            k(Hive::CurrentUser, APPROVED),
+            k(Hive::CurrentUser, &format!(r"{APPROVED}\Run\sub")),
+            k(Hive::CurrentUser, &format!(r"{APPROVED}\RunOnce")),
+            k(Hive::CurrentUser, &format!(r"{APPROVED}\\Run")),
+            k(Hive::CurrentUser, &format!(r"{APPROVED}\Run\")),
+            k(Hive::CurrentUser, APP_DATA),
+            k(Hive::CurrentUser, &format!(r"{APP_DATA}\Contoso.App_8wekyb3d8bbwe")),
+            k(Hive::CurrentUser, &format!(r"{APP_DATA}\Contoso.App_8wekyb3d8bbwe\Boot\Extra")),
+            k(Hive::CurrentUser, &format!(r"{APP_DATA}\\Boot")),
+            k(Hive::LocalMachine, &format!(r"{APP_DATA}\Contoso.App_8wekyb3d8bbwe\Boot")),
+            k(Hive::CurrentUser, r"Software\Policies\Microsoft\Windows"),
+            k(Hive::LocalMachine, &format!(r"{TEST_ROOT}\a")),
+            k(Hive::CurrentUser, TEST_ROOT),
+        ]
+    }
+
+    #[test]
+    fn locked_only_the_test_root_is_writable() {
+        for key in startup_state_keys().iter().chain(&other_keys()) {
+            assert!(!may_write_with(key, false), "locked: {}", key.display());
+        }
+        let sandbox = RegKey::new(Hive::CurrentUser, &format!(r"{TEST_ROOT}\a"));
+        assert!(may_write_with(&sandbox, false));
+    }
+
+    #[test]
+    fn unlocked_only_the_startup_state_keys_and_the_test_root_are_writable() {
+        for key in startup_state_keys() {
+            assert!(may_write_with(&key, true), "unlocked: {}", key.display());
+        }
+        for key in other_keys() {
+            assert!(!may_write_with(&key, true), "unlocked, still refused: {}", key.display());
+        }
+        let sandbox = RegKey::new(Hive::CurrentUser, &format!(r"{TEST_ROOT}\a\b"));
+        assert!(may_write_with(&sandbox, true));
+    }
+
+    #[test]
+    fn every_key_a_real_toggle_writes_is_allowed_once_unlocked() {
+        use crate::startup::{StartupRoots, StartupSource};
+        let roots = StartupRoots::system();
+        for source in [
+            StartupSource::UserRun,
+            StartupSource::MachineRun,
+            StartupSource::MachineRun32,
+            StartupSource::UserFolder,
+            StartupSource::MachineFolder,
+        ] {
+            let key = roots.approved_key(source).unwrap();
+            assert!(may_write_with(&key, true), "{source:?}: {}", key.display());
+        }
+        let task = roots.packaged.child(r"Contoso.App_8wekyb3d8bbwe\Boot");
+        assert!(may_write_with(&task, true) && value_allowed(&task, "State"));
+    }
+
+    #[test]
+    fn a_packaged_task_key_takes_only_its_state() {
+        let task = RegKey::new(
+            Hive::CurrentUser,
+            &format!(r"{APP_DATA}\Contoso.App_8wekyb3d8bbwe\Boot"),
+        );
+        assert!(value_allowed(&task, "State") && value_allowed(&task, "state"));
+        assert!(!value_allowed(&task, "UserEnabledStartupOnce"));
+        let approved = RegKey::new(Hive::CurrentUser, &format!(r"{APPROVED}\Run"));
+        assert!(
+            value_allowed(&approved, "Any entry name"),
+            "StartupApproved values are named after entries"
+        );
+        let sandbox = RegKey::new(Hive::CurrentUser, &format!(r"{TEST_ROOT}\a\Pkg\Task"));
+        assert!(
+            value_allowed(&sandbox, "UserEnabledStartupOnce"),
+            "tests build task keys in the sandbox"
+        );
+    }
+
     #[test]
     fn writes_outside_the_sandbox_are_refused_by_default() {
         let real = RegKey::new(
             Hive::CurrentUser,
             r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
         );
-        assert!(matches!(guard_write(&real), Err(ActionError::Other(_))));
+        assert!(matches!(guard_write(&real, "x"), Err(ActionError::Other(_))));
         assert_eq!(
-            guard_write(&RegKey::new(
-                Hive::CurrentUser,
-                r"Software\Negotium-Test\unit"
-            )),
+            guard_write(
+                &RegKey::new(Hive::CurrentUser, r"Software\Negotium-Test\unit"),
+                "x"
+            ),
             Ok(())
         );
     }

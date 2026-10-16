@@ -113,8 +113,28 @@ fn com_error(e: windows::core::Error) -> ActionError {
     }
 }
 
-/// Writes a shortcut (tests build their Startup folders with it).
+/// Whether `path` lies under the temp folder: absolute, inside it (not the folder itself), and
+/// with no `..` component to climb out.
+fn in_temp_dir(path: &Path) -> bool {
+    use std::path::Component;
+    let temp = std::env::temp_dir();
+    path.is_absolute()
+        && path != temp
+        && path.starts_with(&temp)
+        && !path
+            .components()
+            .any(|c| c == Component::ParentDir)
+}
+
+/// Writes a shortcut (tests build their Startup folders with it). Only under the temp folder:
+/// Negotium itself never writes shortcuts, so a real Startup folder is never written.
 pub fn write_shortcut(path: &Path, target: &str, args: &str) -> Result<(), ActionError> {
+    if !in_temp_dir(path) {
+        return Err(ActionError::Other(format!(
+            "writing a shortcut outside the temp folder is not allowed: {}",
+            path.display()
+        )));
+    }
     let _com = ComApartment::enter();
     // SAFETY: a COM object created and used on this thread only.
     unsafe {
@@ -185,4 +205,25 @@ pub(super) fn folder_entries(
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcuts_are_written_only_under_the_temp_folder() {
+        let temp = std::env::temp_dir();
+        assert!(in_temp_dir(&temp.join("negotium-x").join("a.lnk")));
+        assert!(!in_temp_dir(&temp), "not the temp folder itself");
+        assert!(!in_temp_dir(&temp.join("..").join("a.lnk")), "no climbing out");
+        assert!(!in_temp_dir(Path::new("a.lnk")), "not relative");
+        let startup = PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\a.lnk");
+        assert!(!in_temp_dir(&startup));
+        // Refused before COM or the file system is touched.
+        match write_shortcut(&startup, r"C:\Windows\System32\PING.EXE", "") {
+            Err(ActionError::Other(text)) => assert!(text.contains("temp folder"), "{text}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
 }
