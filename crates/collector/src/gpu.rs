@@ -185,7 +185,8 @@ mod tests {
 
     #[test]
     fn a_failing_temperature_query_is_reported_once_then_skipped() {
-        let temps = GpuTemps { handles: vec![("k".into(), 0xdead_beef, Cell::new(false))], open_errors: vec![] };
+        // The handle is made up: never let Drop pass it to D3DKMTCloseAdapter (even on a failed assert).
+        let temps = std::mem::ManuallyDrop::new(GpuTemps { handles: vec![("k".into(), 0xdead_beef, Cell::new(false))], open_errors: vec![] });
         let (read, first) = temps.read_checked();
         assert!(read.is_empty());
         assert_eq!(first.len(), 1, "{first:?}");
