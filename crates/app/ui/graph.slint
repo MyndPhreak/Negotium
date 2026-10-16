@@ -3,12 +3,47 @@ import { Theme } from "theme.slint";
 export struct GraphData { label: string, value: string, scale: string, line: string, area: string, line2: string }
 export struct ScrubRow { name: string, value: string }
 
+// The clock every time graph scrolls by (crate::smooth). Rust sets `smooth` (Settings > Smooth
+// graphs) and `shown` (the window is neither hidden to the tray nor minimised);
+// MainWindow.scroll-from starts a run when a frame lands, and MainWindow's timer advances `now`.
+export global GraphClock {
+    in property <bool> smooth: true;
+    in property <bool> shown: true;
+    out property <bool> live: smooth && shown;
+    // The run (crate::smooth::Scroll): where the view's right edge started relative to the newest
+    // sample (ms, <= 0), how many ms of graph time pass per ms, and when it started. Speed 0 rests
+    // the view on the newest sample (MainWindow.scroll-from(0, 0)).
+    in-out property <float> lead-ms;
+    in-out property <float> speed: 1;
+    in-out property <duration> anchor;
+    in-out property <duration> now;
+    // The view's right edge relative to the newest sample, ms (<= 0): it never passes the newest
+    // sample, and rests on it while graphs don't scroll.
+    out property <float> offset-ms: live ? min(0, lead-ms + speed * ((now - anchor) / 1ms)) : 0;
+    // Redraws a second for a graph this many physical pixels wide over this many ms
+    // (crate::smooth::redraw_hz; Rust implements it, crate::smooth::install).
+    pure callback redraw-hz(width-px: float, span-ms: float, speed: float) -> float;
+    // A run cut short (smoothing turned off, the window hidden or minimised) rests on the newest
+    // sample, so the view stays there if graphs scroll again before the next frame lands (PF3).
+    changed live => {
+        if (!self.live) {
+            self.lead-ms = 0;
+            self.speed = 0;
+        }
+    }
+}
+
 // A data path: crate::graph's 1000 × 100 view box stretched over the element. It clips to its box
 // horizontally only: history left of the window is drawn at negative x (crate::graph::LEAD_MS) and
 // must stay out of sight, but a stroke centred on y = 0 or y = 100 (an idle 0% line) keeps its
 // full width, so the clip rectangle reaches past the box and the Path sits inside it.
+//
+// Every data path scrolls with GraphClock: the paths put the newest sample at x = 1000 and the
+// view's left edge sits `GraphClock.offset-ms` of graph time before that, in path units.
 export component DataPath inherits Rectangle {
     in property <string> commands;
+    // The time the path's 1000 units cover (crate::perf::Range; sparklines 60 s, crate::view::SPARK_SECONDS).
+    in property <float> span-ms: 60000;
     in property <brush> paint: transparent;
     in property <brush> stroke: transparent;
     in property <length> stroke-width: 1.5px;
@@ -23,6 +58,7 @@ export component DataPath inherits Rectangle {
             y: 2px;
             width: parent.width;
             height: parent.height - 4px;
+            viewbox-x: GraphClock.offset-ms * 1000 / max(1, root.span-ms);
             viewbox-width: 1000;
             viewbox-height: 100;
             fit: fill;
@@ -42,6 +78,8 @@ export component Graph inherits Rectangle {
     // renderer rasterises every Path on every frame, at a cost that grows with the area covered,
     // and dozens of filled cells made resizing the Performance page slow.
     in property <bool> filled: true;
+    // The time the paths cover (crate::perf::Range), for the scrolling offset.
+    in property <float> span-ms: 60000;
     border-radius: 4px;
     border-width: 1px;
     border-color: Theme.card-border;
@@ -62,6 +100,7 @@ export component Graph inherits Rectangle {
         y: 2px;
         width: root.width;
         height: root.height - 4px;
+        span-ms: root.span-ms;
         visible: root.filled;
         commands: root.data.area;
         paint: Theme.accent.with-alpha(0.16);
@@ -71,6 +110,7 @@ export component Graph inherits Rectangle {
         y: 2px;
         width: root.width;
         height: root.height - 4px;
+        span-ms: root.span-ms;
         commands: root.data.line;
         stroke: Theme.accent;
         stroke-width: 1.5px;
@@ -80,6 +120,7 @@ export component Graph inherits Rectangle {
         y: 2px;
         width: root.width;
         height: root.height - 4px;
+        span-ms: root.span-ms;
         commands: root.data.line2;
         stroke: Theme.muted;
         stroke-width: 1.5px;

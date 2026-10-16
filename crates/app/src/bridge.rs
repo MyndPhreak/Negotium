@@ -3,15 +3,17 @@
 use crate::controls::{Controls, Page};
 use crate::nav::{NavKey, NavOutcome, navigate};
 use crate::perf::{GraphView, PerfFrame};
+use crate::smooth::{self, Scroll};
 use crate::view::{Frame, RowView, Target, visible_rows};
 use crate::worker::SharedHistory;
-use crate::{DeviceData, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
+use crate::{DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
 use negotium_actions::startup::StartupEntry;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Minimal row storage the sync can use. Deliberately has no "replace all".
 #[allow(clippy::len_without_is_empty)] // internal row-store abstraction; emptiness is never queried
@@ -182,6 +184,12 @@ pub struct Bridge {
     /// Where the pointer is across a Performance graph, while it hovers one.
     scrub_at: Option<f32>,
     scrub_rows: Rc<VecModel<ScrubRow>>,
+    /// Collector time counts from here (the worker's epoch), so the scrolling view can be placed
+    /// against real time.
+    epoch: Instant,
+    /// The scrolling graphs' current run (crate::smooth): resting on its newest sample (speed 0)
+    /// while graphs don't scroll; None before the first graph frame.
+    scroll: Option<Scroll>,
     expanded: HashSet<i32>,
     /// Groups expanded automatically for their current hang (see `auto_expand_hung_groups`).
     auto_expanded: HashSet<i32>,
@@ -223,6 +231,8 @@ impl Bridge {
             history: None,
             scrub_at: None,
             scrub_rows: Rc::new(VecModel::default()),
+            epoch: Instant::now(),
+            scroll: None,
             expanded: HashSet::new(),
             auto_expanded: HashSet::new(),
             search: String::new(),
@@ -251,6 +261,7 @@ impl Bridge {
         ui.set_perf_segments(ModelRc::from(b.perf_segments.clone()));
         ui.set_scrub_rows(ModelRc::from(b.scrub_rows.clone()));
         ui.set_startup_rows(ModelRc::from(b.startup_rows.clone()));
+        smooth::install(ui);
         Rc::new(RefCell::new(b))
     }
 
@@ -270,6 +281,10 @@ impl Bridge {
         if page != Page::Performance {
             // Likewise the hidden graphs: end any scrub.
             self.scrub(ui, -1.0);
+        }
+        if matches!(page, Page::Startup | Page::Settings) {
+            // No graphs there, and no frames: the view rests on the newest sample (PF3).
+            self.rest(ui);
         }
         ui.set_page(page.index());
     }
@@ -317,9 +332,56 @@ impl Bridge {
         }).collect());
         ui.set_perf_note(p.note.as_str().into());
         ui.set_perf_range(p.range.index());
+        ui.set_perf_span_ms(p.span_ms as f32);
+        self.scroll_to(ui, p.window_end_ms);
         self.last_perf = Some(p);
         // The window moved under a still pointer: the card follows it to the new moment.
         self.show_scrub(ui);
+    }
+
+    /// The worker's collector epoch (`worker::spawn`).
+    pub fn set_epoch(&mut self, epoch: Instant) {
+        self.epoch = epoch;
+    }
+
+    fn collector_now_ms(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64() * 1_000.0
+    }
+
+    /// A frame's graphs landed with their newest sample at `newest_ms`. While graphs scroll, the
+    /// view carries on from where it is (crate::smooth::Scroll) and Slint moves it until the next
+    /// frame; while they don't, it rests on the newest sample.
+    fn scroll_to(&mut self, ui: &MainWindow, newest_ms: u64) {
+        let clock = ui.global::<GraphClock>();
+        let (now, newest) = (self.collector_now_ms(), newest_ms as f64);
+        if !clock.get_live() {
+            self.scroll = Some(Scroll { r0: newest, at: now, speed: 0.0, newest });
+            ui.invoke_scroll_from(0.0, 0.0);
+            return;
+        }
+        // Resting (GraphClock speed 0: rested here, or by GraphClock itself when scrolling stopped
+        // between frames), the view shows the run's newest sample on its edge: it carries on from
+        // there while the frame still draws that moment, and otherwise starts on the frame's
+        // newest sample. Never from a lag behind now: that would jump back (ruling PF3).
+        let prev = self.scroll.map(|p| {
+            if clock.get_speed() != 0.0 {
+                return p;
+            }
+            let floor = newest - smooth::SCROLL_MARGIN_MS as f64;
+            let edge = if (floor..=newest).contains(&p.newest) { p.newest } else { newest };
+            Scroll { r0: edge, at: now, speed: 0.0, newest: edge }
+        });
+        let lag = smooth::lag_ms(self.controls.interval().as_millis() as u64);
+        let run = Scroll::next(prev.as_ref(), now, newest, lag);
+        ui.invoke_scroll_from(run.lead_ms() as f32, run.speed as f32);
+        self.scroll = Some(run);
+    }
+
+    /// Graphs stop scrolling (a page without graphs): the view rests on the newest sample.
+    fn rest(&mut self, ui: &MainWindow) {
+        let now = self.collector_now_ms();
+        self.scroll = self.scroll.map(|p| Scroll { r0: p.newest, at: now, speed: 0.0, newest: p.newest });
+        ui.invoke_scroll_from(0.0, 0.0);
     }
 
     /// A startup list (or a toggle's re-read) landed: the Startup page shows it, and the next job
@@ -396,6 +458,7 @@ impl Bridge {
         }).collect());
         ui.set_top_caption(frame.caption.clone().into());
         ui.set_show_admin_banner(frame.admin_banner && !self.banner_dismissed);
+        self.scroll_to(ui, frame.graph_end_ms);
         self.last = frame;
         // While frozen, newly shown children would be deferred anyway: expand on unfreeze instead.
         if !self.layout.frozen() {

@@ -73,6 +73,10 @@ export component PerformancePage inherits HorizontalLayout {
     in property <[StatData]> stats;
     in property <[SegmentData]> segments;
     in property <int> range;
+    // The time the main graphs and cells cover (the frame's span), for their scrolling offset.
+    in property <float> span-ms: 60000;
+    // About how wide the main graphs are, for the graph timer's interval.
+    out property <length> graph-width: sv.content-w;
     in property <bool> interactive: true;
     // Room kept free below the detail (the floating toast), so its end can be scrolled clear.
     in property <length> bottom-inset;
@@ -147,6 +151,7 @@ export component PerformancePage inherits HorizontalLayout {
                     min-height: 180px;
                     vertical-stretch: 1;
                     data: g;
+                    span-ms: root.span-ms;
                     // Not under an open modal.
                     scrubbable: root.interactive;
                     scrub-x: root.scrub-x;
@@ -210,7 +215,7 @@ export component PerformancePage inherits HorizontalLayout {
                             Text { text: c.label; color: Theme.muted; font-size: 10px; overflow: elide; horizontal-stretch: 1; }
                             Text { text: c.value; color: Theme.muted; font-size: 10px; horizontal-alignment: right; horizontal-stretch: 0; min-width: self.preferred-width; }
                         }
-                        Graph { data: c; filled: false; vertical-stretch: 1; }
+                        Graph { data: c; filled: false; vertical-stretch: 1; span-ms: root.span-ms; }
                     }
                 }
             }

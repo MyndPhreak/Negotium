@@ -230,6 +230,52 @@ fn the_data_path_sits_in_a_clip_rectangle() {
 /// Meters (CPU, Memory, Disk, GPU, Network) drawn with these sparklines, rendered: per meter the
 /// rows (absolute y) tinted by the accent away from its edges, and how many pixels beside the first
 /// meter, in the gap to the second, are tinted.
+/// Every data path scrolls with GraphClock (crate::smooth): one that didn't would stand still
+/// while the others move.
+#[test]
+fn every_data_path_scrolls_with_the_graph_clock() {
+    for (file, body) in &data_paths() {
+        assert!(body.contains("viewbox-x:"), "{file}: a data Path without viewbox-x: {body}");
+    }
+}
+
+/// Where across the "CPU graph" its tinted line is, as a fraction of the graph's width.
+fn line_position(ui: &MainWindow) -> f32 {
+    let shot = ui.window().take_snapshot().expect("snapshot");
+    let graph = ElementHandle::find_by_accessible_label(ui, "CPU graph").next().expect("graph");
+    let (p, s) = (graph.absolute_position(), graph.size());
+    let y = (p.y + s.height * 3.0 / 8.0).round() as u32; // between two grid lines
+    let xs: Vec<f32> = (p.x.round() as u32 + 2..(p.x + s.width).round() as u32 - 2)
+        .filter(|&x| accent_tinted(shot.as_slice()[(y * shot.width() + x) as usize]))
+        .map(|x| x as f32)
+        .collect();
+    assert!(!xs.is_empty(), "the line is drawn");
+    (xs.iter().sum::<f32>() / xs.len() as f32 - p.x) / s.width
+}
+
+/// The scrolling offset moves what is drawn (ruling PF7): the same paths, a later view.
+#[test]
+fn a_graph_scrolls_with_the_graph_clock() {
+    software_backend();
+    let ui = MainWindow::new().unwrap();
+    ui.global::<Theme>().set_accent(slint::Color::from_rgb_u8(255, 0, 0));
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.set_page(1);
+    // A vertical line half a minute before the newest sample (x = 500 of 1000).
+    let g = GraphData {
+        label: "CPU".into(), value: "".into(), scale: "".into(), line: "M 500 0 L 500 100".into(),
+        area: "M 0 100".into(), line2: "M 0 100".into(),
+    };
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![g])));
+    ui.show().unwrap();
+    let at_rest = line_position(&ui);
+    assert!((at_rest - 0.5).abs() < 0.02, "the newest sample on the edge: {at_rest}");
+    // The view's right edge 15 s behind the newest sample: the line sits three quarters across.
+    ui.invoke_scroll_from(-15_000.0, 1.0);
+    let scrolled = line_position(&ui);
+    assert!((scrolled - 0.75).abs() < 0.02, "{scrolled}");
+}
+
 fn render_sparks(sparks: [&str; 5]) -> (Vec<Vec<u32>>, usize) {
     software_backend();
     let ui = MainWindow::new().unwrap();

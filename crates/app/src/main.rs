@@ -191,7 +191,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // Kept across worker restarts; the UI thread reads it for the history scrub.
     let history: worker::SharedHistory = Default::default();
     bridge.borrow_mut().set_history(history.clone());
-    let _worker = worker::spawn(controls.clone(), history, move |frame| {
+    // Collector time counts from here, for the worker and for the bridge's scrolling view.
+    let epoch = std::time::Instant::now();
+    bridge.borrow_mut().set_epoch(epoch);
+    let _worker = worker::spawn(controls.clone(), history, epoch, move |frame| {
         if !latest.put(frame) {
             return;
         }

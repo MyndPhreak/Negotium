@@ -192,12 +192,14 @@ impl<T> Latest<T> {
     }
 }
 
+/// Starts the supervised worker. Collector time counts from `epoch`, which the bridge shares to
+/// place the scrolling graphs against real time (crate::smooth).
 pub fn spawn(
     controls: Arc<Controls>,
     history: SharedHistory,
+    epoch: Instant,
     sink: impl FnMut(Frame) + Send + 'static,
 ) -> std::thread::JoinHandle<u32> {
-    let epoch = Instant::now();
     let ids = IdSeed::default();
     std::thread::Builder::new()
         .name("negotium-worker".into())

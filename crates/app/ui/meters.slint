@@ -41,6 +41,9 @@ export component MetersRow inherits HorizontalLayout {
     // soaked it up once the top strip filled, growing a second after the app opened.
     vertical-stretch: 0;
     spacing: 8px;
+    // About how wide each sparkline is (a meter less its 10 px padding each side), for the graph
+    // timer's interval.
+    out property <length> spark-width: (self.width - (root.meters.length - 1) * 8px) / max(1, root.meters.length) - 20px;
     for m[i] in meters : Meter {
         data: m;
         selected: i == root.selected;

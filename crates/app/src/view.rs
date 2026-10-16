@@ -51,6 +51,8 @@ pub struct Frame {
     /// The page this frame was built for; only that page's fields are filled.
     pub page: crate::controls::Page,
     pub perf: Option<crate::perf::PerfFrame>,
+    /// The newest history sample: where the Overview sparklines' right edge rests (crate::smooth).
+    pub graph_end_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -298,6 +300,7 @@ pub fn build_frame(
         admin_banner,
         page: crate::controls::Page::Overview,
         perf: None,
+        graph_end_ms: graph::end_of(history, snap.taken_at_ms),
     }
 }
 

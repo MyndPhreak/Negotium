@@ -4,7 +4,7 @@
 //! sample at x = 1000, and the view's right edge trails it. This module decides where that edge
 //! is. It runs about one sample interval behind real time, so the next sample is in hand before
 //! the edge gets there: the newest point eases in from the right and the line always reaches the
-//! edge. Pure; the bridge calls it on the UI thread.
+//! edge. Pure but for [`install`]; the bridge calls it on the UI thread.
 
 /// How far the view's right edge may trail a frame's newest sample. Frames draw this much history
 /// beyond their window's left edge (crate::graph::LEAD_MS), so the view never runs out of line.
@@ -77,6 +77,14 @@ impl Scroll {
         let speed = (1.0 + (target - r0) / horizon).clamp(MIN_SPEED, MAX_SPEED).min((newest - r0) / due);
         Scroll { r0, at: now, speed, newest }
     }
+}
+
+/// Answers `GraphClock.redraw-hz`, which sets how often the graph timer redraws, with
+/// [`redraw_hz`]. `Bridge::install` calls it.
+pub fn install(ui: &crate::MainWindow) {
+    use slint::ComponentHandle;
+    ui.global::<crate::GraphClock>()
+        .on_redraw_hz(|width_px, span_ms, speed| redraw_hz(width_px as f64, span_ms as f64, speed as f64) as f32);
 }
 
 #[cfg(test)]

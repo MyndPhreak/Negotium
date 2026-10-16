@@ -8,13 +8,13 @@ use std::fmt::Write;
 /// hidden-window 2 s interval, and the 5 s refreshes of sparse graphs), far below any real pause.
 pub const PAUSE_BREAK_MS: u64 = 10_000;
 
-/// History drawn left of a graph's window, off the edge (the Path clips it): reaching one pause
-/// back always takes in the sample before the window's start, so the line runs to the left edge
-/// instead of starting at the first sample inside it.
+/// History drawn left of a graph's window, off the edge (the Path clips it). The scrolling view can
+/// trail its newest sample by up to `crate::smooth::SCROLL_MARGIN_MS`, and one pause further back
+/// always takes in the sample before that, so the line reaches the left edge wherever the view is.
 ///
 /// The 1 h graph can still fall short of its left edge by at most one 12 s column: history keeps
 /// exactly 1 h (ruling PF9), so there is nothing older to draw there.
-pub const LEAD_MS: u64 = PAUSE_BREAK_MS;
+pub const LEAD_MS: u64 = crate::smooth::SCROLL_MARGIN_MS + PAUSE_BREAK_MS;
 
 /// The graphs' right edge: the newest history sample, `fallback` (the tick) while there is none. At
 /// refresh rates under a second the history keeps one sample a second (ruling P3-3), so a tick can

@@ -296,6 +296,9 @@ fn shown_ids(ui: &MainWindow) -> Vec<i32> {
 fn bridged() -> (MainWindow, Arc<Controls>, Rc<RefCell<Bridge>>) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = MainWindow::new().unwrap();
+    // Frames in these tests carry made-up collector times: the graphs stand still (newest sample
+    // on the edge) unless a test turns smoothing on with an epoch that matches its frames.
+    ui.global::<negotium::GraphClock>().set_smooth(false);
     let controls = Arc::new(Controls::default());
     let bridge = Bridge::install(&ui, controls.clone());
     (ui, controls, bridge)
@@ -2536,4 +2539,168 @@ fn the_toast_shows_on_every_page() {
         press(&ui, x, y, slint::platform::PointerEventButton::Left);
         assert_eq!(*dismissed.borrow(), page + 1, "page {page}: the toast takes the click");
     }
+}
+
+// ---- Plan 3c Task 3: smooth graphs ----
+
+use negotium::GraphClock;
+
+#[test]
+fn the_graph_clock_runs_from_its_lead_to_the_newest_sample_and_stops_there() {
+    let ui = shown_window();
+    negotium::smooth::install(&ui); // the timer's rate (Bridge::install does this in the app)
+    let clock = ui.global::<GraphClock>();
+    assert!(clock.get_live(), "smooth graphs are on by default");
+    ui.invoke_scroll_from(-1_000.0, 1.0);
+    assert_eq!(clock.get_offset_ms(), -1_000.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // the timer starts
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(400));
+    let o = clock.get_offset_ms();
+    assert!((o + 600.0).abs() < 1.0, "400 ms later the edge is 600 ms behind: {o}");
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(2_000));
+    assert_eq!(clock.get_offset_ms(), 0.0, "it stops on the newest sample");
+    let now = clock.get_now();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1_000));
+    assert_eq!(clock.get_now(), now, "and the timer stops with it");
+}
+
+#[test]
+fn the_graph_clock_stands_still_with_smooth_graphs_off_hidden_or_on_pages_without_graphs() {
+    let ui = shown_window();
+    let clock = ui.global::<GraphClock>();
+    ui.invoke_scroll_from(-1_000.0, 1.0);
+    clock.set_smooth(false);
+    assert!(!clock.get_live());
+    assert_eq!(clock.get_offset_ms(), 0.0, "off: the newest sample sits on the edge");
+    clock.set_smooth(true);
+    clock.set_shown(false);
+    assert_eq!(clock.get_offset_ms(), 0.0, "hidden or minimised: no motion");
+    clock.set_shown(true);
+    ui.set_page(2);
+    ui.invoke_scroll_from(-1_000.0, 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1_000));
+    assert_eq!(clock.get_offset_ms(), -1_000.0, "the Startup page has no graphs: the timer doesn't run");
+}
+
+/// PF3: a run cut short (smoothing off, the window hidden or minimised) rests on the newest sample,
+/// and stays there if the graphs may scroll again before the next frame lands: no jump back.
+#[test]
+fn a_run_cut_short_rests_on_the_newest_sample_when_scrolling_resumes() {
+    let ui = shown_window();
+    let clock = ui.global::<GraphClock>();
+    ui.invoke_scroll_from(-1_000.0, 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    assert!(clock.get_offset_ms() < 0.0);
+    clock.set_shown(false);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // change handlers run
+    clock.set_shown(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    assert_eq!(clock.get_offset_ms(), 0.0, "restored: still on the newest sample");
+    assert_eq!(clock.get_speed(), 0.0);
+}
+
+#[test]
+fn graphs_are_redrawn_as_often_as_half_a_pixel_of_scrolling_needs_up_to_60_a_second() {
+    let ui = shown_window(); // 1000 × 720
+    negotium::smooth::install(&ui);
+    let overview = ui.get_scroll_interval();
+    assert!((100..=400).contains(&overview), "1 min sparklines, ~150 px wide: {overview} ms");
+    ui.set_page(1);
+    ui.set_perf_span_ms(60_000.0);
+    let minute = ui.get_scroll_interval();
+    assert!((25..=80).contains(&minute), "the 1 min main graph, ~650 px wide: {minute} ms");
+    ui.set_perf_span_ms(3_600_000.0);
+    assert_eq!(ui.get_scroll_interval(), 1_000, "the 1 h graph moves under a pixel a second");
+    ui.set_perf_span_ms(60_000.0);
+    ui.window().set_size(PhysicalSize::new(5_120, 1_440));
+    assert_eq!(ui.get_scroll_interval(), 16, "never more than about 60 frames a second");
+}
+
+/// An epoch `ms` ago, and when it was taken, so assertions can allow for the time the test itself
+/// takes (collector time moves on meanwhile; ruling PF5).
+fn epoch_ago(ms: u64) -> (std::time::Instant, std::time::Instant) {
+    let start = std::time::Instant::now();
+    (start - std::time::Duration::from_millis(ms), start)
+}
+
+/// `value` is `expected` plus at most the time measured since `start`.
+fn within_elapsed(value: f32, expected: f32, start: std::time::Instant) -> bool {
+    let elapsed = start.elapsed().as_secs_f32() * 1_000.0;
+    value >= expected - 0.5 && value <= expected + elapsed + 0.5
+}
+
+#[test]
+fn landing_frames_continue_the_scrolling_view_from_where_it_is() {
+    let (ui, controls, bridge) = bridged();
+    let clock = ui.global::<GraphClock>();
+    clock.set_smooth(true);
+    controls.set_page(Page::Performance);
+    // Collector time is now about 61 s.
+    let (epoch, start) = epoch_ago(61_000);
+    bridge.borrow_mut().set_epoch(epoch);
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM));
+    let first = clock.get_lead_ms();
+    assert!(within_elapsed(first, -250.0, start), "the first run starts 1.25 s behind now: {first}");
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
+    let lead = clock.get_lead_ms();
+    assert!(within_elapsed(lead, -1_250.0, start), "the next carries on from there, 1.25 s behind its newest sample: {lead}");
+    assert!((0.5..=2.0).contains(&clock.get_speed()));
+    assert_eq!(ui.get_perf_span_ms(), 60_000.0);
+}
+
+#[test]
+fn overview_frames_scroll_the_sparklines_too() {
+    let (ui, _controls, bridge) = bridged();
+    let clock = ui.global::<GraphClock>();
+    clock.set_smooth(true);
+    let (epoch, start) = epoch_ago(61_000);
+    bridge.borrow_mut().set_epoch(epoch);
+    bridge.borrow_mut().apply(&ui, Frame { graph_end_ms: 60_000, ..frame(vec![]) });
+    assert!(within_elapsed(clock.get_lead_ms(), -250.0, start), "{}", clock.get_lead_ms());
+}
+
+/// PF3: frames that land while graphs don't scroll rest the view on their newest sample; when
+/// scrolling resumes the view carries on from there instead of jumping back a lag (1.25 s).
+#[test]
+fn frames_while_graphs_stand_still_rest_on_the_newest_sample_and_resume_without_a_jump() {
+    let (ui, controls, bridge) = bridged();
+    let clock = ui.global::<GraphClock>();
+    controls.set_page(Page::Performance);
+    let (epoch, _) = epoch_ago(61_000);
+    bridge.borrow_mut().set_epoch(epoch);
+    // Smoothing off (bridged()): the frame rests on its newest sample.
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM));
+    assert_eq!((clock.get_lead_ms(), clock.get_speed()), (0.0, 0.0));
+    clock.set_smooth(true);
+    assert_eq!(clock.get_offset_ms(), 0.0, "turning it on moves nothing");
+    // The next frame: the view starts where it rests (the last newest sample), 1 s behind the new one.
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
+    assert_eq!(clock.get_lead_ms(), -1_000.0, "from the sample on the edge, not a lag behind now");
+    assert!(clock.get_speed() > 0.0);
+    // After a long rest (that sample long gone from the paths) it starts on the newest sample.
+    clock.set_smooth(false);
+    bridge.borrow_mut().apply(&ui, scrub_frame(62_000, TWO_PM));
+    clock.set_smooth(true);
+    bridge.borrow_mut().apply(&ui, scrub_frame(3_662_000, TWO_PM));
+    assert_eq!(clock.get_lead_ms(), 0.0, "an hour later: the newest sample on the edge, no jump back");
+}
+
+/// PF3: pages without graphs (Startup, Settings) rest the view on the newest sample.
+#[test]
+fn leaving_for_a_page_without_graphs_rests_the_view() {
+    let (ui, controls, bridge) = bridged();
+    let clock = ui.global::<GraphClock>();
+    clock.set_smooth(true);
+    controls.set_page(Page::Performance);
+    let (epoch, _) = epoch_ago(61_000);
+    bridge.borrow_mut().set_epoch(epoch);
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM));
+    assert!(clock.get_lead_ms() < 0.0);
+    bridge.borrow_mut().set_page(&ui, Page::Startup);
+    assert_eq!((clock.get_lead_ms(), clock.get_speed(), clock.get_offset_ms()), (0.0, 0.0, 0.0));
+    bridge.borrow_mut().set_page(&ui, Page::Performance);
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
+    assert_eq!(clock.get_lead_ms(), -1_000.0, "back: from the sample on the edge");
 }
