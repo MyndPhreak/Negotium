@@ -80,8 +80,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let relaunched = std::env::args_os().any(|a| a == renderer::FALLBACK_ARG);
     // Read once, before the window shows (allowed on the UI thread).
     let (settings, loaded) = settings::load(&settings::default_path());
-    if let settings::Loaded::Recovered(why) = &loaded {
-        warn(&format!("settings.json was unusable and was set aside as settings.json.bad: {why}"));
+    match &loaded {
+        settings::Loaded::Recovered(why) => {
+            warn(&format!("settings.json was unusable and was set aside as settings.json.bad: {why}"));
+        }
+        settings::Loaded::Partial(fields) => warn(&format!(
+            "settings.json had invalid fields ({}); they use their defaults and the original is in settings.json.bad",
+            fields.join(", ")
+        )),
+        settings::Loaded::Unreadable(why) => warn(&format!("settings.json could not be read, using defaults: {why}")),
+        settings::Loaded::Defaults | settings::Loaded::File => {}
     }
     let decision = renderer::decide(
         std::env::var_os("SLINT_BACKEND").is_some(),

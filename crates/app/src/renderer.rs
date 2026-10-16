@@ -331,15 +331,31 @@ mod tests {
         }
     }
 
-    fn temp_marker(name: &str) -> PathBuf {
+    /// A fresh temp directory holding a marker path, removed when dropped.
+    struct TempMarker(PathBuf);
+
+    impl TempMarker {
+        fn path(&self) -> PathBuf {
+            self.0.join("Negotium").join("renderer-fallback")
+        }
+    }
+
+    impl Drop for TempMarker {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_marker(name: &str) -> TempMarker {
         let d = std::env::temp_dir().join(format!("negotium-renderer-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        d.join("Negotium").join("renderer-fallback")
+        TempMarker(d)
     }
 
     #[test]
     fn the_marker_is_written_read_and_cleared() {
-        let path = temp_marker("roundtrip");
+        let dir = temp_marker("roundtrip");
+        let path = dir.path();
         assert!(!fallback_recorded_at(&path));
         record_fallback_at(&path).unwrap();
         assert!(fallback_recorded_at(&path), "recorded, creating the directory");
@@ -352,14 +368,14 @@ mod tests {
 
     #[test]
     fn the_gpu_switch_clears_the_marker_only_when_turned_on() {
-        let path = temp_marker("switch");
+        let dir = temp_marker("switch");
+        let path = dir.path();
         record_fallback_at(&path).unwrap();
         set_gpu_rendering_at(&path, false).unwrap();
         assert!(fallback_recorded_at(&path), "turning it off leaves the record alone");
         set_gpu_rendering_at(&path, true).unwrap();
         assert!(!fallback_recorded_at(&path), "turning it on forgets the automatic fallback");
         set_gpu_rendering_at(&path, true).unwrap(); // nothing to clear is fine
-        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 
     #[test]

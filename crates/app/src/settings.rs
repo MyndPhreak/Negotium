@@ -98,35 +98,77 @@ pub enum Loaded {
     File,
     /// The file was unusable (the reason) and was renamed to settings.json.bad.
     Recovered(String),
+    /// Some fields were invalid (their names) and took their defaults; the valid ones were kept.
+    /// The original text was copied to settings.json.bad, so it survives the next save.
+    Partial(Vec<String>),
+    /// The file could not be read or set aside (the reason): defaults are used and the file is
+    /// left untouched.
+    Unreadable(String),
 }
 
 pub fn load(path: &Path) -> (Settings, Loaded) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), Loaded::Defaults),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            return (Settings::default(), set_aside(path, &e.to_string()));
+        }
+        // A sharing violation or missing permission says nothing about the file's content.
+        Err(e) => return (Settings::default(), Loaded::Unreadable(e.to_string())),
+    };
+    let fields = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(serde_json::Value::Object(fields)) => fields,
+        Ok(_) => return (Settings::default(), set_aside(path, "the file is not a JSON object")),
         Err(e) => return (Settings::default(), set_aside(path, &e.to_string())),
     };
-    match serde_json::from_str::<Settings>(&text) {
-        Ok(s) => (s.normalized(), Loaded::File),
-        Err(e) => (Settings::default(), set_aside(path, &e.to_string())),
+    let mut bad: Vec<String> = Vec::new();
+    let mut s = Settings::default();
+    // Each known field on its own: an invalid one takes its default and the rest are kept.
+    macro_rules! field {
+        ($name:ident) => {
+            if let Some(v) = fields.get(stringify!($name)) {
+                match serde_json::from_value(v.clone()) {
+                    Ok(x) => s.$name = x,
+                    Err(_) => bad.push(stringify!($name).to_string()),
+                }
+            }
+        };
+    }
+    field!(refresh_ms);
+    field!(theme);
+    field!(always_on_top);
+    field!(keep_in_tray);
+    field!(gpu_rendering);
+    let s = s.normalized();
+    if bad.is_empty() {
+        (s, Loaded::File)
+    } else {
+        let _ = std::fs::copy(path, path.with_extension("json.bad"));
+        (s, Loaded::Partial(bad))
     }
 }
 
+/// Moves an unusable file to settings.json.bad (replacing an older one). If that fails, the
+/// result says so instead of claiming the file was set aside.
 fn set_aside(path: &Path, reason: &str) -> Loaded {
-    let bad = path.with_extension("json.bad");
-    // The newest broken file replaces an older .bad (a rename onto an existing file can fail).
-    let _ = std::fs::remove_file(&bad);
-    let _ = std::fs::rename(path, bad);
-    Loaded::Recovered(reason.to_string())
+    match std::fs::rename(path, path.with_extension("json.bad")) {
+        Ok(()) => Loaded::Recovered(reason.to_string()),
+        Err(e) => Loaded::Unreadable(format!("{reason}; it could not be set aside: {e}")),
+    }
 }
 
-/// Writes atomically: a temporary file next to the target, then a rename over it.
+/// Writes atomically: a temporary file next to the target, flushed, then a rename over it. The
+/// fixed `.tmp` name relies on Negotium being a single-instance app.
 pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(s).map_err(std::io::Error::other)?)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&serde_json::to_vec_pretty(s).map_err(std::io::Error::other)?)?;
+    f.sync_all()?;
+    drop(f);
     std::fs::rename(&tmp, path)
 }
 
@@ -255,14 +297,50 @@ mod tests {
     }
 
     #[test]
-    fn a_field_of_the_wrong_type_is_a_corrupt_file() {
+    fn a_bad_field_loses_only_itself() {
         let dir = TempDir::new("wrongtype");
         let p = dir.file();
-        std::fs::write(&p, r#"{"refresh_ms": "fast"}"#).unwrap();
-        assert!(matches!(load(&p).1, Loaded::Recovered(_)));
-        assert!(p.with_extension("json.bad").exists());
-        std::fs::write(&p, r#"{"gpu_rendering": "yes"}"#).unwrap();
-        assert!(matches!(load(&p).1, Loaded::Recovered(_)));
+        let text = r#"{"refresh_ms": "fast", "theme": "dark", "always_on_top": true, "gpu_rendering": false}"#;
+        std::fs::write(&p, text).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::Partial(vec!["refresh_ms".to_string()]));
+        assert_eq!(
+            s,
+            Settings { theme: ThemeChoice::Dark, always_on_top: true, gpu_rendering: false, ..Settings::default() }
+        );
+        assert_eq!(std::fs::read_to_string(p.with_extension("json.bad")).unwrap(), text, "the original survives");
+        assert!(p.exists(), "the file itself is not removed");
+    }
+
+    #[test]
+    fn a_theme_from_a_newer_version_keeps_the_other_settings() {
+        let dir = TempDir::new("sepia");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"theme": "sepia", "refresh_ms": 2000, "keep_in_tray": false}"#).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::Partial(vec!["theme".to_string()]));
+        assert_eq!(s, Settings { refresh_ms: 2000, keep_in_tray: false, ..Settings::default() });
+    }
+
+    #[test]
+    fn gpu_rendering_off_survives_a_bad_sibling() {
+        let dir = TempDir::new("gpusibling");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"gpu_rendering": false, "theme": 7, "always_on_top": "yes"}"#).unwrap();
+        let (s, how) = load(&p);
+        assert!(!s.gpu_rendering);
+        assert_eq!(how, Loaded::Partial(vec!["theme".to_string(), "always_on_top".to_string()]));
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_left_alone() {
+        let dir = TempDir::new("unreadable");
+        let p = dir.file();
+        std::fs::create_dir(&p).unwrap(); // reading a directory is an I/O error, not bad content
+        let (s, how) = load(&p);
+        assert_eq!(s, Settings::default());
+        assert!(matches!(how, Loaded::Unreadable(_)), "{how:?}");
+        assert!(p.is_dir() && !p.with_extension("json.bad").exists());
     }
 
     #[test]
