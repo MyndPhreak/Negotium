@@ -191,6 +191,9 @@ pub struct Bridge {
     /// Collector time counts from here (the worker's epoch), so the scrolling view can be placed
     /// against real time.
     epoch: Instant,
+    /// Collector time fixed here instead of read from `epoch` (tests: edges that don't depend on
+    /// wall time).
+    fixed_now_ms: Option<f64>,
     /// The scrolling graphs' current run (crate::smooth): resting on its newest sample (speed 0)
     /// while graphs don't scroll; None before the first graph frame.
     scroll: Option<Scroll>,
@@ -238,6 +241,7 @@ impl Bridge {
             scrub_builds: 0,
             scrub_rows: Rc::new(VecModel::default()),
             epoch: Instant::now(),
+            fixed_now_ms: None,
             scroll: None,
             expanded: HashSet::new(),
             auto_expanded: HashSet::new(),
@@ -350,8 +354,14 @@ impl Bridge {
         self.epoch = epoch;
     }
 
+    /// Fixes collector time at `now_ms` instead of reading the clock, so a test places the
+    /// scrolling view without waiting; None reads the clock again.
+    pub fn set_collector_now(&mut self, now_ms: Option<f64>) {
+        self.fixed_now_ms = now_ms;
+    }
+
     fn collector_now_ms(&self) -> f64 {
-        self.epoch.elapsed().as_secs_f64() * 1_000.0
+        self.fixed_now_ms.unwrap_or_else(|| self.epoch.elapsed().as_secs_f64() * 1_000.0)
     }
 
     /// A frame's graphs landed with their newest sample at `newest_ms`. While graphs scroll, the

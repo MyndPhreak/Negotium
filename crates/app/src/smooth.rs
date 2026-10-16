@@ -4,7 +4,9 @@
 //! sample at x = 1000, and the view's right edge trails it. This module decides where that edge
 //! is. It runs about one sample interval behind real time, so the next sample is in hand before
 //! the edge gets there: the newest point eases in from the right and the line always reaches the
-//! edge. Pure but for [`install`]; the bridge calls it on the UI thread.
+//! edge. Graphs scroll only while the window is on screen: hidden to the tray or minimised, the
+//! graph timer stops ([`OnScreen`]). Pure but for [`install`] and [`set_shown`] (and [`OnScreen`],
+//! which calls it); the bridge calls `install` and main.rs `set_shown`, on the UI thread.
 
 /// How far the view's right edge may trail a frame's newest sample. Frames draw this much history
 /// beyond their window's left edge (crate::graph::LEAD_MS), so the view never runs out of line.
@@ -85,6 +87,51 @@ pub fn install(ui: &crate::MainWindow) {
     use slint::ComponentHandle;
     ui.global::<crate::GraphClock>()
         .on_redraw_hz(|width_px, span_ms, speed| redraw_hz(width_px as f64, span_ms as f64, speed as f64) as f32);
+}
+
+/// Graphs scroll only while the window is on screen: hidden to the tray or minimised, nothing
+/// extra is drawn (`GraphClock.shown`). A run cut short rests on the newest sample (PF3).
+pub fn set_shown(ui: &crate::MainWindow, visible: bool, minimised: bool) {
+    use slint::ComponentHandle;
+    ui.global::<crate::GraphClock>().set_shown(visible && !minimised);
+}
+
+/// Where the main window is, as main.rs hears of it, for [`set_shown`]: hidden to the tray (the
+/// close handler) or shown again (tray Open, a second launch), and minimised or not (WM_SIZE, and
+/// `platform::is_minimised` once the window hooks go in, for a launch that starts minimised).
+/// UI thread only.
+#[derive(Debug, Default)]
+pub struct OnScreen {
+    hidden: std::cell::Cell<bool>,
+    minimised: std::cell::Cell<bool>,
+}
+
+impl OnScreen {
+    /// Closed to the tray.
+    pub fn hide(&self, ui: &crate::MainWindow) {
+        self.hidden.set(true);
+        self.apply(ui);
+    }
+
+    /// Shown from the tray or by a second launch: un-hidden and restored
+    /// (`platform::bring_to_front`).
+    pub fn show(&self, ui: &crate::MainWindow) {
+        self.hidden.set(false);
+        self.minimised.set(false);
+        self.apply(ui);
+    }
+
+    /// Records whether the window is minimised; true if that changed. WM_SIZE comes many times a
+    /// second during a resize, and only a change needs [`OnScreen::apply`]. Touches no window, so
+    /// the window procedure may call it.
+    pub fn minimise(&self, minimised: bool) -> bool {
+        self.minimised.replace(minimised) != minimised
+    }
+
+    /// Sets `GraphClock.shown` from what is recorded.
+    pub fn apply(&self, ui: &crate::MainWindow) {
+        set_shown(ui, !self.hidden.get(), self.minimised.get());
+    }
 }
 
 #[cfg(test)]

@@ -1786,13 +1786,14 @@ fn a_frame_never_lands_on_the_settings_page() {
 #[test]
 fn apply_settings_sets_every_wired_property() {
     let ui = window();
-    let s = Settings { refresh_ms: 5000, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: false };
+    let s = Settings { refresh_ms: 5000, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: false, smooth_graphs: false };
     negotium::settingspage::apply_settings(&ui, &s);
     assert!(ui.get_on_top());
     assert_eq!(ui.get_settings_refresh(), 3);
     assert_eq!(ui.get_settings_theme(), 2);
     assert!(!ui.get_settings_keep_in_tray());
     assert!(!ui.get_settings_gpu_rendering());
+    assert!(!ui.get_settings_smooth_graphs() && !ui.global::<negotium::GraphClock>().get_smooth(), "shown and applied");
     assert!(ui.global::<negotium::Theme>().get_dark(), "the theme is applied, not just shown");
     let s = Settings { theme: ThemeChoice::Light, ..Settings::default() };
     negotium::settingspage::apply_settings(&ui, &s);
@@ -1801,6 +1802,7 @@ fn apply_settings_sets_every_wired_property() {
     assert_eq!(ui.get_settings_theme(), 1);
     assert!(ui.get_settings_keep_in_tray());
     assert!(ui.get_settings_gpu_rendering());
+    assert!(ui.get_settings_smooth_graphs() && ui.global::<negotium::GraphClock>().get_smooth());
     assert!(!ui.global::<negotium::Theme>().get_dark());
 }
 
@@ -1896,7 +1898,7 @@ fn a_choice_applies_at_once_shows_and_is_saved() {
     assert!(!settings.borrow().keep_in_tray, "the close handler reads the shared settings");
     assert_eq!(switch(&ui, "Keep running in the tray when closed").accessible_checked(), Some(false));
     saved(&path, "every choice", |s| {
-        *s == Settings { refresh_ms: 500, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: true }
+        *s == Settings { refresh_ms: 500, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, ..Settings::default() }
     });
 }
 
@@ -1948,7 +1950,7 @@ fn settings_rects(ui: &MainWindow) -> Vec<(String, Rect)> {
     for l in ["0.5 s", "5 s", "System", "Dark"] {
         out.push((l.to_string(), rect_of(&radio(ui, l))));
     }
-    for l in ["Always on top", "Keep running in the tray when closed", "Use GPU rendering", "Admin mode", "CPU temperature add-on"] {
+    for l in ["Smooth graphs", "Always on top", "Keep running in the tray when closed", "Use GPU rendering", "Admin mode", "CPU temperature add-on"] {
         out.push((l.to_string(), rect_of(&switch(ui, l))));
     }
     out
@@ -2012,6 +2014,7 @@ fn row_of(ui: &MainWindow, entry: &str) -> Rect {
         e if e.starts_with("theme") => "theme-row",
         "Always on top" => "top-row",
         "Keep running in the tray when closed" => "tray-row",
+        "Smooth graphs" => "smooth-row",
         _ => "gpu-row",
     };
     let rows = ui.root_element().query_descendants().match_id(format!("SettingsPage::{id}")).find_all();
@@ -2038,6 +2041,8 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
     ui.on_tray_toggled(move |_| l.borrow_mut().push("Keep running in the tray when closed".into()));
     let l = log.clone();
     ui.on_gpu_rendering_toggled(move |_| l.borrow_mut().push("Use GPU rendering".into()));
+    let l = log.clone();
+    ui.on_smooth_graphs_toggled(move |_| l.borrow_mut().push("Smooth graphs".into()));
     let l = log.clone();
     ui.on_select_page(move |i| l.borrow_mut().push(format!("page {i}")));
     let in_view = |e: &El| {
@@ -2075,6 +2080,7 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
     }
     assert_eq!(seen.last().map(String::as_str), Some("Use GPU rendering"), "Tab reaches the last enabled control: {seen:?}");
     assert!(seen.contains(&"Keep running in the tray when closed".to_string()), "{seen:?}");
+    assert!(seen.contains(&"Smooth graphs".to_string()), "{seen:?}");
     // And back up: the first choice comes back into view.
     let mut back = None;
     for _ in 0..30 {
@@ -2104,7 +2110,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 8, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 9, "the titles are still drawn");
 }
 
 #[test]
@@ -2715,7 +2721,7 @@ fn a_scrub_maps_the_pointer_from_where_the_scrolling_graph_is_drawn() {
     ui.global::<GraphClock>().set_smooth(true);
     controls.set_page(Page::Performance);
     bridge.borrow_mut().set_history(scrub_history());
-    bridge.borrow_mut().set_epoch(std::time::Instant::now() - std::time::Duration::from_millis(61_000));
+    bridge.borrow_mut().set_collector_now(Some(61_000.0)); // pinned: the edge doesn't depend on wall time
     bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM - 1_000));
     bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
     // The view trails its newest sample (61 s) by 1.25 s: the right edge shows the sample at 60 s.
@@ -2753,7 +2759,7 @@ fn a_still_pointer_rebuilds_the_card_only_when_what_it_shows_changes() {
     ui.global::<GraphClock>().set_smooth(true);
     controls.set_page(Page::Performance);
     bridge.borrow_mut().set_history(scrub_history());
-    bridge.borrow_mut().set_epoch(std::time::Instant::now() - std::time::Duration::from_millis(61_000));
+    bridge.borrow_mut().set_collector_now(Some(61_000.0)); // pinned: the edge doesn't depend on wall time
     bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM - 1_000));
     bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
     bridge.borrow_mut().scrub(&ui, 0.5);
@@ -2764,4 +2770,139 @@ fn a_still_pointer_rebuilds_the_card_only_when_what_it_shows_changes() {
     assert_eq!(bridge.borrow().scrub_builds(), built, "same sample under the pointer: no rebuild");
     bridge.borrow_mut().scrub(&ui, 0.6);
     assert!(bridge.borrow().scrub_builds() > built, "another moment: the card is rebuilt");
+}
+
+#[test]
+fn the_card_follows_an_edge_that_advances_under_a_still_pointer() {
+    use slint::Model;
+    let (ui, controls, bridge) = bridged();
+    ui.global::<GraphClock>().set_smooth(true);
+    controls.set_page(Page::Performance);
+    bridge.borrow_mut().set_history(scrub_history());
+    bridge.borrow_mut().set_collector_now(Some(61_000.0));
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM - 1_000));
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM));
+    bridge.borrow_mut().scrub(&ui, 1.0);
+    assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:59", "the edge trails the newest sample");
+    let built = bridge.borrow().scrub_builds();
+    // A second later, no new frame: the view has scrolled on and the timer asks the card to follow.
+    bridge.borrow_mut().set_collector_now(Some(62_000.0));
+    bridge.borrow_mut().follow_scrub(&ui);
+    assert_eq!(ui.get_scrub_title(), "Top apps at 14:00:00", "the moment now under the pointer");
+    assert_eq!(ui.get_scrub_rows().row_data(0).unwrap().value, "61.0%");
+    assert_eq!(bridge.borrow().scrub_builds(), built + 1);
+}
+
+// ---- Plan 3c Task 5: the Smooth graphs switch, hidden and minimised ----
+
+#[test]
+fn the_smooth_graphs_switch_applies_at_once_and_is_saved() {
+    let dir = Scratch::new("smooth");
+    let path = dir.0.join("settings.json");
+    let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    let clock = ui.global::<GraphClock>();
+    assert_eq!(switch(&ui, "Smooth graphs").accessible_checked(), Some(true));
+    switch(&ui, "Smooth graphs").invoke_accessible_default_action();
+    assert!(!clock.get_smooth() && !clock.get_live(), "graphs stop scrolling at once");
+    assert_eq!(switch(&ui, "Smooth graphs").accessible_checked(), Some(false));
+    saved(&path, "smooth graphs off", |s| !s.smooth_graphs);
+}
+
+/// PF3: switching smoothing off mid-run puts the newest sample on the edge at once and keeps it
+/// there when it comes back on before the next frame: no jump back.
+#[test]
+fn switching_smooth_graphs_off_rests_on_the_newest_sample_without_a_jump() {
+    let dir = Scratch::new("smooth-rest");
+    let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    negotium::smooth::install(&ui);
+    let clock = ui.global::<GraphClock>();
+    ui.set_page(1); // the graph timer runs only on pages with graphs
+    ui.invoke_scroll_from(-1_000.0, 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    assert!(clock.get_offset_ms() < 0.0 && clock.get_offset_ms() > -1_000.0, "a run under way: {}", clock.get_offset_ms());
+    ui.set_page(3);
+    switch(&ui, "Smooth graphs").invoke_accessible_default_action();
+    assert_eq!(clock.get_offset_ms(), 0.0, "off: the newest sample on the edge at once");
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // change handlers run
+    switch(&ui, "Smooth graphs").invoke_accessible_default_action();
+    assert!(clock.get_live());
+    ui.set_page(1);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    assert_eq!((clock.get_offset_ms(), clock.get_speed()), (0.0, 0.0), "on again: still on the newest sample");
+}
+
+#[test]
+fn graphs_scroll_only_while_the_window_is_on_screen() {
+    let ui = window();
+    let clock = ui.global::<GraphClock>();
+    negotium::smooth::set_shown(&ui, false, false);
+    assert!(!clock.get_live(), "hidden to the tray");
+    negotium::smooth::set_shown(&ui, true, true);
+    assert!(!clock.get_live(), "minimised");
+    negotium::smooth::set_shown(&ui, true, false);
+    assert!(clock.get_live());
+}
+
+/// Every way main.rs hears of the window leaving or coming back (negotium::smooth::OnScreen):
+/// graphs scroll only while it is shown and not minimised, whatever the order.
+#[test]
+fn every_way_the_window_leaves_and_comes_back_sets_whether_graphs_scroll() {
+    use negotium::smooth::OnScreen;
+    let ui = window();
+    let clock = ui.global::<GraphClock>();
+    let on_screen = OnScreen::default();
+    // Started minimised (a shortcut set to "Minimized"): read once the hooks go in.
+    assert!(on_screen.minimise(true), "a change");
+    on_screen.apply(&ui);
+    assert!(!clock.get_live(), "started minimised");
+    // Restored from the taskbar (WM_SIZE), then the WM_SIZEs of a resize: only a change counts.
+    assert!(on_screen.minimise(false));
+    assert!(!on_screen.minimise(false), "a resize repeats WM_SIZE: no change");
+    on_screen.apply(&ui);
+    assert!(clock.get_live(), "restored");
+    // Minimised, then closed to the tray from the taskbar while minimised.
+    assert!(on_screen.minimise(true));
+    on_screen.apply(&ui);
+    assert!(!clock.get_live(), "minimised");
+    on_screen.hide(&ui);
+    assert!(!clock.get_live(), "hidden to the tray");
+    // A WM_SIZE while hidden does not bring motion back.
+    on_screen.minimise(false);
+    on_screen.apply(&ui);
+    assert!(!clock.get_live(), "still hidden");
+    // Tray Open: shown and restored (platform::bring_to_front).
+    on_screen.show(&ui);
+    assert!(clock.get_live(), "tray Open");
+    // Minimised again, then a second launch activates it (show_main): shown and restored.
+    on_screen.minimise(true);
+    on_screen.apply(&ui);
+    assert!(!clock.get_live());
+    on_screen.show(&ui);
+    assert!(clock.get_live(), "second-instance activation");
+    assert!(!on_screen.minimise(false), "the WM_SIZE that follows the restore changes nothing");
+    // Closed to the tray, then a second launch while hidden.
+    on_screen.hide(&ui);
+    assert!(!clock.get_live());
+    on_screen.show(&ui);
+    assert!(clock.get_live());
+}
+
+/// Hidden or minimised, the graph timer stops: nothing is redrawn for motion.
+#[test]
+fn the_graph_timer_stands_still_while_the_window_is_hidden_or_minimised() {
+    let ui = shown_window();
+    negotium::smooth::install(&ui);
+    let clock = ui.global::<GraphClock>();
+    for (visible, minimised) in [(false, false), (true, true)] {
+        negotium::smooth::set_shown(&ui, true, false);
+        ui.invoke_scroll_from(-5_000.0, 1.0);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+        negotium::smooth::set_shown(&ui, visible, minimised);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+        let now = clock.get_now();
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1_000));
+        assert_eq!(clock.get_now(), now, "visible {visible}, minimised {minimised}: the timer doesn't run");
+        assert_eq!(clock.get_offset_ms(), 0.0);
+    }
 }

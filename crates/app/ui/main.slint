@@ -138,6 +138,7 @@ export component MainWindow inherits Window {
     in-out property <bool> on-top;
     always-on-top: root.on-top;
     in-out property <bool> settings-keep-in-tray: true;
+    in-out property <bool> settings-smooth-graphs: true;
     in-out property <bool> settings-gpu-rendering: true;
     in-out property <bool> settings-gpu-fallback;
     in property <bool> settings-gpu-running: true;
@@ -146,6 +147,7 @@ export component MainWindow inherits Window {
     callback theme-chosen(int);
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
+    callback smooth-graphs-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
     // function, not a `changed` handler, so Theme.dark is current as soon as it returns.
@@ -328,6 +330,7 @@ export component MainWindow inherits Window {
                     theme: root.settings-theme;
                     always-on-top: root.on-top;
                     keep-in-tray: root.settings-keep-in-tray;
+                    smooth-graphs: root.settings-smooth-graphs;
                     gpu-rendering: root.settings-gpu-rendering;
                     gpu-fallback: root.settings-gpu-fallback;
                     gpu-running: root.settings-gpu-running;
@@ -338,6 +341,7 @@ export component MainWindow inherits Window {
                     theme-chosen(i) => { root.theme-chosen(i); }
                     always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
                     tray-toggled(on) => { root.tray-toggled(on); }
+                    smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
                     gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
                 }
             }

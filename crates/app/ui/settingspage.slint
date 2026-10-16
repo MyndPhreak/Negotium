@@ -150,6 +150,7 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> keep-in-tray;
     // The saved GPU choice; whether an automatic fallback to the CPU is recorded; whether this
     // instance draws with the GPU; whether SLINT_BACKEND chose the renderer (crate::settingspage).
+    in property <bool> smooth-graphs;
     in property <bool> gpu-rendering;
     in property <bool> gpu-fallback;
     in property <bool> gpu-running;
@@ -161,6 +162,7 @@ export component SettingsPage inherits VerticalLayout {
     callback theme-chosen(int);
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
+    callback smooth-graphs-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
     property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
@@ -207,6 +209,18 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     chosen(i) => { root.theme-chosen(i); }
                     focus-gained => { sv.reveal(theme-row.absolute-position.y, theme-row.height); }
+                }
+            }
+            smooth-row := SettingRow {
+                title: "Smooth graphs";
+                description: "Graphs scroll continuously between updates instead of stepping. Turn off to use a little less CPU.";
+                Toggle {
+                    label: smooth-row.title;
+                    description: smooth-row.description;
+                    checked: root.smooth-graphs;
+                    interactive: root.interactive;
+                    toggled(on) => { root.smooth-graphs-toggled(on); }
+                    focus-gained => { sv.reveal(smooth-row.absolute-position.y, smooth-row.height); }
                 }
             }
             top-row := SettingRow {

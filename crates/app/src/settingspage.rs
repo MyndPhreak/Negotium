@@ -25,6 +25,9 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_theme(s.theme.index());
     ui.set_settings_keep_in_tray(s.keep_in_tray);
     ui.set_settings_gpu_rendering(s.gpu_rendering);
+    ui.set_settings_smooth_graphs(s.smooth_graphs);
+    // Off: GraphClock rests the view on the newest sample at once (PF3).
+    ui.global::<crate::GraphClock>().set_smooth(s.smooth_graphs);
 }
 
 /// Everything the page's handlers act on.
@@ -75,6 +78,12 @@ impl SettingsWiring {
             let change = change.clone();
             ui.on_tray_toggled(move |on| {
                 change.apply(|s| s.keep_in_tray = on);
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_smooth_graphs_toggled(move |on| {
+                change.apply(|s| s.smooth_graphs = on);
             });
         }
         {

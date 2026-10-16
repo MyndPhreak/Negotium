@@ -42,11 +42,13 @@ pub struct Settings {
     /// Use the GPU renderer. The effective renderer is the GPU only when this is on and no
     /// automatic-fallback marker exists (`crate::renderer`). Read at launch.
     pub gpu_rendering: bool,
+    /// Graphs scroll continuously between samples (crate::smooth).
+    pub smooth_graphs: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { refresh_ms: 1000, theme: ThemeChoice::System, always_on_top: false, keep_in_tray: true, gpu_rendering: true }
+        Self { refresh_ms: 1000, theme: ThemeChoice::System, always_on_top: false, keep_in_tray: true, gpu_rendering: true, smooth_graphs: true }
     }
 }
 
@@ -143,6 +145,7 @@ pub fn load(path: &Path) -> (Settings, Loaded) {
     field!(always_on_top);
     field!(keep_in_tray);
     field!(gpu_rendering);
+    field!(smooth_graphs);
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)
@@ -284,6 +287,20 @@ mod tests {
     }
 
     #[test]
+    fn smooth_graphs_default_on_and_a_bad_value_loses_only_itself() {
+        let dir = TempDir::new("smooth");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"refresh_ms": 2000}"#).unwrap();
+        assert!(load(&p).0.smooth_graphs, "a file that predates the switch: on");
+        std::fs::write(&p, r#"{"smooth_graphs": "yes", "refresh_ms": 2000}"#).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::Partial(vec!["smooth_graphs".to_string()]));
+        assert!(s.smooth_graphs && s.refresh_ms == 2000);
+        std::fs::write(&p, r#"{"smooth_graphs": false}"#).unwrap();
+        assert!(!load(&p).0.smooth_graphs);
+    }
+
+    #[test]
     fn settings_round_trip_as_readable_json() {
         let dir = TempDir::new("roundtrip");
         let p = dir.file();
@@ -293,6 +310,7 @@ mod tests {
             always_on_top: true,
             keep_in_tray: false,
             gpu_rendering: false,
+            smooth_graphs: false,
         };
         save(&p, &s).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("\"theme\": \"dark\""));

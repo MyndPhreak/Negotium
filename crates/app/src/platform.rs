@@ -23,9 +23,9 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, GetPropW, GetWindowThreadProcessId, IsIconic,
-    MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
-    WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE,
+    MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SIZE_MINIMIZED, SW_RESTORE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
+    WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
@@ -157,11 +157,18 @@ pub fn bring_to_front(ui: &MainWindow) {
     let Some(hwnd) = hwnd_of(ui) else { return };
     // SAFETY: plain calls on our own window handle.
     unsafe {
-        if IsIconic(hwnd).as_bool() {
+        if is_minimised(hwnd) {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         let _ = SetForegroundWindow(hwnd);
     }
+}
+
+/// Whether `hwnd` is minimised now: a launch from a shortcut set to "Minimized" starts so, before
+/// the window hooks can hear WM_SIZE.
+pub fn is_minimised(hwnd: HWND) -> bool {
+    // SAFETY: a plain query; any handle value is safe to pass (an invalid one reads as false).
+    unsafe { IsIconic(hwnd).as_bool() }
 }
 
 /// Messages the main window handles on top of what winit does.
@@ -175,6 +182,9 @@ pub enum ShellEvent {
     /// The system theme or accent colour may have changed: WM_SETTINGCHANGE for
     /// "ImmersiveColorSet" (light/dark mode) or WM_DWMCOLORIZATIONCOLORCHANGED (accent).
     SettingsChanged,
+    /// The main window was minimised (true) or shown at a size again (false): graphs scroll only
+    /// while it is on screen. Sent on every WM_SIZE; the receiver drops repeats.
+    Minimised(bool),
 }
 
 // Cached: the subclass compares every message the main window receives against these.
@@ -253,6 +263,9 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
+    } else if msg == WM_SIZE {
+        // SAFETY: as above.
+        unsafe { (*hook)(ShellEvent::Minimised(wparam.0 as u32 == SIZE_MINIMIZED)) };
     } else if (msg == WM_SETTINGCHANGE && is_colour_scheme_change(lparam)) || msg == WM_DWMCOLORIZATIONCOLORCHANGED {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::SettingsChanged) };
@@ -461,6 +474,42 @@ mod tests {
             let _ = DestroyWindow(hwnd);
         }
         assert_eq!(*seen.borrow(), [ShellEvent::Activate, ShellEvent::TaskbarCreated, ShellEvent::SettingsChanged]);
+    }
+
+    #[test]
+    fn minimising_and_restoring_reach_the_hook() {
+        use windows::Win32::UI::WindowsAndMessaging::{SIZE_MINIMIZED, SIZE_RESTORED, WM_SIZE};
+        let hwnd = hidden_window();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        assert!(install_window_hooks(hwnd, move |e| s.borrow_mut().push(e)));
+        // SAFETY: synchronous sends to our own window on this thread.
+        unsafe {
+            SendMessageW(hwnd, WM_SIZE, Some(WPARAM(SIZE_MINIMIZED as usize)), Some(LPARAM(0)));
+            SendMessageW(hwnd, WM_SIZE, Some(WPARAM(SIZE_RESTORED as usize)), Some(LPARAM(0)));
+            let _ = DestroyWindow(hwnd);
+        }
+        let sizes: Vec<ShellEvent> = seen.borrow().iter().copied().filter(|e| matches!(e, ShellEvent::Minimised(_))).collect();
+        assert_eq!(sizes, [ShellEvent::Minimised(true), ShellEvent::Minimised(false)]);
+    }
+
+    #[test]
+    fn a_window_that_starts_minimised_reads_as_minimised() {
+        use windows::Win32::UI::WindowsAndMessaging::WS_MINIMIZE;
+        let hwnd = hidden_window();
+        assert!(!is_minimised(hwnd));
+        // SAFETY: as hidden_window, never shown (no WS_VISIBLE): minimised from creation, as a
+        // launch from a shortcut set to "Minimized" leaves the main window.
+        let minimised = unsafe {
+            CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("negotium-test"), WS_OVERLAPPED | WS_MINIMIZE, 0, 0, 10, 10, None, None, None, None)
+        }
+        .expect("create test window");
+        assert!(is_minimised(minimised));
+        // SAFETY: our own test windows.
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+            let _ = DestroyWindow(minimised);
+        }
     }
 
     #[test]
