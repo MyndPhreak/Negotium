@@ -50,6 +50,19 @@ struct Report {
     memory: Option<memmap::MemoryReport>,
 }
 
+/// Negotium itself, by keyword or by the file name of an explicit path: either way it gets the
+/// isolated environment, never the user's real settings, marker and log.
+fn is_negotium_target(target: &str) -> bool {
+    target.eq_ignore_ascii_case("negotium")
+        || Path::new(target).file_name().is_some_and(|n| n.eq_ignore_ascii_case("negotium.exe"))
+}
+
+/// A process name as given on the command line, with or without `.exe`, lower-cased.
+fn exe_file_name(name: &str) -> String {
+    let n = name.to_lowercase();
+    if n.ends_with(".exe") { n } else { format!("{n}.exe") }
+}
+
 /// Why the bench will not start a child: it never closes or kills an instance it did not launch.
 fn already_running_message(exe_name: &str, is_negotium: bool) -> String {
     if is_negotium {
@@ -67,7 +80,7 @@ fn memory_command(mut args: impl Iterator<Item = String>) -> Result<()> {
         match a.as_str() {
             "--pid" => pid = Some(args.next().context("--pid N")?.parse()?),
             "--name" => {
-                let name = args.next().context("--name EXE")?.to_lowercase();
+                let name = exe_file_name(&args.next().context("--name EXE")?);
                 pid = Some(running_pid(&name)?.with_context(|| format!("{name} is not running"))?);
             }
             "--top" => top = args.next().context("--top N")?.parse()?,
@@ -93,12 +106,16 @@ fn main() -> Result<()> {
     }
     let (mut runs, mut sample_secs, mut warmup_secs, mut out) = (5u32, 60u64, 5u64, None::<String>);
     let mut renderer = Renderer::default();
+    let mut renderer_given = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--runs" => runs = args.next().context("--runs N")?.parse()?,
             "--sample-secs" => sample_secs = args.next().context("--sample-secs S")?.parse()?,
             "--warmup-secs" => warmup_secs = args.next().context("--warmup-secs S")?.parse()?,
-            "--renderer" => renderer = Renderer::parse(&args.next().context("--renderer gpu|software")?)?,
+            "--renderer" => {
+                renderer = Renderer::parse(&args.next().context("--renderer gpu|software")?)?;
+                renderer_given = true;
+            }
             "--out" => out = Some(args.next().context("--out FILE")?),
             other => bail!("unknown argument {other}"),
         }
@@ -107,10 +124,13 @@ fn main() -> Result<()> {
     if !unsafe { IsUserAnAdmin() }.as_bool() {
         bail!("run from an elevated terminal: Task Manager auto-elevates and UIPI blocks probing higher-integrity windows");
     }
-    let is_negotium = target.eq_ignore_ascii_case("negotium");
+    let is_negotium = is_negotium_target(&target);
+    if renderer_given && !is_negotium {
+        eprintln!("warning: --renderer only applies to Negotium; ignored for {target}");
+    }
     let path = if target.eq_ignore_ascii_case("taskmgr") {
         PathBuf::from(r"C:\Windows\System32\Taskmgr.exe")
-    } else if is_negotium {
+    } else if target.eq_ignore_ascii_case("negotium") {
         std::env::current_exe()?.with_file_name("negotium.exe")
     } else {
         PathBuf::from(&target)
@@ -119,7 +139,8 @@ fn main() -> Result<()> {
 
     let stats_path = std::env::temp_dir().join("negotium-frame-stats.json");
     let real_local_app_data = std::env::var_os("LOCALAPPDATA");
-    let mut scratch: Option<PathBuf> = None;
+    // Declared before `last`, so a launched child is cleaned up before its scratch directory goes.
+    let mut scratch: Option<childenv::ScratchDir> = None;
     let launch_args = is_negotium.then_some("--exit-on-close");
 
     let mut startup_ms = Vec::new();
@@ -137,14 +158,10 @@ fn main() -> Result<()> {
             // A fresh LOCALAPPDATA per run: its own settings.json, renderer marker and log, so the
             // user's real files are never read or written (and a fallback marker cannot leak into
             // the next run).
-            if let Some(old) = scratch.take() {
-                let _ = std::fs::remove_dir_all(old);
-            }
             let dir = childenv::scratch_local_appdata(&std::env::temp_dir(), real_local_app_data.as_deref(), std::process::id(), run)?;
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-            // No thread has been spawned yet (the probe thread starts in `sample`, after this loop).
-            childenv::negotium_child_env(&dir, &stats_path, renderer).apply_to_process();
+            let dir = childenv::ScratchDir::create(dir)?;
+            childenv::negotium_child_env(dir.path(), &stats_path, renderer).apply_to_process();
+            // Assigning drops the previous run's directory; its child was closed above.
             scratch = Some(dir);
         }
         let t0 = Instant::now();
@@ -168,9 +185,7 @@ fn main() -> Result<()> {
         None
     };
     target.close()?;
-    if let Some(dir) = scratch {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    drop(scratch);
 
     let frame_stats = if is_negotium {
         let read = std::fs::read_to_string(&stats_path)
@@ -447,5 +462,21 @@ mod tests {
         let m = already_running_message("negotium.exe", true);
         assert!(m.contains("tray") && m.contains("will not touch"), "{m}");
         assert!(!already_running_message("taskmgr.exe", false).contains("tray"));
+    }
+
+    #[test]
+    fn negotium_is_recognised_by_keyword_or_by_the_exe_name_of_a_path() {
+        for t in ["negotium", "Negotium", r"C:\x\target\release\negotium.exe", r"C:\x\NEGOTIUM.EXE", "negotium.exe"] {
+            assert!(is_negotium_target(t), "{t}");
+        }
+        for t in ["taskmgr", r"C:\Windows\System32\Taskmgr.exe", r"C:\negotium\other.exe", "negotium-bench.exe"] {
+            assert!(!is_negotium_target(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn memory_name_works_with_or_without_exe() {
+        assert_eq!(exe_file_name("Negotium"), "negotium.exe");
+        assert_eq!(exe_file_name("negotium.EXE"), "negotium.exe");
     }
 }

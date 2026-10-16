@@ -64,6 +64,30 @@ pub fn negotium_child_env(scratch_local_appdata: &Path, stats: &Path, renderer: 
     ChildEnv { set, remove }
 }
 
+/// A scratch directory that is removed when dropped, on every exit path including errors and
+/// panics. It only ever removes the one path it created.
+#[derive(Debug)]
+pub struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    /// Creates `path` empty (a stale directory of the same per-run name is ours and is replaced).
+    pub fn create(path: PathBuf) -> Result<Self> {
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).map_err(|e| anyhow::anyhow!("create {}: {e}", path.display()))?;
+        Ok(Self(path))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 impl ChildEnv {
     /// Applies the change to an environment map (keys upper-cased, as Windows compares them);
     /// the test-side twin of `apply_to_process`, driven by the same `set`/`remove` lists.
@@ -79,8 +103,9 @@ impl ChildEnv {
 
     /// Changes this process's environment, which the launched child inherits.
     pub fn apply_to_process(&self) {
-        // SAFETY: called from `main` before any other thread exists, so nothing reads the
-        // environment concurrently.
+        // SAFETY: Rust marks env mutation `unsafe` because other threads may use the C runtime's
+        // getenv/setenv. This process only changes its environment here, and the Windows call
+        // underneath (SetEnvironmentVariableW) is thread-safe, so a shell thread is not corrupted.
         unsafe {
             for name in &self.remove {
                 std::env::remove_var(name);
@@ -115,6 +140,27 @@ mod tests {
         assert_eq!(env["PATH"], "p", "the rest is untouched");
         assert_eq!(env["NEGOTIUM_FRAME_STATS"], r"C:\Temp\stats.json");
         assert!(!env.contains_key("NEGOTIUM_SIMULATE_STALL"));
+    }
+
+    #[test]
+    fn dropping_the_scratch_guard_removes_only_its_own_directory() {
+        let root = std::env::temp_dir().join(format!("negotium-bench-test-{}", std::process::id()));
+        let (mine, other) = (root.join("mine"), root.join("other"));
+        std::fs::create_dir_all(&other).unwrap();
+        let guard = ScratchDir::create(mine.clone()).unwrap();
+        std::fs::write(guard.path().join("settings.json"), "x").unwrap();
+        assert!(mine.is_dir());
+        drop(guard);
+        assert!(!mine.exists(), "its directory and contents are gone");
+        assert!(other.is_dir(), "a sibling is untouched");
+        // An unwinding panic drops it too.
+        let m2 = root.join("panic");
+        let r = std::panic::catch_unwind(|| {
+            let _g = ScratchDir::create(m2.clone()).unwrap();
+            panic!("boom");
+        });
+        assert!(r.is_err() && !m2.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
