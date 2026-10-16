@@ -6,7 +6,7 @@ use crate::graph::{self, EMPTY_PATH, Shape};
 use negotium_collector::SystemInfo;
 use negotium_history::{History, Series};
 use negotium_model::Metric;
-use negotium_snapshot::{MemoryTotals, Snapshot};
+use negotium_snapshot::{AdapterSample, DiskSample, GpuSample, MemoryTotals, Snapshot};
 
 pub const MAIN_BUCKETS: usize = 300;
 pub const CELL_BUCKETS: usize = 60;
@@ -45,6 +45,12 @@ impl Range {
 pub enum Device {
     Cpu,
     Memory,
+    /// PhysicalDisk instance, e.g. "0 C:".
+    Disk(String),
+    /// Network Interface instance.
+    Network(String),
+    /// GPU key, "luid_…_phys_N".
+    Gpu(String),
 }
 
 impl Device {
@@ -52,6 +58,9 @@ impl Device {
         match self {
             Device::Cpu => "cpu".to_string(),
             Device::Memory => "memory".to_string(),
+            Device::Disk(n) => format!("disk:{n}"),
+            Device::Network(n) => format!("net:{n}"),
+            Device::Gpu(k) => format!("gpu:{k}"),
         }
     }
 
@@ -59,9 +68,112 @@ impl Device {
         match id {
             "cpu" => Some(Device::Cpu),
             "memory" => Some(Device::Memory),
-            _ => None,
+            _ => {
+                let (kind, name) = id.split_once(':')?;
+                match kind {
+                    "disk" => Some(Device::Disk(name.to_string())),
+                    "net" => Some(Device::Network(name.to_string())),
+                    "gpu" => Some(Device::Gpu(name.to_string())),
+                    _ => None,
+                }
+            }
         }
     }
+}
+
+/// A device of the current snapshot, borrowed from it: the list is rebuilt every tick without
+/// copying any device name.
+#[derive(Clone, Copy)]
+enum Entry<'a> {
+    Cpu,
+    Memory,
+    Disk(&'a DiskSample),
+    Network(&'a AdapterSample),
+    Gpu(&'a GpuSample),
+}
+
+impl Entry<'_> {
+    fn id(&self) -> String {
+        match self {
+            Entry::Cpu => "cpu".to_string(),
+            Entry::Memory => "memory".to_string(),
+            Entry::Disk(d) => format!("disk:{}", d.name),
+            Entry::Network(a) => format!("net:{}", a.name),
+            Entry::Gpu(g) => format!("gpu:{}", g.key),
+        }
+    }
+
+    fn is(&self, d: &Device) -> bool {
+        match (self, d) {
+            (Entry::Cpu, Device::Cpu) | (Entry::Memory, Device::Memory) => true,
+            (Entry::Disk(a), Device::Disk(n)) => a.name == *n,
+            (Entry::Network(a), Device::Network(n)) => a.name == *n,
+            (Entry::Gpu(g), Device::Gpu(k)) => g.key == *k,
+            _ => false,
+        }
+    }
+
+    fn device(&self) -> Device {
+        match self {
+            Entry::Cpu => Device::Cpu,
+            Entry::Memory => Device::Memory,
+            Entry::Disk(d) => Device::Disk(d.name.clone()),
+            Entry::Network(a) => Device::Network(a.name.clone()),
+            Entry::Gpu(g) => Device::Gpu(g.key.clone()),
+        }
+    }
+}
+
+/// "0 C:" → "Disk 0 (C:)"; "2" → "Disk 2"; anything else unchanged.
+pub fn disk_title(name: &str) -> String {
+    let mut parts = name.split_whitespace();
+    match parts.next().map(|n| (n, n.parse::<u32>())) {
+        Some((n, Ok(_))) => {
+            let volumes: Vec<&str> = parts.collect();
+            if volumes.is_empty() { format!("Disk {n}") } else { format!("Disk {n} ({})", volumes.join(" ")) }
+        }
+        _ => name.to_string(),
+    }
+}
+
+const MIB: f32 = 1_048_576.0;
+
+fn disk_number(name: &str) -> u32 {
+    name.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(u32::MAX)
+}
+
+fn adapter_name(a: &AdapterSample) -> &str {
+    a.alias.as_deref().unwrap_or(&a.name)
+}
+
+pub fn adapter_title(a: &AdapterSample) -> String {
+    adapter_name(a).to_string()
+}
+
+/// Every device with a page, in display order: CPU, memory, disks by number, adapters (connected
+/// ones first, hardware before virtual, then by name; disconnected ones last), GPUs in DXGI order
+/// (unknown ones last). Sorts compare borrowed names.
+fn entries<'a>(snap: &'a Snapshot, info: &SystemInfo) -> Vec<Entry<'a>> {
+    let t = &snap.totals;
+    let mut out = vec![Entry::Cpu, Entry::Memory];
+    let mut disks: Vec<&DiskSample> = t.disks.iter().flatten().collect();
+    disks.sort_by(|a, b| disk_number(&a.name).cmp(&disk_number(&b.name)).then_with(|| a.name.cmp(&b.name)));
+    out.extend(disks.into_iter().map(Entry::Disk));
+    let mut nets: Vec<&AdapterSample> = t.adapters.iter().flatten().collect();
+    nets.sort_by(|a, b| {
+        (!a.connected, !a.hardware, adapter_name(a), &a.name).cmp(&(!b.connected, !b.hardware, adapter_name(b), &b.name))
+    });
+    out.extend(nets.into_iter().map(Entry::Network));
+    let dxgi = |key: &str| info.gpus.iter().position(|i| i.key == key).unwrap_or(usize::MAX);
+    let mut gpus: Vec<&GpuSample> = t.gpus.iter().flatten().collect();
+    gpus.sort_by_cached_key(|g| (dxgi(&g.key), g.key.as_str()));
+    out.extend(gpus.into_iter().map(Entry::Gpu));
+    out
+}
+
+/// Every device with a page, in display order.
+pub fn devices(snap: &Snapshot, info: &SystemInfo) -> Vec<Device> {
+    entries(snap, info).iter().map(Entry::device).collect()
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -139,6 +251,11 @@ impl PerfInput<'_> {
         graph::shape(self.history.points(key, self.end().saturating_sub(span)), self.end(), span, max, buckets)
     }
 
+    /// The largest value of a series within the last `span_ms`, 0 when there is none.
+    fn max_over(&self, key: &Series, span_ms: u64) -> f32 {
+        self.history.points(key, self.end().saturating_sub(span_ms)).filter_map(|(_, v)| v).filter(|v| v.is_finite()).fold(0.0, f32::max)
+    }
+
     fn spark(&self, key: &Series, max: f32) -> String {
         graph::line(self.history.points(key, self.end().saturating_sub(SPARK_MS)), self.end(), SPARK_MS, max, 60)
     }
@@ -156,42 +273,88 @@ fn dash() -> String {
     "—".to_string()
 }
 
-/// Every device with a page, in display order.
-pub fn devices(_snap: &Snapshot, _info: &SystemInfo) -> Vec<Device> {
-    vec![Device::Cpu, Device::Memory]
+fn empty_shape() -> Shape {
+    Shape { line: EMPTY_PATH.to_string(), area: EMPTY_PATH.to_string() }
 }
 
-fn device_view(d: &Device, input: &PerfInput) -> DeviceView {
+/// A percentage that may be unknown (NaN, as a GPU seeded without engine data reports it).
+fn known(v: f32) -> Option<f32> {
+    v.is_finite().then_some(v)
+}
+
+fn device_view(e: &Entry, gpu_number: usize, input: &PerfInput) -> DeviceView {
     let t = &input.snap.totals;
-    let (title, value, spark) = match d {
-        Device::Cpu => ("CPU".to_string(), t.cpu_pct.map(format::pct).unwrap_or_else(dash), input.spark(&Series::Cpu, 100.0)),
-        Device::Memory => {
-            let m = t.memory.as_ref();
+    let (title, value, spark) = match e {
+        Entry::Cpu => ("CPU".to_string(), t.cpu_pct.map(format::pct).unwrap_or_else(dash), input.spark(&Series::Cpu, 100.0)),
+        Entry::Memory => {
+            let m = t.memory.as_ref().filter(|m| m.total > 0);
             let value = m
-                .map(|m| format!("{} ({})", format::gb_of(m.used, m.total), format::pct(m.used as f32 / m.total.max(1) as f32 * 100.0)))
+                .map(|m| format!("{} ({})", format::gb_of(m.in_use(), m.total), format::pct(m.in_use() as f32 / m.total as f32 * 100.0)))
                 .unwrap_or_else(dash);
-            ("Memory".to_string(), value, input.spark(&Series::MemUsed, m.map_or(0.0, |m| m.total as f32)))
+            let spark = m.map_or_else(|| EMPTY_PATH.to_string(), |m| input.spark(&Series::MemUsed, m.total as f32));
+            ("Memory".to_string(), value, spark)
+        }
+        Entry::Disk(d) => (disk_title(&d.name), format::pct(d.active_pct), input.spark(&Series::DiskActive(d.name.clone()), 100.0)),
+        Entry::Network(a) => {
+            let key = Series::NetRecv(a.name.clone());
+            let max = graph::nice_max(input.max_over(&key, SPARK_MS) * 8.0, 100_000.0) / 8.0;
+            let value = if a.connected {
+                format!("S {} · R {}", format::bit_rate(a.sent_bps), format::bit_rate(a.recv_bps))
+            } else {
+                "Disconnected".to_string()
+            };
+            (adapter_title(a), value, input.spark(&key, max))
+        }
+        Entry::Gpu(g) => {
+            let value = match (known(g.util_pct), g.temp_c) {
+                (Some(u), Some(c)) => format!("{} ({})", format::pct(u), format::temp_c(c)),
+                (Some(u), None) => format::pct(u),
+                (None, Some(c)) => format::temp_c(c),
+                (None, None) => dash(),
+            };
+            (format!("GPU {gpu_number}"), value, input.spark(&Series::GpuUtil(g.key.clone()), 100.0))
         }
     };
-    DeviceView { id: d.id(), title, value, spark }
+    DeviceView { id: e.id(), title, value, spark }
 }
 
 pub fn build_perf(input: &PerfInput) -> PerfFrame {
-    let list = devices(input.snap, input.info);
-    let device = Device::parse(input.device).filter(|d| list.contains(d)).unwrap_or(Device::Cpu);
+    let list = entries(input.snap, input.info);
+    // The requested device, or the CPU when it is gone: never stale numbers.
+    let wanted = Device::parse(input.device);
+    let selected = wanted.and_then(|d| list.iter().position(|e| e.is(&d))).unwrap_or(0);
+    let mut gpus = 0;
+    let mut selected_gpu = 0;
+    let devices = list
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let number = gpus;
+            if matches!(e, Entry::Gpu(_)) {
+                gpus += 1;
+                if i == selected {
+                    selected_gpu = number;
+                }
+            }
+            device_view(e, number, input)
+        })
+        .collect();
     let mut f = PerfFrame {
-        devices: list.iter().map(|d| device_view(d, input)).collect(),
+        devices,
         requested: input.device.to_string(),
-        selected: device.id(),
+        selected: list[selected].id(),
         range: input.range,
         window_end_ms: input.end(),
         span_ms: input.range.span_ms(),
         end_clock_ms: input.snap.totals.local_time_ms,
         ..Default::default()
     };
-    match &device {
-        Device::Cpu => cpu_page(&mut f, input),
-        Device::Memory => memory_page(&mut f, input),
+    match list[selected] {
+        Entry::Cpu => cpu_page(&mut f, input),
+        Entry::Memory => memory_page(&mut f, input),
+        Entry::Disk(d) => disk_page(&mut f, input, d),
+        Entry::Network(a) => net_page(&mut f, input, a),
+        Entry::Gpu(g) => gpu_page(&mut f, input, g, selected_gpu),
     }
     f
 }
@@ -219,11 +382,12 @@ fn cpu_page(f: &mut PerfFrame, input: &PerfInput) {
         stat("Utilization", util),
         stat("Speed", t.cpu_mhz.map(format::ghz).unwrap_or_else(dash)),
         stat("Temperature", dash()),
-        stat("Processes", proc_stat(known.then(|| procs.len() as u64))),
+        stat("Processes", proc_stat(known.then_some(procs.len() as u64))),
         stat("Threads", proc_stat(known.then(|| procs.iter().map(|p| p.threads as u64).sum()))),
         stat("Handles", proc_stat(known.then(|| procs.iter().map(|p| p.handles as u64).sum()))),
-        stat("Up time", format::uptime(t.uptime_s)),
-        stat("Logical processors", t.logical_cpus.to_string()),
+        // A zero means the value was never read.
+        stat("Up time", if t.uptime_s > 0 { format::uptime(t.uptime_s) } else { dash() }),
+        stat("Logical processors", if t.logical_cpus > 0 { t.logical_cpus.to_string() } else { dash() }),
     ];
     f.note = CPU_TEMP_NOTE.into();
 }
@@ -231,36 +395,27 @@ fn cpu_page(f: &mut PerfFrame, input: &PerfInput) {
 fn memory_page(f: &mut PerfFrame, input: &PerfInput) {
     f.title = "Memory".into();
     f.scrub_metric = Metric::Memory;
-    let Some(m) = input.snap.totals.memory.as_ref() else {
-        f.graphs = vec![graph_view("Memory usage", dash(), String::new(), input.shape(&Series::MemUsed, 0.0, MAIN_BUCKETS))];
+    let Some(m) = input.snap.totals.memory.as_ref().filter(|m| m.total > 0) else {
+        f.graphs = vec![graph_view("Memory usage", dash(), String::new(), empty_shape())];
         f.stats = vec![stat("In use", dash())];
         return;
     };
     f.subtitle = format!("{} total", format::gb(m.total));
     f.graphs = vec![graph_view(
         "Memory usage",
-        format::gb(m.used),
+        format::gb(m.in_use()),
         format::gb(m.total),
         input.shape(&Series::MemUsed, m.total as f32, MAIN_BUCKETS),
     )];
     f.segments = composition(m);
     f.stats = vec![
-        stat("In use", format::gb(in_use(m))),
-        stat("Available", format::gb(m.total.saturating_sub(m.used))),
+        stat("In use", format::gb(m.in_use())),
+        stat("Available", format::gb(m.available())),
         stat("Committed", format::gb_of(m.commit_total, m.commit_limit)),
         stat("Cached", m.lists.map(|l| format::gb(l.standby + l.modified)).unwrap_or_else(dash)),
         stat("Compressed", m.compressed.map(|b| format::bytes(b as f64)).unwrap_or_else(dash)),
         stat("Speed", input.info.memory_speed_mts.map(|s| format!("{s} MT/s")).unwrap_or_else(dash)),
     ];
-}
-
-/// Memory in use as the "In use" stat shows it: the bar's in-use segment plus compressed memory
-/// when the page lists exist, `used` otherwise.
-fn in_use(m: &MemoryTotals) -> u64 {
-    match m.lists {
-        Some(l) => m.total.saturating_sub(l.modified + l.standby + l.free),
-        None => m.used,
-    }
 }
 
 /// The composition bar (spec §5.2): in use (less compressed), compressed, modified, standby and
@@ -271,23 +426,136 @@ pub fn composition(m: &MemoryTotals) -> Vec<SegmentView> {
     match m.lists {
         Some(l) => {
             let compressed = m.compressed.unwrap_or(0);
-            let in_use = m.total.saturating_sub(l.modified + l.standby + l.free).saturating_sub(compressed);
             vec![
-                seg("In use", in_use),
+                seg("In use", m.in_use().saturating_sub(compressed)),
                 seg("Compressed", compressed),
                 seg("Modified", l.modified),
                 seg("Standby", l.standby),
                 seg("Free", l.free),
             ]
         }
-        None => vec![seg("In use", m.used), seg("Available", m.total.saturating_sub(m.used))],
+        None => vec![seg("In use", m.in_use()), seg("Available", m.available())],
     }
+}
+
+fn disk_page(f: &mut PerfFrame, input: &PerfInput, d: &DiskSample) {
+    let name = d.name.as_str();
+    f.title = disk_title(name);
+    f.scrub_metric = Metric::Disk;
+    f.note = "Top apps show each app's disk use across all disks.".into();
+    let (read_key, write_key) = (Series::DiskRead(name.into()), Series::DiskWrite(name.into()));
+    let span = input.range.span_ms();
+    // Byte rates are shown in binary units: round the scale in MB/s so the label reads "2.0 MB/s".
+    let peak = input.max_over(&read_key, span).max(input.max_over(&write_key, span));
+    let scale = graph::nice_max(peak / MIB, 1.0) * MIB;
+    let mut transfer = graph_view(
+        "Transfer rate",
+        format!("Read {} · Write {}", format::byte_rate(d.read_bps), format::byte_rate(d.write_bps)),
+        format::byte_rate(scale as f64),
+        input.shape(&read_key, scale, MAIN_BUCKETS),
+    );
+    transfer.line2 = input.shape(&write_key, scale, MAIN_BUCKETS).line;
+    f.graphs = vec![
+        graph_view("Active time", format::pct(d.active_pct), "100%".into(), input.shape(&Series::DiskActive(name.into()), 100.0, MAIN_BUCKETS)),
+        transfer,
+    ];
+    f.stats = vec![
+        stat("Active time", format::pct(d.active_pct)),
+        stat("Read speed", format::byte_rate(d.read_bps)),
+        stat("Write speed", format::byte_rate(d.write_bps)),
+        stat("Average response time", d.response_ms.map(format::millis).unwrap_or_else(dash)),
+    ];
+}
+
+fn net_page(f: &mut PerfFrame, input: &PerfInput, a: &AdapterSample) {
+    let name = a.name.as_str();
+    f.title = adapter_title(a);
+    f.subtitle = a.description.clone().unwrap_or_else(|| name.to_string());
+    f.scrub_metric = Metric::Network;
+    f.note = "Per-app network use arrives in a later version.".into();
+    let (sent_key, recv_key) = (Series::NetSent(name.into()), Series::NetRecv(name.into()));
+    let span = input.range.span_ms();
+    // Network rates are shown in decimal bits: round the scale in bits, at least 100 Kb/s.
+    let peak = input.max_over(&sent_key, span).max(input.max_over(&recv_key, span));
+    let scale = graph::nice_max(peak * 8.0, 100_000.0) / 8.0;
+    let mut g = graph_view(
+        "Throughput",
+        format!("Send {} · Receive {}", format::bit_rate(a.sent_bps), format::bit_rate(a.recv_bps)),
+        format::bit_rate(scale as f64),
+        input.shape(&recv_key, scale, MAIN_BUCKETS),
+    );
+    g.line2 = input.shape(&sent_key, scale, MAIN_BUCKETS).line;
+    f.graphs = vec![g];
+    f.stats = vec![
+        stat("Send", format::bit_rate(a.sent_bps)),
+        stat("Receive", format::bit_rate(a.recv_bps)),
+        stat("Link speed", a.link_bps.map(|b| format::bit_rate(b as f64 / 8.0)).unwrap_or_else(dash)),
+        stat("Adapter", if a.hardware { "Hardware" } else { "Virtual" }),
+        stat("Status", if a.connected { "Connected" } else { "Disconnected" }),
+    ];
+    for addr in &a.addresses {
+        f.stats.push(stat(if addr.contains(':') { "IPv6 address" } else { "IPv4 address" }, addr.clone()));
+    }
+}
+
+/// Display order of the per-engine graphs: 3D, Copy, the video engines, then the rest by name.
+fn engine_rank(engtype: &str) -> u8 {
+    match engtype {
+        "3D" => 0,
+        "Copy" => 1,
+        "VideoEncode" => 2,
+        "VideoDecode" => 3,
+        _ => 4,
+    }
+}
+
+fn gpu_page(f: &mut PerfFrame, input: &PerfInput, g: &GpuSample, number: usize) {
+    let key = g.key.as_str();
+    let info = input.info.gpus.iter().find(|i| i.key == key);
+    f.title = format!("GPU {number}");
+    f.subtitle = info.map(|i| i.name.clone()).unwrap_or_default();
+    f.scrub_metric = Metric::Gpu;
+    let util = known(g.util_pct).map(format::pct).unwrap_or_else(dash);
+    let memory = |used: Option<u64>, total: Option<u64>| match (used, total) {
+        (Some(u), Some(t)) => format::gb_of(u, t),
+        (Some(u), None) => format::gb(u),
+        _ => dash(),
+    };
+    let dedicated_total = info.map(|i| i.dedicated_total).filter(|&t| t > 0);
+    let shared_total = info.map(|i| i.shared_total).filter(|&t| t > 0);
+    let dedicated = memory(g.dedicated_used, dedicated_total);
+    let shared = memory(g.shared_used, shared_total);
+    f.graphs = vec![graph_view("Utilization", util.clone(), "100%".into(), input.shape(&Series::GpuUtil(key.into()), 100.0, MAIN_BUCKETS))];
+    if let Some(total) = dedicated_total {
+        let shape = input.shape(&Series::GpuDedicated(key.into()), total as f32, MAIN_BUCKETS);
+        f.graphs.push(graph_view("Dedicated GPU memory", dedicated.clone(), format::gb(total), shape));
+    }
+    if let Some(total) = shared_total {
+        let shape = input.shape(&Series::GpuShared(key.into()), total as f32, MAIN_BUCKETS);
+        f.graphs.push(graph_view("Shared GPU memory", shared.clone(), format::gb(total), shape));
+    }
+    // One graph per engine type, showing its busiest engine.
+    let mut engines: Vec<&(String, f32)> = g.engines.iter().collect();
+    engines.sort_by(|a, b| engine_rank(&a.0).cmp(&engine_rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
+    f.cells = engines
+        .into_iter()
+        .map(|(engtype, v)| {
+            let shape = input.shape(&Series::GpuEngine(key.into(), engtype.clone()), 100.0, CELL_BUCKETS);
+            graph_view(engtype, known(*v).map(format::pct).unwrap_or_else(dash), String::new(), shape)
+        })
+        .collect();
+    f.stats = vec![
+        stat("Utilization", util),
+        stat("Dedicated GPU memory", dedicated),
+        stat("Shared GPU memory", shared),
+        stat("Temperature", g.temp_c.map(format::temp_c).unwrap_or_else(dash)),
+    ];
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use negotium_snapshot::{MemoryLists, MemoryTotals, ProcessSample, SystemTotals};
+    use negotium_snapshot::{AdapterSample, DiskSample, GpuSample, MemoryLists, MemoryTotals, ProcessSample, SystemTotals};
 
     fn proc(pid: u32, threads: u32, handles: u32) -> ProcessSample {
         ProcessSample {
@@ -431,7 +699,248 @@ pub(crate) mod tests {
     #[test]
     fn the_hour_range_draws_only_recorded_history() {
         let f = build_with(&snapshot(4_000_000), &info(), "cpu", Range::Hour);
-        assert_eq!(f.graphs[0].line, "M 1000.0 63.0 L 1000.1 63.0", "one second of data: one point at the right edge");
+        assert_eq!(f.graphs[0].line, "M 1000.0 63.0 L 999.9 63.0", "one second of data: one point at the right edge");
         assert_eq!(f.span_ms, 3_600_000);
+    }
+
+    use negotium_collector::gpu::GpuInfo;
+
+    fn devices_snapshot() -> Snapshot {
+        let mut s = snapshot(60_000);
+        let disk = |name: &str, active: f32| DiskSample {
+            name: name.into(), active_pct: active, read_bps: 1_048_576.0, write_bps: 2_097_152.0, response_ms: Some(0.4),
+        };
+        s.totals.disks = Some(vec![disk("1 D:", 3.0), disk("0 C:", 12.0)]);
+        let adapter = |name: &str, alias: &str, hardware: bool, connected: bool| AdapterSample {
+            name: name.into(), alias: Some(alias.into()), description: Some(name.replace('[', "(").replace(']', ")")),
+            sent_bps: 12_500.0, recv_bps: 125_000.0, hardware, connected, link_bps: Some(1_000_000_000),
+            addresses: vec!["192.168.1.20".into(), "2001:db8::5".into()],
+        };
+        s.totals.adapters = Some(vec![
+            adapter("Hyper-V Virtual Ethernet Adapter", "vEthernet (Default Switch)", false, true),
+            adapter("Bluetooth Device [Personal Area Network]", "Bluetooth Network Connection", false, false),
+            adapter("Intel[R] Ethernet", "Ethernet", true, true),
+        ]);
+        let gpu = |key: &str, util: f32, temp: Option<f32>| GpuSample {
+            key: key.into(), util_pct: util, engines: vec![("3D".into(), util), ("Copy".into(), 1.0)],
+            dedicated_used: Some(3 << 30), shared_used: Some(1 << 28), temp_c: temp,
+        };
+        s.totals.gpus = Some(vec![gpu("luid_a", 5.0, None), gpu("luid_b", 40.0, Some(64.4))]);
+        s
+    }
+
+    fn devices_info() -> SystemInfo {
+        let g = |key: &str, name: &str| GpuInfo { key: key.into(), name: name.into(), dedicated_total: 24 << 30, shared_total: 32 << 30, ..Default::default() };
+        SystemInfo { gpus: vec![g("luid_b", "NVIDIA GeForce RTX 4090"), g("luid_a", "AMD Radeon(TM) Graphics")], ..info() }
+    }
+
+    fn devices_build(device: &str) -> PerfFrame {
+        build_with(&devices_snapshot(), &devices_info(), device, Range::Minute)
+    }
+
+    #[test]
+    fn devices_are_listed_in_task_manager_order() {
+        let f = devices_build("cpu");
+        let ids: Vec<&str> = f.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, [
+            "cpu", "memory", "disk:0 C:", "disk:1 D:",
+            "net:Intel[R] Ethernet", "net:Hyper-V Virtual Ethernet Adapter", "net:Bluetooth Device [Personal Area Network]",
+            "gpu:luid_b", "gpu:luid_a",
+        ], "connected adapters (hardware first), then disconnected ones; GPUs in DXGI order");
+        let titles: Vec<&str> = f.devices.iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(&titles[2..], ["Disk 0 (C:)", "Disk 1 (D:)", "Ethernet", "vEthernet (Default Switch)", "Bluetooth Network Connection", "GPU 0", "GPU 1"]);
+        assert_eq!(f.devices[6].value, "Disconnected");
+        assert_eq!(f.devices[7].value, "40% (64 °C)");
+        assert_eq!(f.devices[8].value, "5%");
+        let ids: Vec<String> = devices(&devices_snapshot(), &devices_info()).iter().map(Device::id).collect();
+        assert_eq!(ids.len(), 9);
+        for d in [Device::Disk("0 C:".into()), Device::Network("x".into()), Device::Gpu("luid_b".into())] {
+            assert_eq!(Device::parse(&d.id()), Some(d));
+        }
+    }
+
+    #[test]
+    fn unknown_gpus_sort_last() {
+        let mut info = devices_info();
+        info.gpus.retain(|g| g.key == "luid_a");
+        let f = build_with(&devices_snapshot(), &info, "cpu", Range::Minute);
+        let ids: Vec<&str> = f.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(&ids[ids.len() - 2..], ["gpu:luid_a", "gpu:luid_b"]);
+    }
+
+    #[test]
+    fn disk_titles_name_the_volumes() {
+        assert_eq!(disk_title("0 C:"), "Disk 0 (C:)");
+        assert_eq!(disk_title("1 D: E:"), "Disk 1 (D: E:)");
+        assert_eq!(disk_title("2"), "Disk 2");
+        assert_eq!(disk_title("weird"), "weird");
+    }
+
+    #[test]
+    fn a_disk_page_shows_active_time_transfer_rate_and_response_time() {
+        let f = devices_build("disk:0 C:");
+        assert_eq!(f.title, "Disk 0 (C:)");
+        assert_eq!(f.graphs.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(), ["Active time", "Transfer rate"]);
+        assert_ne!(f.graphs[1].line2, EMPTY_PATH, "write rate drawn as the second line");
+        assert_eq!(f.graphs[1].scale, "2.0 MB/s");
+        assert_eq!(stat(&f, "Active time"), "12%");
+        assert_eq!(stat(&f, "Read speed"), "1.0 MB/s");
+        assert_eq!(stat(&f, "Average response time"), "0.4 ms");
+        assert_eq!(f.scrub_metric, Metric::Disk);
+    }
+
+    #[test]
+    fn a_disk_without_a_response_time_shows_a_dash_for_that_item_only() {
+        let mut s = devices_snapshot();
+        s.totals.disks.as_mut().unwrap()[1].response_ms = None;
+        let f = build_with(&s, &devices_info(), "disk:0 C:", Range::Minute);
+        assert_eq!(stat(&f, "Average response time"), "—");
+        assert_eq!(stat(&f, "Active time"), "12%");
+    }
+
+    #[test]
+    fn a_network_page_shows_throughput_link_speed_and_addresses() {
+        let f = devices_build("net:Intel[R] Ethernet");
+        assert_eq!((f.title.as_str(), f.subtitle.as_str()), ("Ethernet", "Intel(R) Ethernet"));
+        assert_eq!(f.graphs[0].label, "Throughput");
+        assert_ne!(f.graphs[0].line2, EMPTY_PATH);
+        assert_eq!(stat(&f, "Send"), "100.0 Kb/s");
+        assert_eq!(stat(&f, "Receive"), "1.0 Mb/s");
+        assert_eq!(stat(&f, "Link speed"), "1.0 Gb/s");
+        assert_eq!(stat(&f, "Adapter"), "Hardware");
+        assert_eq!(stat(&f, "Status"), "Connected");
+        assert_eq!(stat(&f, "IPv4 address"), "192.168.1.20");
+        assert_eq!(stat(&f, "IPv6 address"), "2001:db8::5");
+        assert_eq!(f.scrub_metric, Metric::Network);
+    }
+
+    #[test]
+    fn a_disconnected_adapter_still_has_a_page() {
+        let mut s = devices_snapshot();
+        s.totals.adapters.as_mut().unwrap()[1].link_bps = None;
+        let f = build_with(&s, &devices_info(), "net:Bluetooth Device [Personal Area Network]", Range::Minute);
+        assert_eq!(f.selected, "net:Bluetooth Device [Personal Area Network]");
+        assert_eq!(f.title, "Bluetooth Network Connection");
+        assert_eq!(stat(&f, "Status"), "Disconnected");
+        assert_eq!(stat(&f, "Link speed"), "—");
+    }
+
+    #[test]
+    fn a_gpu_page_shows_engines_memory_and_temperature() {
+        let f = devices_build("gpu:luid_b");
+        assert_eq!((f.title.as_str(), f.subtitle.as_str()), ("GPU 0", "NVIDIA GeForce RTX 4090"));
+        assert_eq!(f.graphs.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(), ["Utilization", "Dedicated GPU memory", "Shared GPU memory"]);
+        assert_eq!(f.cells.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["3D", "Copy"]);
+        assert_eq!(stat(&f, "Temperature"), "64 °C");
+        assert_eq!(stat(&f, "Dedicated GPU memory"), "3.0 / 24.0 GB");
+        assert_eq!(f.scrub_metric, Metric::Gpu);
+        let igpu = devices_build("gpu:luid_a");
+        assert_eq!(igpu.title, "GPU 1");
+        assert_eq!(stat(&igpu, "Temperature"), "—", "no sensor: a dash, not 0 °C");
+    }
+
+    #[test]
+    fn engine_graphs_are_ordered_3d_copy_video_then_by_name() {
+        let mut s = devices_snapshot();
+        let g = &mut s.totals.gpus.as_mut().unwrap()[1];
+        g.engines = ["Zeta", "VideoDecode", "Compute_0", "Copy", "VideoEncode", "3D"].iter().map(|n| (n.to_string(), 1.0)).collect();
+        let f = build_with(&s, &devices_info(), "gpu:luid_b", Range::Minute);
+        assert_eq!(f.cells.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["3D", "Copy", "VideoEncode", "VideoDecode", "Compute_0", "Zeta"]);
+    }
+
+    #[test]
+    fn a_gpu_seeded_without_counters_shows_dashes_never_zero_or_nan() {
+        let mut s = devices_snapshot();
+        s.totals.gpus = Some(vec![GpuSample { key: "luid_b".into(), util_pct: f32::NAN, ..Default::default() }]);
+        let f = build_with(&s, &devices_info(), "gpu:luid_b", Range::Minute);
+        let row = f.devices.iter().find(|d| d.id == "gpu:luid_b").unwrap();
+        assert_eq!(row.value, "—");
+        assert_eq!(row.spark, EMPTY_PATH, "a NaN sample is a gap, not a graph point");
+        assert_eq!(f.graphs[0].value, "—");
+        assert_eq!(f.graphs[0].line, EMPTY_PATH);
+        assert_eq!(stat(&f, "Utilization"), "—");
+        assert_eq!(stat(&f, "Dedicated GPU memory"), "—");
+        assert!(f.cells.is_empty(), "no engines");
+        let mut engine_nan = devices_snapshot();
+        engine_nan.totals.gpus.as_mut().unwrap()[1].engines = vec![("3D".into(), f32::NAN)];
+        let f = build_with(&engine_nan, &devices_info(), "gpu:luid_b", Range::Minute);
+        assert_eq!(f.cells[0].value, "—");
+    }
+
+    #[test]
+    fn a_page_whose_device_vanished_falls_back_to_cpu() {
+        for id in ["disk:0 C:", "net:Intel[R] Ethernet", "net:Bluetooth Device [Personal Area Network]", "gpu:luid_b"] {
+            assert_eq!(devices_build(id).selected, id, "present: {id}");
+            let mut s = devices_snapshot();
+            s.totals.disks = Some(Vec::new());
+            s.totals.adapters = None;
+            s.totals.gpus = None;
+            let f = build_with(&s, &devices_info(), id, Range::Minute);
+            assert_eq!((f.selected.as_str(), f.requested.as_str(), f.title.as_str()), ("cpu", id, "CPU"), "gone: {id}");
+            assert_eq!(f.devices.len(), 2);
+        }
+        assert_eq!(devices_build("disk:2 F:").selected, "cpu");
+    }
+
+    #[test]
+    fn memory_numbers_come_from_one_source_and_add_up() {
+        let s = snapshot(60_000);
+        let m = s.totals.memory.as_ref().unwrap();
+        assert_eq!(m.in_use() + m.available(), m.total);
+        let f = build(&s, "memory");
+        assert_eq!(f.graphs[0].value, "7.0 GB");
+        assert_eq!(f.devices[1].value, "7.0 / 16.0 GB (44%)");
+        assert_eq!(stat(&f, "In use"), "7.0 GB");
+        assert_eq!(stat(&f, "Available"), "9.0 GB");
+        // Page lists that disagree with the OS's `used`: every number still follows the lists.
+        let mut s = snapshot(60_000);
+        s.totals.memory.as_mut().unwrap().used = 8 << 30;
+        let f = build(&s, "memory");
+        assert_eq!((f.graphs[0].value.as_str(), stat(&f, "In use")), ("7.0 GB", "7.0 GB"));
+        assert_eq!(f.devices[1].value, "7.0 / 16.0 GB (44%)");
+        let bar: f32 = f.segments.iter().map(|s| s.fraction).sum();
+        assert!((bar - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn unavailable_memory_draws_nothing() {
+        let mut h = History::new();
+        let s = snapshot(1_000);
+        h.push(1_000, &s.totals, &[]);
+        let mut gone = snapshot(2_000);
+        gone.totals.memory = None;
+        h.push(2_000, &gone.totals, &[]);
+        let info = info();
+        let f = build_perf(&PerfInput { snap: &gone, history: &h, info: &info, device: "memory", range: Range::Minute });
+        assert_eq!((f.graphs[0].line.as_str(), f.graphs[0].area.as_str()), (EMPTY_PATH, EMPTY_PATH));
+        assert_eq!(f.devices[1].spark, EMPTY_PATH);
+        assert_eq!(f.devices[1].value, "—");
+    }
+
+    #[test]
+    fn zero_uptime_and_zero_processors_are_unknown() {
+        let mut s = snapshot(60_000);
+        s.totals.uptime_s = 0;
+        s.totals.logical_cpus = 0;
+        s.totals.per_core_pct.clear();
+        let f = build(&s, "cpu");
+        assert_eq!(stat(&f, "Up time"), "—");
+        assert_eq!(stat(&f, "Logical processors"), "—");
+        assert!(f.cells.is_empty());
+    }
+
+    #[test]
+    fn max_over_ignores_gaps_and_values_outside_the_span() {
+        let mut h = History::new();
+        for (t, v) in [(1_000u64, 9.0f32), (50_000, 3.0), (60_000, f32::NAN)] {
+            let mut s = snapshot(t);
+            s.totals.gpus = Some(vec![GpuSample { key: "k".into(), util_pct: v, ..Default::default() }]);
+            h.push(t, &s.totals, &[]);
+        }
+        let s = snapshot(60_000);
+        let info = info();
+        let input = PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute };
+        assert_eq!(input.max_over(&Series::GpuUtil("k".into()), 30_000), 3.0);
+        assert_eq!(input.max_over(&Series::GpuUtil("none".into()), 30_000), 0.0);
     }
 }

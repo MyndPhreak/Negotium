@@ -62,7 +62,9 @@ impl Pen {
             return;
         }
         if self.count == 1 {
-            let _ = write!(self.line, " L {:.1} {:.1}", self.last_x + STUB, self.last_y);
+            // Toward the inside of the view box: a stub at the right edge would leave it.
+            let x = if self.last_x + STUB > VIEW_W { self.last_x - STUB } else { self.last_x + STUB };
+            let _ = write!(self.line, " L {x:.1} {:.1}", self.last_y);
         }
         if self.with_area {
             let _ = write!(self.area, " L {:.1} 100.0 Z", self.last_x);
@@ -105,7 +107,7 @@ fn trace(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u
     let emit = |pen: &mut Pen, k: i64, best: Option<f32>| match best {
         Some(v) => {
             // The column's end time, but never past the newest moment.
-            let col_end = (((k + 1) as f64 * span as f64 / buckets as f64).min(end as f64)) as f64;
+            let col_end = ((k + 1) as f64 * span as f64 / buckets as f64).min(end as f64);
             let x = (VIEW_W - (end as f64 - col_end) / span as f64 * VIEW_W).clamp(0.0, VIEW_W);
             let y = if max > 0.0 { 100.0 - (v / max).clamp(0.0, 1.0) as f64 * 100.0 } else { 100.0 };
             pen.point(x, y);
@@ -182,7 +184,7 @@ mod tests {
     #[test]
     fn a_missing_value_breaks_the_line() {
         let s = shape([(58_000, Some(10.0)), (59_000, None), (60_000, Some(10.0))], 60_000, 60_000, 100.0, 60);
-        assert_eq!(s.line, "M 966.7 90.0 L 966.8 90.0 M 1000.0 90.0 L 1000.1 90.0", "single points keep a visible stub");
+        assert_eq!(s.line, "M 966.7 90.0 L 966.8 90.0 M 1000.0 90.0 L 999.9 90.0", "single points keep a visible stub");
         assert_eq!(s.area.matches('Z').count(), 2);
     }
 
@@ -204,7 +206,7 @@ mod tests {
     #[test]
     fn a_lone_point_gets_a_visible_stub_and_flat_data_draws_a_line() {
         let one = shape([(60_000, Some(5.0))], 60_000, 60_000, 100.0, 60);
-        assert_eq!(one.line, "M 1000.0 95.0 L 1000.1 95.0");
+        assert_eq!(one.line, "M 1000.0 95.0 L 999.9 95.0");
         let zeros = shape([(58_000, Some(0.0)), (59_000, Some(0.0)), (60_000, Some(0.0))], 60_000, 60_000, 100.0, 60);
         assert_eq!(zeros.line, "M 966.7 100.0 L 983.3 100.0 L 1000.0 100.0");
         assert_eq!(shape([(50_000, Some(0.0)), (60_000, Some(0.0))], 60_000, 60_000, 0.0, 60).line, "M 833.3 100.0 L 1000.0 100.0");
@@ -239,7 +241,7 @@ mod tests {
     #[test]
     fn empty_or_flat_input_draws_safely() {
         assert_eq!(shape(std::iter::empty(), 60_000, 60_000, 100.0, 60), Shape { line: EMPTY_PATH.into(), area: EMPTY_PATH.into() });
-        assert_eq!(shape([(60_000, Some(5.0))], 60_000, 60_000, 0.0, 60).line, "M 1000.0 100.0 L 1000.1 100.0", "max 0 draws on the floor");
+        assert_eq!(shape([(60_000, Some(5.0))], 60_000, 60_000, 0.0, 60).line, "M 1000.0 100.0 L 999.9 100.0", "max 0 draws on the floor");
         assert_eq!(shape([(1, Some(f32::NAN))], 60_000, 60_000, 100.0, 60).line, EMPTY_PATH);
     }
 
@@ -264,7 +266,7 @@ mod tests {
     fn right_after_start_the_graph_still_ends_at_the_right_edge() {
         // Collector time is only 2 s old but the range is an hour.
         let s = shape([(1_000, Some(50.0)), (2_000, Some(50.0))], 2_000, 3_600_000, 100.0, 300);
-        assert_eq!(s.line, "M 1000.0 50.0 L 1000.1 50.0");
+        assert_eq!(s.line, "M 1000.0 50.0 L 999.9 50.0");
     }
 
     #[test]

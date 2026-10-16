@@ -359,7 +359,7 @@ impl History {
             let col = self.columns.cores[i].get_or_insert_with(|| Column::new(true, missing));
             Self::write(col, generation, *v);
         }
-        self.record_fixed(F_MEM, t.memory.as_ref().map(|m| m.used as f32));
+        self.record_fixed(F_MEM, t.memory.as_ref().map(|m| m.in_use() as f32));
         self.record_fixed(F_COMMIT, t.memory.as_ref().map(|m| m.commit_total as f32));
         self.record_fixed(F_DISK, t.busiest_disk_pct());
         self.record_fixed(F_GPU, t.gpu_pct);

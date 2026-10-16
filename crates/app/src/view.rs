@@ -134,8 +134,8 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
         },
         MeterView {
             label: "Memory",
-            value: t.memory.as_ref().map(|m| format::pct(m.used as f32 / m.total.max(1) as f32 * 100.0)).unwrap_or_default(),
-            sub: t.memory.as_ref().map(|m| format::gb_of(m.used, m.total)).unwrap_or_default(),
+            value: t.memory.as_ref().map(|m| format::pct(m.in_use() as f32 / m.total.max(1) as f32 * 100.0)).unwrap_or_default(),
+            sub: t.memory.as_ref().map(|m| format::gb_of(m.in_use(), m.total)).unwrap_or_default(),
             spark: spark(Series::MemUsed, mem_total),
             available: t.memory.is_some(),
         },
@@ -370,7 +370,7 @@ mod tests {
         h.push(60_000, &s.totals, &[]);
         let mut ids = IdMap::new();
         let f = build_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
-        assert_eq!(f.meters[4].spark, "M 1000.0 100.0 L 1000.1 100.0");
+        assert_eq!(f.meters[4].spark, "M 1000.0 100.0 L 999.9 100.0");
     }
 
     #[test]

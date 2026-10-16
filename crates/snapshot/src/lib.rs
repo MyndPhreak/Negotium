@@ -86,6 +86,22 @@ pub struct MemoryTotals {
     pub compressed: Option<u64>,
 }
 
+impl MemoryTotals {
+    /// Memory in use, compressed memory included (Task Manager's "In use (Compressed)"): everything
+    /// that is not modified, standby or free when the page lists are known, `used` otherwise. The one
+    /// source for every memory figure shown, so that in use + available = total.
+    pub fn in_use(&self) -> u64 {
+        match self.lists {
+            Some(l) => self.total.saturating_sub(l.modified + l.standby + l.free),
+            None => self.used,
+        }
+    }
+
+    pub fn available(&self) -> u64 {
+        self.total.saturating_sub(self.in_use())
+    }
+}
+
 fn nan_if_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
     Ok(Option::<f32>::deserialize(d)?.unwrap_or(f32::NAN))
 }
