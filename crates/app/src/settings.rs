@@ -4,7 +4,8 @@
 //! ones take their defaults, so files from older or newer versions load.
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 pub const REFRESH_CHOICES_MS: [u32; 4] = [500, 1000, 2000, 5000];
 
@@ -177,23 +178,44 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Saves off the UI thread. Overlapping saves write in order and the newest settings win.
+/// Saves off the UI thread. Overlapping saves write in order and the newest settings win. Every
+/// write it starts (and any other started with `run`) is counted, so `flush` can wait for them
+/// before Negotium exits or restarts: the next instance then reads the new state.
 #[derive(Clone)]
 pub struct Saver {
     path: PathBuf,
     pending: Arc<Mutex<Option<Settings>>>,
     write: Arc<Mutex<()>>,
+    in_flight: Arc<(Mutex<usize>, Condvar)>,
+}
+
+/// Counts a background write until it ends, panicking or not.
+struct InFlight(Arc<(Mutex<usize>, Condvar)>);
+
+impl InFlight {
+    fn start(count: &Arc<(Mutex<usize>, Condvar)>) -> Self {
+        *count.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        Self(count.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut n = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        self.0.1.notify_all();
+    }
 }
 
 impl Saver {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, pending: Default::default(), write: Default::default() }
+        Self { path, pending: Default::default(), write: Default::default(), in_flight: Default::default() }
     }
 
     pub fn save(&self, s: Settings) -> std::thread::JoinHandle<()> {
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
         let (path, pending, write) = (self.path.clone(), self.pending.clone(), self.write.clone());
-        std::thread::spawn(move || {
+        self.run(move || {
             let _writing = write.lock().unwrap_or_else(|e| e.into_inner());
             let next = pending.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(s) = next
@@ -202,6 +224,25 @@ impl Saver {
                 crate::log::Log::new(crate::log::Log::default_path()).warn(&format!("settings not saved: {e}"));
             }
         })
+    }
+
+    /// Runs another write that must land before an exit (the GPU fallback marker) on its own
+    /// thread, counted for `flush`.
+    pub fn run(&self, f: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+        // Counted before the thread starts, so a flush right after this call waits for it.
+        let counted = InFlight::start(&self.in_flight);
+        std::thread::spawn(move || {
+            let _counted = counted;
+            f();
+        })
+    }
+
+    /// Waits up to `timeout` for every write started so far; true if they all ended.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let (count, cv) = &*self.in_flight;
+        let n = count.lock().unwrap_or_else(|e| e.into_inner());
+        let (n, _) = cv.wait_timeout_while(n, timeout, |n| *n > 0).unwrap_or_else(|e| e.into_inner());
+        *n == 0
     }
 }
 
@@ -428,6 +469,41 @@ mod tests {
         a.join().unwrap();
         b.join().unwrap();
         assert_eq!(load(&p).0.refresh_ms, 5000);
+    }
+
+    #[test]
+    fn a_flush_lands_pending_writes_before_exit() {
+        let dir = TempDir::new("flush");
+        let p = dir.file();
+        let saver = Saver::new(p.clone());
+        // Fire and forget, as the Settings page does.
+        drop(saver.save(Settings { refresh_ms: 2000, ..Settings::default() }));
+        let marker = dir.0.join("marker");
+        {
+            let marker = marker.clone();
+            saver.run(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                std::fs::write(marker, b"x").unwrap();
+            });
+        }
+        assert!(saver.clone().flush(std::time::Duration::from_secs(5)), "everything landed in time");
+        assert_eq!(load(&p).0.refresh_ms, 2000, "the pending save is on disk");
+        assert!(marker.is_file(), "the other background write landed too");
+        assert!(saver.flush(std::time::Duration::ZERO), "nothing left: a flush returns at once");
+    }
+
+    #[test]
+    fn a_flush_is_bounded() {
+        let saver = Saver::new(std::env::temp_dir().join("negotium-unused-settings.json"));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        saver.run(move || {
+            let _ = rx.recv(); // until released below
+        });
+        let start = std::time::Instant::now();
+        assert!(!saver.flush(std::time::Duration::from_millis(100)), "a stuck write doesn't hold the exit");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        drop(tx);
+        assert!(saver.flush(std::time::Duration::from_secs(5)));
     }
 
     #[test]

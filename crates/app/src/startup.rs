@@ -115,8 +115,9 @@ pub struct JobOutcome {
     pub failure: Option<String>,
 }
 
-/// Shown when a job panicked: nothing changed on screen, and the log has the details.
-pub const JOB_FAILED: &str = "Couldn't read the startup apps; details are in the log.";
+/// Shown when a job (a list or a toggle) panicked: the last listed state shows again, and the log
+/// has the details.
+pub const JOB_FAILED: &str = "Something went wrong on the Startup page; details are in the log.";
 
 /// Turns a job's result (or its panic) into what the page shows, logging what it must: each
 /// read error (a "Skipped" line is informational and not logged) and a panic's message.
@@ -130,12 +131,7 @@ pub fn finish(result: std::thread::Result<JobResult>) -> JobOutcome {
             JobOutcome { entries: Some(entries), read_error: !read_errors.is_empty(), failure }
         }
         Err(panic) => {
-            let why = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic".to_string());
-            warn(&format!("startup job panicked: {why}"));
+            warn(&format!("startup job panicked: {}", crate::worker::panic_text(&*panic)));
             JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.to_string()) }
         }
     }
@@ -150,14 +146,25 @@ fn warn(msg: &str) {
 
 /// Runs `job` on an action thread and hands its outcome to `deliver` on the UI thread. The one
 /// path every list and toggle takes; a panicking job still delivers, so the page never stays
-/// stuck in `startup-loading`.
-pub fn spawn_job(weak: slint::Weak<MainWindow>, elevated: bool, job: impl FnOnce() -> JobResult + Send + 'static) {
+/// stuck in `startup-loading`. After a panic, `after_panic` runs on the UI thread once the page is
+/// free again: a toggle passes a re-list there, so the switches are corrected from the real
+/// state (a list passes nothing, so a list that keeps panicking can't loop).
+pub fn spawn_job(
+    weak: slint::Weak<MainWindow>,
+    elevated: bool,
+    job: impl FnOnce() -> JobResult + Send + 'static,
+    after_panic: impl FnOnce() + Send + 'static,
+) {
     std::thread::spawn(move || {
         let outcome = finish(std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)));
         // Fails only once the event loop is gone (the app is quitting): nothing left to show.
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
+                let panicked = outcome.entries.is_none();
                 deliver(&ui, outcome, elevated);
+                if panicked {
+                    after_panic();
+                }
             }
         });
     });
@@ -261,7 +268,9 @@ mod tests {
         let unread = finish(Ok((vec![], vec![skipped, "HKLM Run: access denied".into()], Some("x".into()))));
         assert!(unread.read_error);
         assert_eq!(unread.failure.as_deref(), Some("x"));
-        let panicked = finish(std::panic::catch_unwind(|| -> JobResult { std::panic::panic_any("boom".to_string()) }));
+        crate::worker::quiet_expected_panics();
+        let panicked = finish(std::panic::catch_unwind(|| -> JobResult { panic!("test panic: startup job") }));
         assert_eq!(panicked, JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.into()) });
+        assert!(!JOB_FAILED.contains("read"), "a toggle can panic too: the message mustn't say reading failed");
     }
 }

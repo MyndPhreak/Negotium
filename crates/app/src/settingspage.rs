@@ -86,16 +86,17 @@ impl SettingsWiring {
                 }
                 // Turning it on clears the fallback marker, so the next launch tries the GPU. The
                 // explanation goes now; clearing is a file operation, so it runs off the UI
-                // thread, and if it fails the explanation comes back (`marker_not_cleared`).
+                // thread, and if it fails the explanation comes back (`marker_not_cleared`). The
+                // saver counts it, so an exit or a restart waits for it (`Saver::flush`).
                 change.weak.upgrade().inspect(|ui| ui.set_settings_gpu_fallback(false));
                 let (marker, weak) = (marker.clone(), change.weak.clone());
-                std::thread::spawn(move || {
+                drop(change.saver.run(move || {
                     if let Err(e) = renderer::set_gpu_rendering_at(&marker, on) {
                         crate::log::Log::new(crate::log::Log::default_path())
                             .warn(&format!("GPU rendering fallback marker not cleared: {e}"));
                         let _ = weak.upgrade_in_event_loop(|ui| marker_not_cleared(&ui));
                     }
-                });
+                }));
             });
         }
     }

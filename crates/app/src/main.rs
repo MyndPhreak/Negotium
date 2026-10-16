@@ -25,26 +25,42 @@ fn show_main(controls: &Controls, weak: &slint::Weak<MainWindow>) {
     }
 }
 
+thread_local! {
+    /// A restart as admin is waiting on its UAC prompt (UI thread only).
+    static RESTART_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// How long an exit waits for pending settings writes (the file, the GPU marker) to land.
+const EXIT_FLUSH: Duration = Duration::from_secs(1);
+
 /// Every quit goes through here. The window mark is removed first, so a launch made while this
 /// instance shuts down never hands its activation to a dying window: it finds no window, waits
-/// for the lock and starts fresh.
-fn begin_exit(controls: &Controls, weak: &slint::Weak<MainWindow>) {
+/// for the lock and starts fresh. Pending settings writes land first (bounded), so the next
+/// instance (a restart as admin) reads the new state.
+fn begin_exit(controls: &Controls, weak: &slint::Weak<MainWindow>, saver: &settings::Saver) {
     if let Some(hwnd) = weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)) {
         platform::unmark_main_window(hwnd);
     }
     controls.request_stop();
+    if !saver.flush(EXIT_FLUSH) {
+        warn("settings writes were still running at exit; they may not have landed");
+    }
     let _ = slint::quit_event_loop();
 }
 
-fn make_tray(controls: &Arc<Controls>, weak: &slint::Weak<MainWindow>) -> Result<NegotiumTray, slint::PlatformError> {
+fn make_tray(
+    controls: &Arc<Controls>,
+    weak: &slint::Weak<MainWindow>,
+    saver: &settings::Saver,
+) -> Result<NegotiumTray, slint::PlatformError> {
     let tray = NegotiumTray::new()?;
     {
         let (controls, weak) = (controls.clone(), weak.clone());
         tray.on_open(move || show_main(&controls, &weak));
     }
     {
-        let (controls, weak) = (controls.clone(), weak.clone());
-        tray.on_exit(move || begin_exit(&controls, &weak));
+        let (controls, weak, saver) = (controls.clone(), weak.clone(), saver.clone());
+        tray.on_exit(move || begin_exit(&controls, &weak, &saver));
     }
     tray.show()?;
     Ok(tray)
@@ -151,9 +167,11 @@ fn main() -> Result<(), slint::PlatformError> {
     negotium::settingspage::apply_settings(&ui, &initial);
     let controls = Arc::new(Controls::default());
     controls.set_refresh_ms(initial.refresh_ms);
+    // Shared with every exit path, which waits for its writes (`begin_exit`).
+    let saver = settings::Saver::new(settings_path);
     negotium::settingspage::SettingsWiring {
         settings: settings.clone(),
-        saver: settings::Saver::new(settings_path),
+        saver: saver.clone(),
         controls: controls.clone(),
         gpu_marker: renderer::fallback_path(),
         fallback_recorded,
@@ -203,16 +221,19 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = weak.clone();
         move || {
             if weak.upgrade().is_some_and(|ui| negotium::startup::begin_list(&ui)) {
-                negotium::startup::spawn_job(weak.clone(), elevated, || {
-                    negotium::startup::list_job(&negotium_actions::startup::StartupRoots::system())
-                });
+                negotium::startup::spawn_job(
+                    weak.clone(),
+                    elevated,
+                    || negotium::startup::list_job(&negotium_actions::startup::StartupRoots::system()),
+                    || {},
+                );
             }
         }
     };
-    {
+    // Every page change: a rail click, and the page a restart comes back on.
+    let show_page = {
         let (weak, b, load_startup) = (weak.clone(), bridge.clone(), load_startup.clone());
-        ui.on_select_page(move |i| {
-            let page = negotium::controls::Page::from_index(i);
+        move |page: negotium::controls::Page| {
             if let Some(ui) = weak.upgrade() {
                 b.borrow_mut().set_page(&ui, page);
             }
@@ -220,19 +241,34 @@ fn main() -> Result<(), slint::PlatformError> {
             if page == negotium::controls::Page::Startup {
                 load_startup();
             }
-        });
-    }
-    ui.on_refresh_startup(load_startup);
+        }
+    };
     {
-        let (b, weak) = (bridge.clone(), weak.clone());
+        let show_page = show_page.clone();
+        ui.on_select_page(move |i| show_page(negotium::controls::Page::from_index(i)));
+    }
+    // A restart (as admin) comes back on the page it left (spec §6); anything else opens on the
+    // Overview.
+    if let Some(page) = negotium::controls::page_from_args(std::env::args()) {
+        show_page(page);
+    }
+    ui.on_refresh_startup(load_startup.clone());
+    {
+        let (b, weak, load_startup) = (bridge.clone(), weak.clone(), load_startup.clone());
         ui.on_toggle_startup(move |id, on| {
             let Some(ui) = weak.upgrade() else { return };
             // Refused while a list or toggle runs (PF4); the switch then keeps the listed state.
             let Some(entry) = negotium::startup::begin_toggle(&b.borrow(), &ui, id, on) else { return };
-            negotium::startup::spawn_job(weak.clone(), elevated, move || {
-                let roots = negotium_actions::startup::StartupRoots::system();
-                negotium::startup::toggle_job(&roots, &entry, on, elevated)
-            });
+            negotium::startup::spawn_job(
+                weak.clone(),
+                elevated,
+                move || {
+                    let roots = negotium_actions::startup::StartupRoots::system();
+                    negotium::startup::toggle_job(&roots, &entry, on, elevated)
+                },
+                // A panicked toggle may have changed the entry: read the real state again.
+                load_startup.clone(),
+            );
         });
     }
     {
@@ -319,9 +355,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let exit_on_close = std::env::args_os().any(|a| a == "--exit-on-close");
     {
         let (controls, b, close_weak, settings) = (controls.clone(), bridge.clone(), weak.clone(), settings.clone());
+        let saver = saver.clone();
         ui.window().on_close_requested(move || {
             match settings::close_action(settings.borrow().keep_in_tray, exit_on_close) {
-                settings::CloseAction::Exit => begin_exit(&controls, &close_weak),
+                settings::CloseAction::Exit => begin_exit(&controls, &close_weak, &saver),
                 settings::CloseAction::HideToTray => {
                     controls.set_visible(false);
                     // A hidden window cannot report pointer-leave, so release the hover freeze here.
@@ -459,14 +496,26 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
-        let weak = weak.clone();
-        let controls = controls.clone();
+        let (weak, controls, saver) = (weak.clone(), controls.clone(), saver.clone());
         ui.on_restart_admin(move || {
-            if negotium_actions::restart_as_admin("--restarted").is_ok() {
-                begin_exit(&controls, &weak);
-            } else if let Some(ui) = weak.upgrade() {
-                ui.set_toast("Restart as admin was cancelled.".into());
+            if RESTART_PENDING.with(|p| p.replace(true)) {
+                return; // a UAC prompt is already up
             }
+            let args = negotium::controls::restart_args(controls.page());
+            let (weak, controls, saver) = (weak.clone(), controls.clone(), saver.clone());
+            // ShellExecuteEx returns only once the UAC prompt is answered: wait off the UI thread.
+            std::thread::spawn(move || {
+                let ok = negotium_actions::restart_as_admin(&args).is_ok();
+                // Fails only once the event loop is gone (already quitting): nothing left to do.
+                let _ = slint::invoke_from_event_loop(move || {
+                    RESTART_PENDING.with(|p| p.set(false));
+                    if ok {
+                        begin_exit(&controls, &weak, &saver);
+                    } else if let Some(ui) = weak.upgrade() {
+                        ui.set_toast("Restart as admin was cancelled.".into());
+                    }
+                });
+            });
         });
     }
 
@@ -493,17 +542,17 @@ fn main() -> Result<(), slint::PlatformError> {
                 platform::apply_window_chrome(&ui);
                 let hooked = {
                     let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
-                    let (tray_allowed, settings) = (tray_allowed.clone(), settings.clone());
+                    let (tray_allowed, settings, saver) = (tray_allowed.clone(), settings.clone(), saver.clone());
                     platform::install_window_hooks(hwnd, move |event| {
                         // The hook runs inside the window procedure: act from the event loop instead.
                         let (tray, controls, weak) = (tray.clone(), controls.clone(), weak.clone());
-                        let (tray_allowed, settings) = (tray_allowed.clone(), settings.clone());
+                        let (tray_allowed, settings, saver) = (tray_allowed.clone(), settings.clone(), saver.clone());
                         slint::Timer::single_shot(Duration::ZERO, move || match event {
                             // Explorer restarted (perhaps ended from this very list): add the icon again.
                             // Before the watchdog resolves, the first creation below adds it.
                             ShellEvent::TaskbarCreated if tray_allowed() => {
                                 drop(tray.borrow_mut().take());
-                                *tray.borrow_mut() = make_tray(&controls, &weak)
+                                *tray.borrow_mut() = make_tray(&controls, &weak, &saver)
                                     .map_err(|e| warn(&format!("tray icon could not be re-created: {e}")))
                                     .ok();
                             }
@@ -527,7 +576,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if !tray_allowed() {
                 return;
             }
-            *tray.borrow_mut() = make_tray(&controls, &weak)
+            *tray.borrow_mut() = make_tray(&controls, &weak, &saver)
                 .map_err(|e| warn(&format!("tray icon could not be created: {e}")))
                 .ok();
             if let Some(t) = handle.upgrade() {

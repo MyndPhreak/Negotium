@@ -19,7 +19,7 @@ pub fn backoff(restarts: u32) -> Duration {
     Duration::from_millis(ms.min(30_000))
 }
 
-fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
@@ -208,6 +208,22 @@ pub fn spawn(
         .expect("spawn worker thread")
 }
 
+/// Installs, once, a panic hook that hides panics expected by a test (message starting with
+/// "test panic:") and passes every other one to the hook installed before it. Never removed, so
+/// tests running in parallel can't drop each other's.
+#[cfg(test)]
+pub(crate) fn quiet_expected_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !panic_text(info.payload()).starts_with("test panic:") {
+                previous(info);
+            }
+        }));
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,23 +301,6 @@ mod tests {
         let reused: Vec<&i32> = a.targets.keys().filter(|id| b.targets.contains_key(id)).collect();
         assert!(reused.is_empty(), "ids from before the restart were handed out again: {reused:?}");
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// Panics whose message starts with this are expected by a test and not printed.
-    const EXPECTED: &str = "test panic:";
-
-    /// Installs, once, a hook that hides expected panics and passes every other one to the hook
-    /// installed before it. Never removed, so tests running in parallel can't drop each other's.
-    fn quiet_expected_panics() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            let previous = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                if !panic_text(info.payload()).starts_with(EXPECTED) {
-                    previous(info);
-                }
-            }));
-        });
     }
 
     fn one_sample() -> SharedHistory {

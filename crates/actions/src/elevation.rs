@@ -7,7 +7,7 @@ use windows::Win32::Security::{
     SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -64,13 +64,17 @@ pub fn enable_debug_privilege() -> Result<(), ActionError> {
 }
 
 /// Relaunches the current executable with the `runas` verb (UAC prompt). On `Ok` the caller
-/// should quit this instance.
+/// should quit this instance. Returns only once the prompt is answered, so call it off the UI
+/// thread; the calling thread gets a COM apartment for the call (ShellExecuteEx needs one).
 pub fn restart_as_admin(args: &str) -> Result<(), ActionError> {
+    let _com = crate::startup::ComApartment::enter();
     let exe = std::env::current_exe().map_err(|e| ActionError::Other(e.to_string()))?;
     let file = HSTRING::from(exe.as_os_str());
     let params = HSTRING::from(args);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        // The caller exits right after: the launch must complete inside this call.
+        fMask: SEE_MASK_NOASYNC,
         lpVerb: w!("runas"),
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: PCWSTR(params.as_ptr()),

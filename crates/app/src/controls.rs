@@ -33,6 +33,31 @@ impl Page {
     pub fn index(self) -> i32 {
         self as i32
     }
+
+    /// The page's name on the command line (`--page=<name>`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Page::Overview => "overview",
+            Page::Performance => "performance",
+            Page::Startup => "startup",
+            Page::Settings => "settings",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Page> {
+        Self::ALL.into_iter().find(|p| p.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// Arguments for the elevated instance (spec §6): wait for this one to exit, open on `page`. Only
+/// the page is carried; the Performance device and range and the search start fresh.
+pub fn restart_args(page: Page) -> String {
+    format!("--restarted --page={}", page.name())
+}
+
+/// The page asked for with `--page=<name>`, if any. An unknown name asks for none (the Overview).
+pub fn page_from_args<I: IntoIterator<Item = String>>(args: I) -> Option<Page> {
+    args.into_iter().find_map(|a| a.strip_prefix("--page=").and_then(Page::from_name))
 }
 
 pub struct Controls {
@@ -245,6 +270,24 @@ mod tests {
         assert_eq!(Page::from_index(3), Page::Settings);
         assert_eq!(Page::from_index(9), Page::Overview, "unknown pages fall back to the Overview");
         assert_eq!(Page::from_index(-2), Page::Overview);
+    }
+
+    #[test]
+    fn restart_arguments_carry_the_page() {
+        for page in Page::ALL {
+            assert_eq!(page_from_args(restart_args(page).split(' ').map(String::from)), Some(page));
+        }
+        assert_eq!(restart_args(Page::Startup), "--restarted --page=startup");
+        assert_eq!(page_from_args(["negotium.exe".to_string(), "--page=SETTINGS".to_string()]), Some(Page::Settings));
+        assert_eq!(page_from_args(["--page=nope".to_string()]), None);
+        assert_eq!(page_from_args(Vec::<String>::new()), None);
+        // Garbage falls back to the Overview (no page asked for); the device, range and search
+        // are never carried.
+        for junk in ["--page=", "--page", "page=startup", "--page=startup2", "--PAGE=startup", "--page= startup"] {
+            assert_eq!(page_from_args(["negotium.exe".to_string(), junk.to_string()]), None, "{junk}");
+        }
+        assert_eq!(Page::from_name("Performance"), Some(Page::Performance));
+        assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings"]);
     }
 
     #[test]
