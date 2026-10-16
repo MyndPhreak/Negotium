@@ -251,7 +251,13 @@ impl Bridge {
     pub fn set_page(&mut self, ui: &MainWindow, page: Page) {
         self.controls.set_page(page);
         if page != Page::Overview {
-            // The hidden list can't report pointer-leave: release the hover freeze here.
+            // The hidden list can't report pointer-leave: release the hover freeze here. Nor may it
+            // keep keyboard focus (a Narrator rail activation doesn't move focus): park it, so keys
+            // can't reach the hidden list, and drop its freeze now rather than on a later focus-out.
+            if self.list_focused || self.key_focus.is_some() {
+                ui.invoke_park_focus();
+            }
+            self.clear_key_focus();
             self.set_hover(false);
         }
         if page != Page::Performance {

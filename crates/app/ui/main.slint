@@ -109,6 +109,11 @@ export component MainWindow inherits Window {
         root.details-text = text;
         root.details-visible = true;
     }
+    // Leaving the Overview: the hidden list or row control gives up keyboard focus at once (Slint
+    // drops focus from a hidden item only on a later event-loop turn).
+    public function park-focus() {
+        parking.focus();
+    }
     parking := FocusScope {
         width: 0px;
         height: 0px;

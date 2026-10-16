@@ -655,6 +655,48 @@ fn leaving_the_overview_releases_the_hover_freeze() {
     assert_eq!((controls.page(), ui.get_page()), (Page::Overview, 0));
 }
 
+// A Narrator rail activation switches pages without moving keyboard focus: the hidden list (or a
+// row's button) must neither stay focused nor keep the list frozen.
+#[test]
+fn leaving_the_overview_drops_the_lists_keyboard_focus() {
+    use slint::platform::Key;
+    let (ui, controls, bridge, actions) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    assert!(tab_until(&ui, || controls.frozen()), "Tab reaches the list");
+    bridge.borrow_mut().set_page(&ui, Page::Performance);
+    assert!(!controls.frozen(), "the switch itself releases the list, not a later focus-out");
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen(), "the hidden list is not left frozen");
+    press_key(&ui, Key::Delete);
+    assert!(!controls.frozen(), "a key does not freeze it again");
+    assert!(actions.borrow().is_empty(), "keys no longer reach the hidden list: {:?}", actions.borrow());
+    bridge.borrow_mut().set_page(&ui, Page::Overview);
+    assert!(!controls.frozen());
+}
+
+#[test]
+fn leaving_the_overview_drops_a_row_buttons_keyboard_focus() {
+    use slint::platform::Key;
+    let (ui, controls, bridge, actions) = wired_list(vec![row_view(7, "Editor", HUNG), row_view(9, "Browser", "")]);
+    let log: FocusLog = Default::default();
+    let (b, l) = (bridge.clone(), log.clone());
+    ui.on_row_key_focus(move |id, focused| {
+        l.borrow_mut().push((id, focused));
+        negotium::bridge::row_focus(&b, id, focused);
+    });
+    assert!(tab_until(&ui, || log.borrow().last() == Some(&(7, true))), "Tab onto Editor's Force close");
+    assert!(controls.frozen());
+    bridge.borrow_mut().set_page(&ui, Page::Performance);
+    assert!(!controls.frozen(), "the switch itself releases the list, not a later focus-out");
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+    assert!(!controls.frozen(), "the hidden list is not left frozen");
+    press_key(&ui, Key::Space);
+    assert!(!controls.frozen(), "a key does not freeze it again");
+    assert!(actions.borrow().is_empty(), "Space no longer presses the hidden button: {:?}", actions.borrow());
+    assert_eq!(log.borrow().last(), Some(&(7, false)), "the button really loses focus");
+}
+
 #[test]
 fn an_open_modal_blocks_the_default_action_of_rail_and_tiles() {
     let ui = window();
