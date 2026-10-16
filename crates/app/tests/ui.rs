@@ -2260,7 +2260,7 @@ fn a_job_result_lands_through_the_bridge_with_its_failure_inline() {
     negotium::bridge::set_current(bridge.clone());
     ui.set_startup_loading(true);
     let outcome = |read_error, failure: Option<&str>| JobOutcome {
-        entries: Some(startup_entries()), read_error, failure: failure.map(Into::into),
+        entries: Some(startup_entries()), read_error, failure: failure.map(Into::into), panicked: false,
     };
     negotium::startup::deliver(&ui, outcome(false, Some("Couldn't change Zoom: access denied.")), false);
     assert_eq!(ui.get_startup_rows().row_count(), 1);
@@ -2285,7 +2285,7 @@ fn a_failed_job_restores_the_listed_state_and_frees_the_page() {
     bridge.borrow_mut().set_startup(&ui, startup_entries(), false);
     negotium::startup::begin_toggle(&bridge.borrow(), &ui, 0, false).expect("a toggle starts");
     assert!(!ui.get_startup_rows().row_data(0).unwrap().enabled);
-    let failed = JobOutcome { entries: None, read_error: false, failure: Some(negotium::startup::JOB_FAILED.into()) };
+    let failed = JobOutcome { entries: None, read_error: false, failure: Some(negotium::startup::JOB_FAILED.into()), panicked: true };
     negotium::startup::deliver(&ui, failed, false);
     assert!(!ui.get_startup_loading(), "the next job may start");
     let row = ui.get_startup_rows().row_data(0).unwrap();

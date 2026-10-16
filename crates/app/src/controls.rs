@@ -60,6 +60,12 @@ pub fn page_from_args<I: IntoIterator<Item = String>>(args: I) -> Option<Page> {
     args.into_iter().find_map(|a| a.strip_prefix("--page=").and_then(Page::from_name))
 }
 
+/// [`page_from_args`] for the process's own arguments: an argument that isn't valid Unicode can't
+/// be a `--page=` request, so it is skipped instead of panicking like `std::env::args` would.
+pub fn page_from_os_args<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Option<Page> {
+    page_from_args(args.into_iter().filter_map(|a| a.into_string().ok()))
+}
+
 pub struct Controls {
     metric: AtomicU8,
     page: AtomicU8,
@@ -281,6 +287,11 @@ mod tests {
         assert_eq!(page_from_args(["negotium.exe".to_string(), "--page=SETTINGS".to_string()]), Some(Page::Settings));
         assert_eq!(page_from_args(["--page=nope".to_string()]), None);
         assert_eq!(page_from_args(Vec::<String>::new()), None);
+        // A non-Unicode argument is skipped, not a panic, and doesn't hide a later --page=.
+        use std::os::windows::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_wide(&[0x61, 0xD800, 0x62]);
+        let args = [std::ffi::OsString::from("negotium.exe"), bad, std::ffi::OsString::from("--page=startup")];
+        assert_eq!(page_from_os_args(args), Some(Page::Startup));
         // Garbage falls back to the Overview (no page asked for); the device, range and search
         // are never carried.
         for junk in ["--page=", "--page", "page=startup", "--page=startup2", "--PAGE=startup", "--page= startup"] {

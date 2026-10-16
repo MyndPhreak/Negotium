@@ -113,6 +113,8 @@ pub struct JobOutcome {
     pub entries: Option<Vec<StartupEntry>>,
     pub read_error: bool,
     pub failure: Option<String>,
+    /// The job panicked (`entries` is `None` then); the page re-lists after a toggle's panic.
+    pub panicked: bool,
 }
 
 /// Shown when a job (a list or a toggle) panicked: the last listed state shows again, and the log
@@ -128,11 +130,11 @@ pub fn finish(result: std::thread::Result<JobResult>) -> JobOutcome {
             for e in &read_errors {
                 warn(&format!("startup list: {e}"));
             }
-            JobOutcome { entries: Some(entries), read_error: !read_errors.is_empty(), failure }
+            JobOutcome { entries: Some(entries), read_error: !read_errors.is_empty(), failure, panicked: false }
         }
         Err(panic) => {
             warn(&format!("startup job panicked: {}", crate::worker::panic_text(&*panic)));
-            JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.to_string()) }
+            JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.to_string()), panicked: true }
         }
     }
 }
@@ -160,7 +162,7 @@ pub fn spawn_job(
         // Fails only once the event loop is gone (the app is quitting): nothing left to show.
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                let panicked = outcome.entries.is_none();
+                let panicked = outcome.panicked;
                 deliver(&ui, outcome, elevated);
                 if panicked {
                     after_panic();
@@ -264,13 +266,13 @@ mod tests {
     fn only_read_errors_are_noted_and_a_panic_still_delivers() {
         let skipped = format!("{}Bad in HKCU Run: it isn't a command", negotium_actions::startup::SKIPPED);
         let ok = finish(Ok((vec![], vec![skipped.clone()], None)));
-        assert_eq!(ok, JobOutcome { entries: Some(vec![]), read_error: false, failure: None }, "a skipped value is no read error");
+        assert_eq!(ok, JobOutcome { entries: Some(vec![]), read_error: false, failure: None, panicked: false }, "a skipped value is no read error");
         let unread = finish(Ok((vec![], vec![skipped, "HKLM Run: access denied".into()], Some("x".into()))));
         assert!(unread.read_error);
         assert_eq!(unread.failure.as_deref(), Some("x"));
         crate::worker::quiet_expected_panics();
         let panicked = finish(std::panic::catch_unwind(|| -> JobResult { panic!("test panic: startup job") }));
-        assert_eq!(panicked, JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.into()) });
+        assert_eq!(panicked, JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.into()), panicked: true });
         assert!(!JOB_FAILED.contains("read"), "a toggle can panic too: the message mustn't say reading failed");
     }
 }

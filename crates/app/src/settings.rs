@@ -493,6 +493,15 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_run_closure_still_lets_flush_return() {
+        let saver = Saver::new(PathBuf::from("unused.json"));
+        crate::worker::quiet_expected_panics();
+        let h = saver.run(|| panic!("test panic: settings write"));
+        assert!(h.join().is_err(), "the closure did panic");
+        assert!(saver.flush(std::time::Duration::from_secs(5)), "the panicked write no longer counts");
+    }
+
+    #[test]
     fn a_flush_is_bounded() {
         let saver = Saver::new(std::env::temp_dir().join("negotium-unused-settings.json"));
         let (tx, rx) = std::sync::mpsc::channel::<()>();

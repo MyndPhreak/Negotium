@@ -1,7 +1,7 @@
 use crate::{ActionError, OwnedHandle};
 use std::ffi::c_void;
 use std::mem::size_of;
-use windows::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, LUID};
+use windows::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HWND, LUID};
 use windows::Win32::Security::{
     AdjustTokenPrivileges, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_DEBUG_NAME,
     SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
@@ -66,13 +66,16 @@ pub fn enable_debug_privilege() -> Result<(), ActionError> {
 /// Relaunches the current executable with the `runas` verb (UAC prompt). On `Ok` the caller
 /// should quit this instance. Returns only once the prompt is answered, so call it off the UI
 /// thread; the calling thread gets a COM apartment for the call (ShellExecuteEx needs one).
-pub fn restart_as_admin(args: &str) -> Result<(), ActionError> {
+/// `owner` is the main window's HWND as an integer (0: none), so the UAC prompt can come to the
+/// front instead of flashing in the taskbar.
+pub fn restart_as_admin(args: &str, owner: isize) -> Result<(), ActionError> {
     let _com = crate::startup::ComApartment::enter();
     let exe = std::env::current_exe().map_err(|e| ActionError::Other(e.to_string()))?;
     let file = HSTRING::from(exe.as_os_str());
     let params = HSTRING::from(args);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        hwnd: HWND(owner as *mut c_void),
         // The caller exits right after: the launch must complete inside this call.
         fMask: SEE_MASK_NOASYNC,
         lpVerb: w!("runas"),

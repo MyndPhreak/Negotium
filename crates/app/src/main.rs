@@ -41,6 +41,9 @@ fn begin_exit(controls: &Controls, weak: &slint::Weak<MainWindow>, saver: &setti
     if let Some(hwnd) = weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)) {
         platform::unmark_main_window(hwnd);
     }
+    if RESTART_PENDING.with(|p| p.get()) {
+        warn("exiting while the UAC prompt for 'Restart as admin' is open; an approved elevated instance may still start");
+    }
     controls.request_stop();
     if !saver.flush(EXIT_FLUSH) {
         warn("settings writes were still running at exit; they may not have landed");
@@ -249,7 +252,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // A restart (as admin) comes back on the page it left (spec §6); anything else opens on the
     // Overview.
-    if let Some(page) = negotium::controls::page_from_args(std::env::args()) {
+    if let Some(page) = negotium::controls::page_from_os_args(std::env::args_os()) {
         show_page(page);
     }
     ui.on_refresh_startup(load_startup.clone());
@@ -503,9 +506,15 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let args = negotium::controls::restart_args(controls.page());
             let (weak, controls, saver) = (weak.clone(), controls.clone(), saver.clone());
+            // The UAC prompt's owner, so it comes to the front instead of flashing in the taskbar.
+            let owner = weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
             // ShellExecuteEx returns only once the UAC prompt is answered: wait off the UI thread.
+            // If the user exits Negotium (tray, Alt+F4 with the tray off) while the prompt is open,
+            // `begin_exit` still runs and the process ends, yet the prompt belongs to ShellExecute's
+            // own thread: an approval may still start the elevated instance, which waits for the
+            // single-instance lock (`--restarted`) and then runs. `begin_exit` logs that case.
             std::thread::spawn(move || {
-                let ok = negotium_actions::restart_as_admin(&args).is_ok();
+                let ok = negotium_actions::restart_as_admin(&args, owner).is_ok();
                 // Fails only once the event loop is gone (already quitting): nothing left to do.
                 let _ = slint::invoke_from_event_loop(move || {
                     RESTART_PENDING.with(|p| p.set(false));
