@@ -88,6 +88,93 @@ Run both from an elevated terminal (close both apps first):
 
 Negotium renders with winit + FemtoVG (OpenGL) by default (see "Renderer" below). FemtoVG has a rendering notifier, so a default run reports frame stats without setting `SLINT_BACKEND`. The software renderer has no notifier. It is in use when forced with `SLINT_BACKEND=winit-software` or after a recorded fallback, and then the stats file reports 0 frames, the bench prints the stats as they are, and the app logs "frame stats unavailable". The bench still reports UI responsiveness through WM_NULL. Before a run, check that `%LOCALAPPDATA%\Negotium\renderer-fallback` does not exist, or set `SLINT_BACKEND=winit-femtovg` to be sure of the GPU renderer.
 
+## Plan 3c: smooth graphs, tray CPU icon and memory
+
+Measured with `negotium-bench` (release, elevated terminal, no other Negotium running), 1000 × 720
+window, idle desktop, `--runs 1 --sample-secs 60` after the 5 s warm-up; each run starts Negotium
+with its own LOCALAPPDATA and settings file (`NEGOTIUM_SETTINGS`), so the user's settings are never
+read or changed. CPU is the share of one core (`cpu_one_core_pct`, mean of 59 one-second deltas;
+single samples are tick-granular), GPU the busiest engine attributed to the process (`gpu_pct`),
+frames and render time from `frame_stats` (GPU renderer only). Files: `docs/benchmarks/3c-*.json`.
+
+The first measurement showed far more cost than the graphs should add, and the investigation found
+two bugs, fixed by the R9 wave before the four visible GPU runs were repeated:
+
+- The Overview app list's Fluent scrollbar thumb runs a 150 ms height animation that restarts on
+  every row-count change; on a 240 Hz display that was about 30 extra frames per change, so the
+  Overview drew about 28 frames a second even with smooth graphs off. The Performance details view
+  had the same animation. Both now use a thin, unanimated `ScrollIndicator`.
+- `animation-tick()` in the graph timer and in `scroll-from` set Slint's active-animation flag, so
+  every timer tick drew one extra identical frame (the frame count doubled). `GraphClock` now takes
+  its clock from Rust.
+- Whole-pixel redraw steps (`smooth::redraw_hz` factor 2 → 1, ruling P3c-3 step 1) were applied too.
+
+| Renderer | Page | Smooth graphs | CPU % of one core, mean (max) | GPU %, mean | Frames / render ms mean | Before R9: CPU % mean / frames |
+|---|---|---|---|---|---|---|
+| GPU | Overview | off | 3.13 (10.7) | 0.05 | 119 / 5.02 | 16.19 / 1693 |
+| GPU | Overview | on | 3.74 (7.7) | 0.17 | 455 / 1.97 | 12.96 / 2223 |
+| GPU | Performance (1 min, 32 cells) | off | 3.16 (7.6) | 0.23 | 132 / 2.24 | 2.75 / 231 |
+| GPU | Performance (1 min, 32 cells) | on | 9.71 (18.4) | 2.51 | 1542 / 1.37 | 16.09 / 3061 |
+| Software | Overview | off | 2.33 (6.1) | 0.00 | — | not re-run |
+| Software | Overview | on | 2.96 (7.7) | 0.00 | — | not re-run |
+
+The GPU rows are the post-R9 re-run. The software rows come from the first run, before R9, and were
+not repeated. Frames are counted over the whole run from app start. All runs report
+`renderer_used` as requested (no GPU-to-software fallback).
+
+Software renderer, one scroll step at 1920 × 1080 × 1.5 (`scroll_step_cost_under_the_software_renderer`,
+release, partial repaint): before R9 Overview median 0.59 ms (p95 1.08), Performance with 32 cells
+9.72 ms (p95 12.77); after R9 (whole-pixel steps) Overview 0.54 ms (p95 1.10), Performance with 32
+cells 9.10 ms (p95 10.86). Full repaint (`performance_page_resize_frames_fit_in_16_ms`): smooth data
+median 10.15 ms (uniform noise, the worst case, 33.15 ms). Slint re-parses every data Path on each
+render, so the 32-cell Performance page is the costly case: one scroll step costs about a full repaint.
+
+Budget (ruling P3c-3): smooth graphs may add at most 0.5 % of one core on the Overview and 1.5 % on
+the Performance page. Result after R9: Δ = +0.61 on the Overview and Δ = +6.55 on Performance, so
+**over budget**. Step 1 (whole-pixel steps) was applied; step 2 (a 33 ms floor) was not, because the
+investigation showed it has no effect at this window size. Decision (user, ruling R10): the cost is
+accepted as it is and Smooth graphs stays on by default everywhere. The Performance figure is about
+0.3 % of the machine's total CPU while that page is visible; nothing scrolls while hidden or
+minimised. Follow-up: cheaper redraws of the core cells (for example, render the cells only when a
+sample arrives).
+
+### Hidden in the tray
+
+`--hidden` closes the window to the tray and measures the hidden process (no frames), 2 s worker
+tick, one-core CPU, mean over 60 s (these runs predate R9, which changes nothing for a hidden window):
+
+| Tray CPU graph | Page before hiding | CPU % of one core, mean (max) | Private MB |
+|---|---|---|---|
+| off | Overview | 0.93 (3.1) | 64.0 |
+| on | Overview | 1.27 (4.6) | 65.7 |
+| on | Performance | 1.12 (3.1) | 77.5 |
+
+Spec §8 asks for ≤ 0.2 % of one core in the tray. That is **not met**, and not because of Plan 3c:
+the collector alone (graph off) costs about 0.9 % hidden at the 2 s tick, already over the target
+before 3c. The tray graph adds about 0.3 %. Follow-up: a slower or lighter collection while hidden.
+
+### Memory, idle on the Overview
+
+| Renderer | Working set MB | Private working set MB | Image / mapped / private resident MB |
+|---|---|---|---|
+| GPU | 126.1 | 70.6 (68.1 sampled mean) | 55.6 / 4.7 / 66.2 |
+| Software | 45.3 | 19.0 (18.6 sampled mean) | 24.7 / 3.1 / 17.5 |
+
+Largest sources (from `memory.top`, GPU run): private heaps, stacks and driver allocations 66.2 MB
+resident (66.2 private); `nvwgf2umx.dll` 7.6 MB resident (0.6 private, the NVIDIA D3D user-mode
+driver); `nvoglv64.dll` 7.0 (0.9, the NVIDIA OpenGL driver); `negotium.exe` 5.8 (0.0, the image);
+`nvgpucomp64.dll` 5.7 (1.0, the GPU shader compiler); unnamed mapped 2.7 (0.0).
+Against spec §8's 60 MB private working set: the GPU renderer is over (about 65–80 MB depending on
+the page, 81 MB on Performance) and the software renderer is far under (about 19 MB). Nearly all of
+the GPU renderer's extra is private memory that the GPU driver stack and OpenGL context allocate, not
+Negotium's own code or images. Cheap win applied: none. Follow-ups: restate the 60 MB target per
+renderer, or find what the GL context (FemtoVG atlases, glyph caches) allocates and can lower.
+
+### Graph edge note
+
+The 1 h graph may fall short of its left edge by up to one 12 s column: history keeps exactly one
+hour of one-second samples and does not grow (PF9).
+
 ## Renderer: launch → window, FemtoVG vs software
 
 During development the default winit + FemtoVG (OpenGL) renderer sometimes took from 30 s to more than 5 minutes to show the window, leaving processes behind; it reproduced on the baseline build. A/B measurement: release build, time from launch until the main window is visible (winit's "Winit Thread Event Target" helper window ignored), 90 s cap per launch, every negotium.exe stopped before each launch, configurations interleaved. Times in ms.
@@ -183,3 +270,15 @@ The top lists dominate. A typical machine (16 logical processors, 2 disks, 2 ada
 12. The UAC prompt for "Restart as admin" appears in front, not as a flashing taskbar button.
 13. Theme change: the title bar repaints at once.
 14. Tab through Settings at a small window: each focused row scrolls into view.
+
+## Manual checks: Plan 3c
+
+1. 0.5 s refresh, Performance → CPU, 1 min: the line touches both graph edges on every update, with smoothing on and off; the same on the Overview sparklines.
+2. Smooth graphs on: graphs, cells and sparklines glide; the newest point eases in from the right; nothing jumps when switching 1 s ↔ 5 s or device or range.
+3. Hovering a graph with a still pointer while it scrolls: the card's time moves on with the line beneath the cursor.
+4. Minimise, or close to the tray: Negotium's CPU in Task Manager drops back to its static level (no scrolling while unseen); restoring resumes smoothly.
+5. Settings → Smooth graphs off: graphs step once per refresh; the setting survives a restart.
+6. Tray: the CPU graph appears in the tray at 100 %, 150 % and 200 % scaling, sharp at each; readable on a light and a dark taskbar and after switching the Windows mode while running; hovering shows "CPU n% · Negotium"; it keeps updating every 2 s while the window is closed to the tray.
+7. Settings → Show CPU in tray icon off: the app icon returns at once; on again: the graph returns within a second or two. Survives a restart.
+8. Restart Explorer (Task Manager → Windows Explorer → Restart) with the CPU icon on: the icon comes back as a graph.
+9. The app list and the Performance details show a thin scroll indicator only while the content overflows; it follows the wheel and can be dragged.
