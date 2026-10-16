@@ -2,6 +2,7 @@ import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
 import { DataPath, Graph, GraphData, ScrubRow } from "graph.slint";
+import { ScrollIndicator } from "scrollindicator.slint";
 
 export struct DeviceData { id: string, title: string, value: string, spark: string }
 export struct StatData { label: string, value: string }
@@ -111,132 +112,147 @@ export component PerformancePage inherits HorizontalLayout {
     }
     // The detail area fills the height: spare height goes to the main graphs only (everything
     // else has vertical-stretch 0); taller than the view, it scrolls.
-    sv := ScrollView {
-        // Content width: the view less a gutter the scrollbar always gets. Not visible-width, so
-        // no width (and so no column count) depends on whether the scrollbar shows, which itself
-        // depends on the content height those columns produce.
-        property <length> content-w: max(0px, self.width - 14px);
+    // The detail scrolls under a ScrollIndicator, not the Fluent scrollbar: that thumb animated
+    // for 150 ms after every frame (ScrollIndicator says why).
+    Rectangle {
         horizontal-stretch: 1;
-        content-width: self.content-w;
-        content-height: max(self.visible-height, detail.min-height);
-        detail := VerticalLayout {
-            width: sv.content-w;
-            height: sv.content-height;
-            max-width: 16384px; // see MetersRow: repeaters must not cap the window width
-            padding-bottom: root.bottom-inset;
-            spacing: 10px;
-            HorizontalLayout {
-                vertical-stretch: 0;
-                spacing: 12px;
-                Text { text: root.title; color: Theme.text; font-size: 24px; font-weight: 600; }
-                Text { text: root.subtitle; color: Theme.muted; font-size: 13px; vertical-alignment: bottom; overflow: elide; horizontal-stretch: 1; }
-            }
-            HorizontalLayout {
-                vertical-stretch: 0;
-                spacing: 6px;
-                alignment: start;
-                RangeButton { label: "1 min"; selected: root.range == 0; interactive: root.interactive; activated => { root.select-range(0); } }
-                RangeButton { label: "10 min"; selected: root.range == 1; interactive: root.interactive; activated => { root.select-range(1); } }
-                RangeButton { label: "1 h"; selected: root.range == 2; interactive: root.interactive; activated => { root.select-range(2); } }
-            }
-            for g in root.graphs : VerticalLayout {
-                vertical-stretch: 1;
-                spacing: 2px;
+        sv := ScrollView {
+            width: parent.width;
+            height: parent.height;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            // Content width: the view less a gutter the scroll indicator always gets. Not visible-width, so
+            // no width (and so no column count) depends on whether the indicator shows, which itself
+            // depends on the content height those columns produce.
+            property <length> content-w: max(0px, self.width - 14px);
+            content-width: self.content-w;
+            content-height: max(self.visible-height, detail.min-height);
+            detail := VerticalLayout {
+                width: sv.content-w;
+                height: sv.content-height;
+                max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+                padding-bottom: root.bottom-inset;
+                spacing: 10px;
                 HorizontalLayout {
                     vertical-stretch: 0;
-                    Text { text: g.label; color: Theme.muted; font-size: 12px; horizontal-stretch: 1; }
-                    Text { text: g.scale; color: Theme.muted; font-size: 11px; }
-                }
-                Graph {
-                    min-height: 180px;
-                    vertical-stretch: 1;
-                    data: g;
-                    span-ms: root.span-ms;
-                    // Not under an open modal.
-                    scrubbable: root.interactive;
-                    scrub-x: root.scrub-x;
-                    scrub-title: root.scrub-title;
-                    scrub-empty: root.scrub-empty;
-                    scrub-rows: root.scrub-rows;
-                    scrub(f) => { root.scrub(f); }
-                }
-                Text { text: g.value; color: Theme.text; font-size: 14px; font-weight: 600; vertical-stretch: 0; }
-            }
-            if root.segments.length > 0 : VerticalLayout {
-                vertical-stretch: 0;
-                spacing: 6px;
-                Text { text: "Memory composition"; color: Theme.muted; font-size: 12px; }
-                HorizontalLayout {
-                    height: 22px;
-                    spacing: 2px;
-                    max-width: 16384px;
-                    for s[i] in root.segments : Rectangle {
-                        horizontal-stretch: max(s.fraction, 0.0001);
-                        min-width: 2px;
-                        border-radius: 2px;
-                        background: Theme.accent.with-alpha(root.segment-alpha(i));
-                        accessible-role: text;
-                        accessible-label: s.label + " " + s.value;
-                    }
+                    spacing: 12px;
+                    Text { text: root.title; color: Theme.text; font-size: 24px; font-weight: 600; }
+                    Text { text: root.subtitle; color: Theme.muted; font-size: 13px; vertical-alignment: bottom; overflow: elide; horizontal-stretch: 1; }
                 }
                 HorizontalLayout {
-                    spacing: 14px;
+                    vertical-stretch: 0;
+                    spacing: 6px;
                     alignment: start;
-                    max-width: 16384px;
-                    for s[i] in root.segments : HorizontalLayout {
-                        spacing: 4px;
-                        Rectangle {
-                            width: 10px;
+                    RangeButton { label: "1 min"; selected: root.range == 0; interactive: root.interactive; activated => { root.select-range(0); } }
+                    RangeButton { label: "10 min"; selected: root.range == 1; interactive: root.interactive; activated => { root.select-range(1); } }
+                    RangeButton { label: "1 h"; selected: root.range == 2; interactive: root.interactive; activated => { root.select-range(2); } }
+                }
+                for g in root.graphs : VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 2px;
+                    HorizontalLayout {
+                        vertical-stretch: 0;
+                        Text { text: g.label; color: Theme.muted; font-size: 12px; horizontal-stretch: 1; }
+                        Text { text: g.scale; color: Theme.muted; font-size: 11px; }
+                    }
+                    Graph {
+                        min-height: 180px;
+                        vertical-stretch: 1;
+                        data: g;
+                        span-ms: root.span-ms;
+                        // Not under an open modal.
+                        scrubbable: root.interactive;
+                        scrub-x: root.scrub-x;
+                        scrub-title: root.scrub-title;
+                        scrub-empty: root.scrub-empty;
+                        scrub-rows: root.scrub-rows;
+                        scrub(f) => { root.scrub(f); }
+                    }
+                    Text { text: g.value; color: Theme.text; font-size: 14px; font-weight: 600; vertical-stretch: 0; }
+                }
+                if root.segments.length > 0 : VerticalLayout {
+                    vertical-stretch: 0;
+                    spacing: 6px;
+                    Text { text: "Memory composition"; color: Theme.muted; font-size: 12px; }
+                    HorizontalLayout {
+                        height: 22px;
+                        spacing: 2px;
+                        max-width: 16384px;
+                        for s[i] in root.segments : Rectangle {
+                            horizontal-stretch: max(s.fraction, 0.0001);
+                            min-width: 2px;
                             border-radius: 2px;
                             background: Theme.accent.with-alpha(root.segment-alpha(i));
+                            accessible-role: text;
+                            accessible-label: s.label + " " + s.value;
                         }
-                        Text { text: s.label + " " + s.value; color: Theme.text; font-size: 11px; }
                     }
-                }
-            }
-            // Small multiples (per-core, per-engine), wrapped into as many columns as fit. Cell n
-            // always sits at grid position n, so processor n keeps its place.
-            cells-host := Rectangle {
-                property <int> cols: max(1, floor(sv.content-w / 120px));
-                property <length> cw: (sv.content-w - (self.cols - 1) * 6px) / self.cols;
-                vertical-stretch: 0;
-                height: ceil(root.cells.length / self.cols) * 70px;
-                for c[i] in root.cells : Rectangle {
-                    x: mod(i, cells-host.cols) * (cells-host.cw + 6px);
-                    y: floor(i / cells-host.cols) * 70px;
-                    width: cells-host.cw;
-                    height: 64px;
-                    accessible-role: text;
-                    accessible-label: c.label + " " + c.value;
-                    VerticalLayout {
-                        // The label gives way; the value (or the missing-data dash) never does.
-                        HorizontalLayout {
-                            spacing: 6px;
-                            Text { text: c.label; color: Theme.muted; font-size: 10px; overflow: elide; horizontal-stretch: 1; }
-                            Text { text: c.value; color: Theme.muted; font-size: 10px; horizontal-alignment: right; horizontal-stretch: 0; min-width: self.preferred-width; }
+                    HorizontalLayout {
+                        spacing: 14px;
+                        alignment: start;
+                        max-width: 16384px;
+                        for s[i] in root.segments : HorizontalLayout {
+                            spacing: 4px;
+                            Rectangle {
+                                width: 10px;
+                                border-radius: 2px;
+                                background: Theme.accent.with-alpha(root.segment-alpha(i));
+                            }
+                            Text { text: s.label + " " + s.value; color: Theme.text; font-size: 11px; }
                         }
-                        Graph { data: c; filled: false; vertical-stretch: 1; span-ms: root.span-ms; }
                     }
                 }
-            }
-            stats-host := Rectangle {
-                property <int> cols: max(1, floor(sv.content-w / 180px));
-                vertical-stretch: 0;
-                height: ceil(root.stats.length / self.cols) * 44px;
-                for s[i] in root.stats : Rectangle {
-                    x: mod(i, stats-host.cols) * 180px;
-                    y: floor(i / stats-host.cols) * 44px;
-                    width: 172px;
-                    height: 40px;
-                    accessible-role: text;
-                    accessible-label: s.label + " " + s.value;
-                    VerticalLayout {
-                        Text { text: s.label; color: Theme.muted; font-size: 11px; }
-                        Text { text: s.value; color: Theme.text; font-size: 14px; font-weight: 600; overflow: elide; }
+                // Small multiples (per-core, per-engine), wrapped into as many columns as fit. Cell n
+                // always sits at grid position n, so processor n keeps its place.
+                cells-host := Rectangle {
+                    property <int> cols: max(1, floor(sv.content-w / 120px));
+                    property <length> cw: (sv.content-w - (self.cols - 1) * 6px) / self.cols;
+                    vertical-stretch: 0;
+                    height: ceil(root.cells.length / self.cols) * 70px;
+                    for c[i] in root.cells : Rectangle {
+                        x: mod(i, cells-host.cols) * (cells-host.cw + 6px);
+                        y: floor(i / cells-host.cols) * 70px;
+                        width: cells-host.cw;
+                        height: 64px;
+                        accessible-role: text;
+                        accessible-label: c.label + " " + c.value;
+                        VerticalLayout {
+                            // The label gives way; the value (or the missing-data dash) never does.
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text { text: c.label; color: Theme.muted; font-size: 10px; overflow: elide; horizontal-stretch: 1; }
+                                Text { text: c.value; color: Theme.muted; font-size: 10px; horizontal-alignment: right; horizontal-stretch: 0; min-width: self.preferred-width; }
+                            }
+                            Graph { data: c; filled: false; vertical-stretch: 1; span-ms: root.span-ms; }
+                        }
                     }
                 }
+                stats-host := Rectangle {
+                    property <int> cols: max(1, floor(sv.content-w / 180px));
+                    vertical-stretch: 0;
+                    height: ceil(root.stats.length / self.cols) * 44px;
+                    for s[i] in root.stats : Rectangle {
+                        x: mod(i, stats-host.cols) * 180px;
+                        y: floor(i / stats-host.cols) * 44px;
+                        width: 172px;
+                        height: 40px;
+                        accessible-role: text;
+                        accessible-label: s.label + " " + s.value;
+                        VerticalLayout {
+                            Text { text: s.label; color: Theme.muted; font-size: 11px; }
+                            Text { text: s.value; color: Theme.text; font-size: 14px; font-weight: 600; overflow: elide; }
+                        }
+                    }
+                }
+                if root.note != "" : Text { text: root.note; color: Theme.muted; font-size: 11px; wrap: word-wrap; vertical-stretch: 0; }
             }
-            if root.note != "" : Text { text: root.note; color: Theme.muted; font-size: 11px; wrap: word-wrap; vertical-stretch: 0; }
+        }
+        if sv.content-height > sv.visible-height : ScrollIndicator {
+            x: sv.width - self.width;
+            height: sv.height;
+            interactive: root.interactive;
+            content-y <=> sv.content-y;
+            visible-height: sv.visible-height;
+            content-height: sv.content-height;
         }
     }
 }

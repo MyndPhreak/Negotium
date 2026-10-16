@@ -1341,6 +1341,40 @@ fn opening_a_tile_scrolls_its_app_into_view() {
     assert!(ui.get_list_scroll_y() < 0.0, "the list scrolled down to App35");
 }
 
+/// The app list's scroll indicator (fix wave R9: the Fluent scrollbar's animated thumb is off):
+/// there only while the rows overflow, it follows the wheel and can be dragged.
+#[test]
+fn the_app_lists_scroll_indicator_follows_the_wheel_and_drags_the_list() {
+    let thumb = |ui: &MainWindow| El::find_by_element_id(ui, "ScrollIndicator::thumb").next();
+    let rows = |n: i32| frame((1..=n).map(|i| row_view(i, &format!("App{i}"), "")).collect());
+    let (ui, _controls, bridge, _) = wired_list(rows(3).rows);
+    assert!(thumb(&ui).is_none(), "three rows fit: no indicator");
+    bridge.borrow_mut().apply(&ui, rows(60));
+    let list = rect_of(&El::find_by_element_id(&ui, "AppList::lv").next().expect("the list view"));
+    let t = thumb(&ui).expect("sixty rows overflow: an indicator");
+    let (top, size) = (t.absolute_position(), t.size());
+    assert!(size.width <= 4.0 && top.x + size.width >= list.0 + list.2 - 4.0, "thin, on the right edge: {top:?} {size:?} in {list:?}");
+    assert!(size.height >= 24.0 && size.height < list.3 / 2.0, "sized to the visible share: {size:?}");
+    let (x, y) = (list.0 + list.2 / 2.0, list.1 + list.3 / 2.0);
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(x, y), delta_x: 0.0, delta_y: -400.0 });
+    slint::platform::update_timers_and_animations();
+    assert!(ui.get_list_scroll_y() < -100.0, "the wheel still scrolls the list");
+    let moved = thumb(&ui).unwrap().absolute_position();
+    assert!(moved.y > top.y + 10.0, "the indicator follows: {} then {}", top.y, moved.y);
+    // Dragged to the bottom: the list shows its last rows.
+    let (tx, ty) = centre(&thumb(&ui).unwrap());
+    let button = slint::platform::PointerEventButton::Left;
+    ui.window().dispatch_event(WindowEvent::PointerPressed { position: LogicalPosition::new(tx, ty), button });
+    // A drag is many moves: the list's height estimate settles as its last rows are created.
+    for dy in [100.0, 199.0, 200.0] {
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(tx, list.1 + list.3 + dy) });
+    }
+    ui.window().dispatch_event(WindowEvent::PointerReleased { position: LogicalPosition::new(tx, list.1 + list.3 + 200.0), button });
+    let bottom = rect_of(&thumb(&ui).unwrap());
+    assert!((bottom.1 + bottom.3 - (list.1 + list.3)).abs() <= 3.0, "the indicator at the bottom: {bottom:?} in {list:?}");
+    assert!(text(&ui, "App60").is_some_and(|e| rect_of(&e).1 < list.1 + list.3), "the last row is in view");
+}
+
 // Ruling PF1: frames only sync the current row; they never scroll the list.
 #[test]
 fn a_wheel_scrolled_focused_list_is_not_pulled_back_by_frames() {

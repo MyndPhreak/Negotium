@@ -1,5 +1,6 @@
 import { ListView, LineEdit, Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { ScrollIndicator } from "scrollindicator.slint";
 
 export struct RowData {
     id: int, depth: int, name: string, count: string,
@@ -168,6 +169,7 @@ export component AppList inherits VerticalLayout {
                 enabled: root.interactive;
                 changed has-hover => { root.hover(self.has-hover); }
                 lv := ListView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     for r[i] in root.rows : Rectangle {
                         height: root.row-height;
                         background: r.hung != "" ? Theme.danger-bg : (row-touch.has-hover ? Theme.card : transparent);
@@ -293,6 +295,15 @@ export component AppList inherits VerticalLayout {
                             }
                         }
                     }
+                }
+                // In place of the Fluent scrollbar (ScrollIndicator says why).
+                if lv.content-height > lv.visible-height : ScrollIndicator {
+                    x: lv.width - self.width;
+                    height: lv.height;
+                    interactive: root.interactive;
+                    content-y <=> lv.content-y;
+                    visible-height: lv.visible-height;
+                    content-height: lv.content-height;
                 }
             }
         }

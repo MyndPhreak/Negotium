@@ -1,0 +1,41 @@
+import { Theme } from "theme.slint";
+
+// Where a scrolled view is: a thin bar in place of the Fluent scrollbar, whose thumb animates its
+// size for 150 ms (a repaint every display frame) whenever anything its size depends on is
+// re-evaluated, even to the same value: on the app list each change in the row count, on the
+// Performance page each frame. Not animated. The owner turns the view's own scrollbar off, lays
+// this over the view's right edge (as tall as the view) only while the content overflows, and
+// binds `content-y` both ways. The wheel and the keys scroll the view itself; the bar can also
+// be dragged.
+export component ScrollIndicator inherits Rectangle {
+    in-out property <length> content-y;
+    in property <length> visible-height;
+    in property <length> content-height;
+    in property <bool> interactive: true;
+    property <length> overflow: max(0px, root.content-height - root.visible-height);
+    property <length> track: root.height - 4px;
+    width: 10px;
+
+    drag := TouchArea {
+        enabled: root.interactive;
+        property <length> grab-content-y;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                self.grab-content-y = root.content-y;
+            }
+        }
+        moved => {
+            if (self.pressed && root.track > thumb.height) {
+                root.content-y = clamp(self.grab-content-y - (self.mouse-y - self.pressed-y) * root.overflow / (root.track - thumb.height), -root.overflow, 0px);
+            }
+        }
+    }
+    thumb := Rectangle {
+        width: 4px;
+        height: min(root.track, max(24px, root.track * root.visible-height / max(1px, root.content-height)));
+        x: parent.width - self.width - 2px;
+        y: 2px + (root.track - self.height) * clamp(-root.content-y / max(1px, root.overflow), 0, 1);
+        border-radius: 2px;
+        background: drag.pressed || drag.has-hover ? Theme.muted : Theme.muted.with-alpha(0.45);
+    }
+}

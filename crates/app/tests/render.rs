@@ -487,3 +487,112 @@ fn scroll_step_cost_under_the_software_renderer() {
         println!("{name}: scroll step, partial repaint: median {:.2} ms, p95 {:.2} ms", frames[frames.len() / 2], frames[frames.len() * 95 / 100]);
     }
 }
+
+/// A software window on a clock the test moves (4 ms a step: a 250 Hz display), for counting the
+/// frames a change costs. Each test thread installs its own.
+mod frame_count {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType};
+    use slint::platform::{Platform, WindowAdapter};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    thread_local! { static NOW_MS: Cell<u64> = const { Cell::new(0) }; }
+
+    struct Mocked(Rc<MinimalSoftwareWindow>);
+    impl Platform for Mocked {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+        fn duration_since_start(&self) -> Duration {
+            Duration::from_millis(NOW_MS.with(Cell::get))
+        }
+    }
+
+    pub struct Frames {
+        window: Rc<MinimalSoftwareWindow>,
+        buffer: Vec<PremultipliedRgbaColor>,
+        width: usize,
+    }
+
+    impl Frames {
+        /// Installs the platform; create the window (`MainWindow::new`) after this.
+        pub fn install(width: u32, height: u32) -> Frames {
+            let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+            slint::platform::set_platform(Box::new(Mocked(window.clone()))).expect("one backend per test thread");
+            Frames { window, buffer: vec![PremultipliedRgbaColor::default(); (width * height) as usize], width: width as usize }
+        }
+
+        /// Moves the clock `steps` times by 4 ms, drawing whatever is due; returns the frames drawn.
+        pub fn run(&mut self, steps: u32) -> u32 {
+            let mut drawn = 0;
+            for _ in 0..steps {
+                NOW_MS.with(|t| t.set(t.get() + 4));
+                slint::platform::update_timers_and_animations();
+                let (buffer, width) = (&mut self.buffer, self.width);
+                if self.window.draw_if_needed(|r| {
+                    r.render(buffer, width);
+                }) {
+                    drawn += 1;
+                }
+            }
+            drawn
+        }
+    }
+}
+
+fn app_row(id: i32, cpu: &str) -> negotium::RowData {
+    negotium::RowData { id, name: format!("App {id}").into(), cpu: cpu.into(), actionable: true, ..Default::default() }
+}
+
+/// A frame that adds a row and changes a visible one costs one redraw, not an animation: the
+/// Fluent scrollbar's thumb animated every change in the row count (150 ms, about 36 frames at
+/// 240 Hz on the GPU renderer).
+#[test]
+fn a_row_change_in_the_app_list_draws_once_not_an_animation() {
+    let mut frames = frame_count::Frames::install(1000, 720);
+    let ui = MainWindow::new().unwrap();
+    let rows = std::rc::Rc::new(VecModel::from((0..140).map(|i| app_row(i, "1.0%")).collect::<Vec<_>>()));
+    ui.set_rows(ModelRc::from(rows.clone()));
+    ui.show().unwrap();
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    frames.run(100); // first paint, and anything that settles after it
+    rows.push(app_row(140, "1.0%"));
+    slint::Model::set_row_data(&*rows, 3, app_row(3, "9.0%"));
+    let drawn = frames.run(100); // 400 ms
+    assert!(drawn <= 2, "{drawn} frames for one row change");
+}
+
+/// The Performance page's ScrollViews keep the Fluent scrollbar: a frame changes their values,
+/// never their content height while the page is idle, so its thumb has nothing to animate. A
+/// frame costs one redraw.
+#[test]
+fn a_performance_frame_draws_once() {
+    use negotium::{DeviceData, StatData};
+    let mut frames = frame_count::Frames::install(1000, 720);
+    let ui = MainWindow::new().unwrap();
+    ui.global::<negotium::GraphClock>().set_smooth(false);
+    ui.set_page(1);
+    let devices = |v: &str| -> Vec<DeviceData> {
+        (0..6).map(|i| DeviceData { id: format!("d{i}").into(), title: "Disk".into(), value: v.into(), spark: "M 0 50 L 1000 40".into() }).collect()
+    };
+    let stats = |v: &str| -> Vec<StatData> { (0..12).map(|_| StatData { label: "Speed".into(), value: v.into() }).collect() };
+    let cells = |seed: u32| -> Vec<GraphData> { (0..16).map(|i| busy_graph(&format!("CPU {i}"), 60, i + seed, Load::Smooth)).collect() };
+    let (d, s) = (std::rc::Rc::new(VecModel::from(devices("1%"))), std::rc::Rc::new(VecModel::from(stats("3.4 GHz"))));
+    let (g, c) = (std::rc::Rc::new(VecModel::from(vec![busy_graph("% Utilization", 60, 1, Load::Smooth)])), std::rc::Rc::new(VecModel::from(cells(7))));
+    ui.set_perf_devices(ModelRc::from(d.clone()));
+    ui.set_perf_stats(ModelRc::from(s.clone()));
+    ui.set_perf_graphs(ModelRc::from(g.clone()));
+    ui.set_perf_cells(ModelRc::from(c.clone()));
+    ui.show().unwrap();
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    frames.run(100);
+    // The next second's frame, as crate::bridge::sync_model applies it: values change in place.
+    use slint::Model;
+    for (i, v) in devices("2%").into_iter().enumerate() { d.set_row_data(i, v); }
+    for (i, v) in stats("3.5 GHz").into_iter().enumerate() { s.set_row_data(i, v); }
+    for (i, v) in cells(9).into_iter().enumerate() { c.set_row_data(i, v); }
+    g.set_row_data(0, busy_graph("% Utilization", 60, 2, Load::Smooth));
+    let drawn = frames.run(100);
+    assert!(drawn <= 2, "{drawn} frames for one Performance frame");
+}
