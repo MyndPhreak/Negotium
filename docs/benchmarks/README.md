@@ -123,6 +123,24 @@ Same machine and commands as above (`tick_breakdown --ticks 60`, `negotium-probe
 | history after 60 ticks (bytes, probe) | 41783 | 1827389 |
 
 Plan 3a's history preallocates one hour of columns (budget about 2 MB, spec §4.4) and does not grow per tick, so its figure is capacity and is not comparable with Plan 1's much smaller one.
+
+### History memory budget
+
+The history preallocates 3601 one-second samples (one hour) for everything it keeps, so its size depends on the machine's devices, not on how long Negotium runs. Figures are from `History::approx_bytes` after one sample:
+
+| Part | Bytes |
+|---|---|
+| Top-10 app lists, 5 metrics (3601 × 5 × 64 B) | 1 152 320 (≈1.15 MB) |
+| Sample times (3601 × 8 B) | 28 808 |
+| One percent column (u8 per sample) / one value column (f32 per sample) | 3 601 / 14 404 (≈14.4 KB) |
+| Fixed system series (CPU, memory used, committed, busiest disk, GPU, network total) plus app names | ≈54 000 |
+| **No devices at all** | **1 235 479** |
+| Per logical processor (one percent column) | ≈3 900 |
+| Per disk (active time %, read, write, response time) | ≈47 200 |
+| Per network adapter (send, receive) | ≈29 000 |
+| Per GPU (utilization %, dedicated, shared, temperature), plus per engine type (one percent column) | ≈47 200, plus ≈3 700 |
+
+The top lists dominate. A typical machine (16 logical processors, 2 disks, 2 adapters, 1 GPU with 8 engine types) comes to about 1.52 MB. A 64-processor machine with 4 disks, 8 adapters (virtual switches, VPNs) and 2 GPUs with 10 engine types each comes to 2 063 325 bytes, over the ≈2 MB budget of spec §4.4. That is accepted rather than restructured: it is a fixed size, set by the device count, and it does not grow with time.
 The probe's own headline for the same run: tick median 15.47 ms, p95 23.26 ms (Plan 1 headline: median 18.73 ms). Neither `pdh` (+3 ms limit) nor `tick` (+4 ms limit) grew against Plan 1.
 
 Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter send/receive, GPU adapter memory), one interface-table read every 10 s, and one D3DKMT temperature query per GPU per tick.
@@ -134,7 +152,7 @@ Plan 3a adds 9 PDH counters (CPU speed, memory lists, disk response, per-adapter
 3. Performance → CPU: one cell per logical processor in Task Manager's order; Speed within a few percent of Task Manager's.
 4. Performance → Memory: composition matches Task Manager's In use / Modified / Standby / Free within rounding.
 5. 1 min / 10 min / 1 h: right after start the 1 h graph only fills its right edge; scrubbing its empty part says "No history for this moment."; a scrub card follows the pointer and shows the right time.
-6. Keyboard: Tab into the list, Up/Down moves the highlight, Right/Left expands/collapses a group, Delete asks to end the highlighted app, the Menu key opens its menu, Esc closes the menu or modal; repeat with Narrator.
+6. Keyboard: Tab into the list; Up/Down (and Home/End, Page Up/Page Down) move the highlight; Right expands a group, and on an expanded group moves to its first process; Left goes from a process back to its group, and collapses an expanded group; Enter or Space expands or collapses a group; Delete ends the highlighted app (critical processes ask first); the Menu key opens its menu; Esc leaves the list and the live order resumes; Esc also closes the menu or modal; repeat with Narrator.
 7. Light and dark at 100 / 150 / 200 % scale: rail icons, graphs, cards, focus rings and the Performance page readable.
 8. Scrub card: it flips to the other side of the pointer near the graph's edge, is not clipped at the smallest window size, and reads correctly in light and dark.
 9. Narrator on the keyboard-navigated list: note what it announces for the list itself and for the current row.
