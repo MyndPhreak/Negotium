@@ -7,7 +7,7 @@ pub mod pdh;
 pub mod processes;
 pub mod sysinfo;
 
-pub use identity::{Identity, IdentityCache};
+pub use identity::{Identity, IdentityCache, VersionInfo, version_string};
 pub use processes::{ProcessReader, RawProcess};
 pub mod windows_scan;
 

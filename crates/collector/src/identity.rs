@@ -90,33 +90,64 @@ fn package_family(handle: HANDLE) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..end]))
 }
 
-/// FileDescription for the first translation in the version resource, trimmed; `None` if absent.
 fn file_description(path: &str) -> Option<String> {
-    let path = HSTRING::from(path);
-    // SAFETY: size query on a NUL-terminated path.
-    let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
-    if size == 0 {
-        return None;
+    version_string(path, "FileDescription")
+}
+
+/// A string value from the first translation of a file's version resource ("FileDescription",
+/// "CompanyName", …), trimmed; `None` if the file, the resource or the value is missing or empty.
+/// To read several values, read the resource once with [`VersionInfo::read`].
+pub fn version_string(path: &str, key: &str) -> Option<String> {
+    VersionInfo::read(path)?.string(key)
+}
+
+/// A file's version resource, loaded once and queried for any number of string values.
+pub struct VersionInfo {
+    data: Vec<u8>,
+    lang: u16,
+    cp: u16,
+}
+
+impl VersionInfo {
+    /// `None` if the file or its version resource (or its translation table) is missing.
+    pub fn read(path: &str) -> Option<Self> {
+        let path = HSTRING::from(path);
+        // SAFETY: size query on a NUL-terminated path.
+        let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
+        if size == 0 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        // SAFETY: `data` has `size` writable bytes.
+        unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
+        let mut ptr = std::ptr::null_mut();
+        let mut len = 0u32;
+        // SAFETY: queries the translation table inside `data`; ptr points into `data`.
+        let found = unsafe {
+            VerQueryValueW(data.as_ptr().cast(), windows::core::w!(r"\VarFileInfo\Translation"), &mut ptr, &mut len)
+        };
+        if !found.as_bool() || len < 4 {
+            return None;
+        }
+        // SAFETY: at least one (language, codepage) pair of u16 is present (len >= 4).
+        let (lang, cp) = unsafe { (*(ptr as *const u16), *(ptr as *const u16).add(1)) };
+        Some(Self { data, lang, cp })
     }
-    let mut data = vec![0u8; size as usize];
-    // SAFETY: `data` has `size` writable bytes.
-    unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
-    let mut ptr = std::ptr::null_mut();
-    let mut len = 0u32;
-    // SAFETY: queries the translation table inside `data`; ptr points into `data`.
-    if !unsafe { VerQueryValueW(data.as_ptr().cast(), windows::core::w!("\\VarFileInfo\\Translation"), &mut ptr, &mut len) }.as_bool() || len < 4 {
-        return None;
+
+    /// The trimmed string value `key` of the first translation; `None` if missing or empty.
+    pub fn string(&self, key: &str) -> Option<String> {
+        let query = HSTRING::from(format!(r"\StringFileInfo\{:04x}{:04x}\{key}", self.lang, self.cp));
+        let mut ptr = std::ptr::null_mut();
+        let mut len = 0u32;
+        // SAFETY: queries a string value inside `self.data`; len is in UTF-16 units including NUL.
+        let found = unsafe { VerQueryValueW(self.data.as_ptr().cast(), PCWSTR(query.as_ptr()), &mut ptr, &mut len) };
+        if !found.as_bool() || len == 0 {
+            return None;
+        }
+        // SAFETY: `ptr` points to `len` UTF-16 units inside `self.data`, which outlives this borrow.
+        let units = unsafe { std::slice::from_raw_parts(ptr as *const u16, len as usize) };
+        let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+        let text = String::from_utf16_lossy(&units[..end]).trim().to_string();
+        (!text.is_empty()).then_some(text)
     }
-    // SAFETY: at least one (language, codepage) pair of u16 is present (len >= 4).
-    let (lang, cp) = unsafe { (*(ptr as *const u16), *(ptr as *const u16).add(1)) };
-    let key = HSTRING::from(format!("\\StringFileInfo\\{lang:04x}{cp:04x}\\FileDescription"));
-    // SAFETY: queries a string value inside `data`; len is in UTF-16 units including NUL.
-    if !unsafe { VerQueryValueW(data.as_ptr().cast(), PCWSTR(key.as_ptr()), &mut ptr, &mut len) }.as_bool() || len == 0 {
-        return None;
-    }
-    // SAFETY: `ptr` points to `len` UTF-16 units inside `data`.
-    let units = unsafe { std::slice::from_raw_parts(ptr as *const u16, len as usize) };
-    let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
-    let text = String::from_utf16_lossy(&units[..end]).trim().to_string();
-    (!text.is_empty()).then_some(text)
 }

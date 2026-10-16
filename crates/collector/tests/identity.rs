@@ -49,3 +49,19 @@ fn reads_file_description_of_a_system_binary() {
     child.wait().ok();
     assert_eq!(id.description.as_deref(), Some("TCP/IP Ping Command"));
 }
+
+#[test]
+fn version_strings_read_company_name() {
+    let company = negotium_collector::version_string(r"C:\Windows\System32\PING.EXE", "CompanyName");
+    assert!(company.is_some_and(|c| !c.is_empty()));
+    assert_eq!(negotium_collector::version_string(r"C:\Nope\missing.exe", "CompanyName"), None);
+}
+
+#[test]
+fn one_version_resource_read_answers_several_keys() {
+    let info = negotium_collector::VersionInfo::read(r"C:\Windows\System32\PING.EXE").unwrap();
+    assert_eq!(info.string("FileDescription").as_deref(), Some("TCP/IP Ping Command"));
+    assert!(info.string("CompanyName").is_some_and(|c| !c.is_empty()));
+    assert_eq!(info.string("NoSuchKey"), None);
+    assert!(negotium_collector::VersionInfo::read(r"C:\Nope\missing.exe").is_none());
+}

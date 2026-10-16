@@ -5,6 +5,7 @@ mod details;
 mod efficiency;
 mod elevation;
 mod location;
+pub mod startup;
 mod terminate;
 
 pub use close::{FORCE_CLOSE_GRACE, force_close};
