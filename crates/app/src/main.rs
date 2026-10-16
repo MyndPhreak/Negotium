@@ -69,8 +69,9 @@ fn make_tray(
         tray.on_exit(move || begin_exit(&controls, &weak, &saver));
     }
     tray.show()?;
-    // A new tray (first, or after Explorer restarted) shows the current graph at once.
-    negotium::tray::attach(&tray);
+    // A new tray (first, or after Explorer restarted) shows the current graph at once, drawn for
+    // the taskbar's DPI as it is now.
+    negotium::tray::attach(&tray, platform::tray_icon_px());
     Ok(tray)
 }
 
@@ -176,8 +177,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let controls = Arc::new(Controls::default());
     controls.set_refresh_ms(initial.refresh_ms);
     // The tray icon's CPU graph (crate::tray): drawn on this thread from the worker's samples; its
-    // size and colours are read here (window setup) and the colours again on a theme change. The
-    // shell is left alone while the worker sees a hung Explorer (PF2).
+    // size and colours are read here (window setup), the size again whenever a tray is made and the
+    // colours on a theme change. The shell is left alone while the worker finds the taskbar hung (PF2).
     {
         let controls = controls.clone();
         negotium::tray::install(

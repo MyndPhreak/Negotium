@@ -155,14 +155,16 @@ impl Source for LiveSource {
             self.log.warn(e);
         }
         let rows = self.model.update(&snap);
-        let kept = write_history(&self.history, |h| h.push(snap.taken_at_ms, &snap.totals, &rows));
-        // Every tick, so the tray never waits on a stale answer (crate::tray, PF2).
-        controls.set_shell_hung(crate::tray::explorer_hung(&snap.processes, &snap.windows));
-        if kept
-            && controls.tray_cpu()
-            && let Some(tray) = &self.tray
-        {
-            tray(read_history(&self.history, |h| TraySample::from_history(h, snap.taken_at_ms, snap.totals.cpu_pct)));
+        // The tray's minute is read under the same lock as the push that kept the sample.
+        let for_tray = controls.tray_cpu() && self.tray.is_some();
+        let tray_sample = write_history(&self.history, |h| {
+            let kept = h.push(snap.taken_at_ms, &snap.totals, &rows);
+            (kept && for_tray).then(|| TraySample::from_history(h, snap.taken_at_ms, snap.totals.cpu_pct))
+        });
+        // Every tick, visible or hidden, so the tray never waits on a stale answer (crate::tray, PF2).
+        controls.set_shell_hung(crate::platform::shell_tray_hung());
+        if let (Some(sample), Some(tray)) = (tray_sample, &self.tray) {
+            tray(sample);
         }
         if !controls.visible() {
             return None;
@@ -334,7 +336,9 @@ mod tests {
         assert!(got.lock().unwrap().is_empty(), "off until Settings turns it on");
         controls.set_tray_cpu(true);
         std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
+        controls.set_shell_hung(true);
         assert!(source.next_frame(&controls).is_none(), "hidden in the tray: no frame");
+        assert_eq!(controls.shell_hung(), crate::platform::shell_tray_hung(), "the taskbar's state is stored while hidden");
         let first = got.lock().unwrap().first().cloned().expect("but the tray gets the sample");
         assert_eq!(first.points.last().map(|p| p.0), Some(first.end_ms), "the minute up to this sample");
         source.next_frame(&controls); // too soon: the history keeps no sample

@@ -86,7 +86,8 @@ pub struct Controls {
     refresh_ms: AtomicU32,
     /// Settings > Show CPU in tray icon: the worker sends each kept sample's CPU minute to the tray.
     tray_cpu: AtomicBool,
-    /// The worker's latest snapshot shows a hung explorer.exe window: the tray waits (crate::tray, PF2).
+    /// Explorer's taskbar window (`Shell_TrayWnd`) was hung at the worker's latest tick: the tray waits
+    /// (crate::tray, PF2; `platform::shell_tray_hung`).
     shell_hung: AtomicBool,
     stop: AtomicBool,
     /// Expanded app row ids and whether a search is active: the worker builds child rows only

@@ -20,10 +20,10 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegG
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
-use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
+use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, GetPropW, GetWindowThreadProcessId, IsIconic,
+    AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, FindWindowW, GetPropW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic,
     MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SIZE_MINIMIZED, SM_CXSMICON, SW_RESTORE, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
@@ -100,11 +100,40 @@ pub fn tray_icon_px_at(dpi: u32) -> u32 {
     if px > 0 { px as u32 } else { 16 }
 }
 
-/// The tray icon size at the system DPI, which the notification area uses. Read once at start:
-/// the system DPI changes only at sign-in.
+/// The DPI the tray icon is drawn for: the taskbar's own (`Shell_TrayWnd`, which Explorer draws
+/// at the DPI of the monitor it is on), or the system DPI when that is unknown.
+pub fn tray_dpi(taskbar_dpi: Option<u32>, system_dpi: u32) -> u32 {
+    taskbar_dpi.filter(|&d| d > 0).unwrap_or(system_dpi)
+}
+
+/// The taskbar's window (Explorer's `Shell_TrayWnd`), if it exists. FindWindowW compares class
+/// names only (no window text is asked for), so it sends no message and never waits on Explorer.
+fn shell_tray_window() -> Option<HWND> {
+    // SAFETY: a plain lookup by a NUL-terminated class name literal; no window name.
+    unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }.ok().filter(|h| !h.is_invalid())
+}
+
+/// The tray icon size for the taskbar as it is now (crate::tray reads it whenever a tray is
+/// created: at start and after Explorer restarts). A taskbar moved to a monitor of another DPI
+/// while Negotium runs keeps the old size until the next Explorer restart or launch.
 pub fn tray_icon_px() -> u32 {
-    // SAFETY: plain query of the system DPI.
-    tray_icon_px_at(unsafe { GetDpiForSystem() })
+    // SAFETY: plain DPI queries; GetDpiForWindow reads the window's stored DPI without a message
+    // (0 for an invalid handle, which `tray_dpi` replaces with the system DPI).
+    let (taskbar, system) = unsafe { (shell_tray_window().map(|h| GetDpiForWindow(h)), GetDpiForSystem()) };
+    tray_icon_px_at(tray_dpi(taskbar, system))
+}
+
+/// Whether the taskbar is hung, from `IsHungAppWindow` on `Shell_TrayWnd` if it was found: a
+/// taskbar that is missing (Explorer restarting) is not hung.
+pub fn tray_hung(found: Option<bool>) -> bool {
+    found == Some(true)
+}
+
+/// Whether Explorer's taskbar thread is hung now (PF2: then Shell_NotifyIcon would wait on it).
+/// Neither call sends a window message, so this never blocks on a hung Explorer itself.
+pub fn shell_tray_hung() -> bool {
+    // SAFETY: IsHungAppWindow reads the window's cached responsiveness; any handle value is safe.
+    tray_hung(shell_tray_window().map(|h| unsafe { IsHungAppWindow(h) }.as_bool()))
 }
 
 /// Applies a theme choice: the colour scheme (immediately, through `set-dark`), then the title bar
@@ -581,13 +610,27 @@ mod tests {
         // The machine's own small-icon size (PF11): GetSystemMetrics answers at the system DPI.
         // SAFETY: plain metric and DPI queries.
         let (small, system_dpi) = unsafe { (GetSystemMetrics(SM_CXSMICON) as u32, GetDpiForSystem()) };
-        assert_eq!(tray_icon_px(), small, "the notification area's size, as Windows reports it");
+        assert_eq!(tray_icon_px_at(system_dpi), small, "the size at the system DPI, as Windows reports it");
+        // SAFETY: a plain DPI query on the taskbar's handle.
+        let taskbar = shell_tray_window().map(|h| unsafe { GetDpiForWindow(h) });
+        assert_eq!(tray_icon_px(), tray_icon_px_at(tray_dpi(taskbar, system_dpi)), "drawn for the taskbar's DPI");
+        assert_eq!(tray_dpi(Some(144), 96), 144, "the taskbar's own DPI wins");
+        assert_eq!(tray_dpi(None, 120), 120, "no taskbar: the system DPI");
+        assert_eq!(tray_dpi(Some(0), 120), 120, "an unreadable DPI: the system DPI");
         // Scaled back to 96 DPI (16 on a default setup): Windows scales the metric with the DPI.
         let at_96 = (small * 96 + system_dpi / 2) / system_dpi;
         assert!(tray_icon_px_at(96).abs_diff(at_96) <= 1, "{} vs {at_96}", tray_icon_px_at(96));
         assert!(tray_icon_px_at(192).abs_diff(2 * tray_icon_px_at(96)) <= 1, "twice the DPI, twice the size");
         assert!(light_taskbar_from(Some(1)));
         assert!(!light_taskbar_from(Some(0)) && !light_taskbar_from(None) && !light_taskbar_from(Some(7)));
+    }
+
+    #[test]
+    fn only_a_found_and_hung_taskbar_holds_the_tray_back() {
+        assert!(tray_hung(Some(true)), "Shell_TrayWnd is hung");
+        assert!(!tray_hung(Some(false)), "it answers");
+        assert!(!tray_hung(None), "no taskbar (Explorer restarting): nothing to wait on");
+        let _ = shell_tray_hung(); // the real query returns without blocking
     }
 
     #[test]

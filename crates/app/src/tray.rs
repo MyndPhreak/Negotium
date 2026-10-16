@@ -4,13 +4,12 @@
 //! UI thread (rulings P3c-6, PF11): the pixels are drawn here, and Slint pushes a changed `icon`
 //! or `tooltip` to the shell itself (Shell_NotifyIcon NIM_MODIFY), both on the UI thread. That is an
 //! allowed exception to "the UI thread never blocks": a 32 × 32 icon takes well under a millisecond
-//! once a second, and the shell call is bounded by PF2: while a window of explorer.exe is hung,
-//! nothing is pushed (Shell_NotifyIcon would wait on Explorer); the newest look follows once it
-//! answers again.
+//! once a second, and the shell call is bounded by PF2: while Explorer's taskbar window
+//! (`Shell_TrayWnd`) is hung, nothing is pushed (Shell_NotifyIcon would wait on it); the newest
+//! look follows once it answers again.
 use crate::NegotiumTray;
 use crate::trayicon::{self, Colors, Rgb};
 use negotium_history::{History, Series};
-use negotium_snapshot::{ProcessSample, WindowSample};
 use std::cell::RefCell;
 use std::time::Duration;
 
@@ -42,6 +41,15 @@ pub struct TrayLook {
     pub tooltip: String,
 }
 
+/// One push to the shell: the look, and whether the tray's graph image needs these pixels. The
+/// tray keeps the last ones it was given; setting an image again would send it to the shell even
+/// when only the tooltip changed, as Slint compares images by buffer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrayPush {
+    pub look: TrayLook,
+    pub set_icon: bool,
+}
+
 /// The tray's state, without Slint: the switch, the icon size and colours, the last sample and
 /// what the shell was last given.
 pub struct TrayView {
@@ -51,11 +59,13 @@ pub struct TrayView {
     last: Option<TraySample>,
     /// The look last pushed to the shell; None for a tray that has been given nothing yet.
     shown: Option<TrayLook>,
+    /// The graph pixels the tray's image holds (they stay while the app icon shows).
+    icon_held: Option<(Vec<u8>, u32)>,
 }
 
 impl TrayView {
     pub fn new(enabled: bool, size: u32, colors: Colors) -> TrayView {
-        TrayView { enabled, size, colors, last: None, shown: None }
+        TrayView { enabled, size, colors, last: None, shown: None, icon_held: None }
     }
 
     pub fn on_sample(&mut self, s: TraySample) {
@@ -83,7 +93,7 @@ impl TrayView {
     /// The look to push to the shell now, if any: none while Explorer is hung (PF2: its
     /// Shell_NotifyIcon would wait on it, so the look stays pending) or when the shell already
     /// shows it.
-    pub fn take_update(&mut self, shell_hung: bool) -> Option<TrayLook> {
+    pub fn take_update(&mut self, shell_hung: bool) -> Option<TrayPush> {
         if shell_hung {
             return None;
         }
@@ -91,13 +101,19 @@ impl TrayView {
         if self.shown.as_ref() == Some(&look) {
             return None;
         }
+        let set_icon = look.icon.is_some() && look.icon != self.icon_held;
+        if set_icon {
+            self.icon_held.clone_from(&look.icon);
+        }
         self.shown = Some(look.clone());
-        Some(look)
+        Some(TrayPush { look, set_icon })
     }
 
-    /// A new tray (Explorer restarted) has been given nothing yet: the next update shows the look.
+    /// A new tray (Explorer restarted) has been given nothing yet, not even graph pixels: the next
+    /// update shows the whole look.
     pub fn forget_shown(&mut self) {
         self.shown = None;
+        self.icon_held = None;
     }
 }
 
@@ -114,19 +130,16 @@ pub fn colors_now(accent: Option<Rgb>, light_taskbar: bool) -> Colors {
     trayicon::colors(accent.unwrap_or(DEFAULT_ACCENT), light_taskbar)
 }
 
-/// Whether a snapshot shows a hung window of explorer.exe (the taskbar and its notification area),
-/// from the snapshot's windows and processes (PF2).
-pub fn explorer_hung(processes: &[ProcessSample], windows: &[WindowSample]) -> bool {
-    windows
-        .iter()
-        .filter(|w| w.hung)
-        .any(|w| processes.iter().any(|p| p.pid == w.pid && p.name.eq_ignore_ascii_case("explorer.exe")))
+/// Whether a push held back by a hung Explorer needs a retry scheduled: one at a time, so a look
+/// held back while the switch is off (no sample comes to retry it) still reaches the shell.
+pub fn schedule_retry(shell_hung: bool, retrying: bool) -> bool {
+    shell_hung && !retrying
 }
 
 struct Live {
     view: TrayView,
     tray: Option<slint::Weak<NegotiumTray>>,
-    /// Whether Explorer is hung now (the worker's latest snapshot, `Controls::shell_hung`).
+    /// Whether Explorer's taskbar is hung now (the worker's latest tick, `Controls::shell_hung`).
     shell_hung: Box<dyn Fn() -> bool>,
     /// A retry is scheduled for a look held back by a hung Explorer.
     retrying: bool,
@@ -144,10 +157,11 @@ pub fn install(view: TrayView, shell_hung: impl Fn() -> bool + 'static) {
     TRAY.with(|t| *t.borrow_mut() = Some(Live { view, tray: None, shell_hung: Box::new(shell_hung), retrying: false }));
 }
 
-/// A tray was (re)created: it shows the current look at once.
-pub fn attach(tray: &NegotiumTray) {
+/// A tray was (re)created for a taskbar whose icons are `size` px: it shows the current look at once.
+pub fn attach(tray: &NegotiumTray, size: u32) {
     update(|live| {
         live.tray = Some(tray.as_weak());
+        live.view.size = size;
         live.view.forget_shown();
     });
 }
@@ -177,10 +191,10 @@ fn refresh() {
         let Some(live) = t.as_mut() else { return (None, false) };
         let Some(tray) = live.tray.as_ref().and_then(|w| w.upgrade()) else { return (None, false) };
         let hung = (live.shell_hung)();
-        let look = live.view.take_update(hung);
-        let retry = hung && !live.retrying;
+        let push = live.view.take_update(hung);
+        let retry = schedule_retry(hung, live.retrying);
         live.retrying |= retry;
-        (look.map(|l| (l, tray)), retry)
+        (push.map(|p| (p, tray)), retry)
     });
     if retry {
         slint::Timer::single_shot(HUNG_RETRY, || {
@@ -188,13 +202,16 @@ fn refresh() {
         });
     }
     // Outside the borrow: setting the tray's properties may run Slint change handlers.
-    if let Some((look, tray)) = shown {
-        show(&tray, &look);
+    if let Some((push, tray)) = shown {
+        show(&tray, &push);
     }
 }
 
-fn show(tray: &NegotiumTray, look: &TrayLook) {
-    if let Some((rgba, size)) = &look.icon {
+fn show(tray: &NegotiumTray, push: &TrayPush) {
+    let look = &push.look;
+    if push.set_icon
+        && let Some((rgba, size)) = &look.icon
+    {
         // Straight (not premultiplied) alpha, as crate::trayicon draws it.
         let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba, *size, *size);
         tray.set_live_icon(slint::Image::from_rgba8(pixels));
@@ -206,7 +223,6 @@ fn show(tray: &NegotiumTray, look: &TrayLook) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use negotium_snapshot::{ProcessSample, WindowSample};
 
     fn sample(cpu: f32) -> TraySample {
         TraySample { end_ms: 60_000, cpu: Some(cpu), points: (0..=60).map(|s| (s * 1_000, Some(cpu))).collect() }
@@ -260,10 +276,15 @@ mod tests {
         let mut v = view(true);
         v.on_sample(sample(30.0));
         let want = graph_of(30.0, 16, &colors_now(None, false), "CPU 30% · Negotium");
-        assert_eq!(v.take_update(false), Some(want.clone()), "the first tray shows the graph");
-        assert_eq!(v.take_update(false), None, "it already shows it");
+        assert_eq!(v.take_update(false).map(|p| p.look), Some(want.clone()), "the first tray shows the graph");
+        assert_eq!(v.take_update(false).map(|p| p.look), None, "it already shows it");
         v.forget_shown();
-        assert_eq!(v.take_update(false), Some(want), "the re-created tray shows the same graph");
+        assert_eq!(v.take_update(false).map(|p| p.look), Some(want), "the re-created tray shows the same graph");
+        // Re-created on a taskbar at another DPI (main.rs attaches it with the size read then).
+        v.size = 24;
+        v.forget_shown();
+        let want = graph_of(30.0, 24, &colors_now(None, false), "CPU 30% · Negotium");
+        assert_eq!(v.take_update(false).map(|p| p.look), Some(want), "drawn at the new size");
     }
 
     #[test]
@@ -272,27 +293,27 @@ mod tests {
         // shell right away, not with the next sample.
         let mut v = view(true);
         v.on_sample(sample(40.0));
-        assert!(v.take_update(false).is_some_and(|l| l.icon.is_some()));
+        assert!(v.take_update(false).is_some_and(|p| p.look.icon.is_some()));
         v.set_enabled(false);
-        assert_eq!(v.take_update(false), Some(app_icon()), "off: the app icon goes back at once");
+        assert_eq!(v.take_update(false).map(|p| p.look), Some(app_icon()), "off: the app icon goes back at once");
         v.on_sample(sample(40.0));
-        assert_eq!(v.take_update(false), None, "a sample still in flight changes nothing");
+        assert_eq!(v.take_update(false).map(|p| p.look), None, "a sample still in flight changes nothing");
         v.set_enabled(true);
-        assert_eq!(v.take_update(false), None, "on again: the app icon stays until a sample comes");
+        assert_eq!(v.take_update(false).map(|p| p.look), None, "on again: the app icon stays until a sample comes");
         v.on_sample(sample(60.0));
-        assert_eq!(v.take_update(false), Some(graph_of(60.0, 16, &colors_now(None, false), "CPU 60% · Negotium")));
+        assert_eq!(v.take_update(false).map(|p| p.look), Some(graph_of(60.0, 16, &colors_now(None, false), "CPU 60% · Negotium")));
     }
 
     #[test]
     fn nothing_is_pushed_to_a_hung_explorer_and_the_newest_look_follows_once_it_recovers() {
         let mut v = view(true);
         v.on_sample(sample(10.0));
-        assert_eq!(v.take_update(true), None, "Explorer hung: Shell_NotifyIcon would wait on it (PF2)");
+        assert_eq!(v.take_update(true).map(|p| p.look), None, "Explorer hung: Shell_NotifyIcon would wait on it (PF2)");
         v.on_sample(sample(20.0));
-        assert_eq!(v.take_update(true), None);
+        assert_eq!(v.take_update(true).map(|p| p.look), None);
         let want = graph_of(20.0, 16, &colors_now(None, false), "CPU 20% · Negotium");
-        assert_eq!(v.take_update(false), Some(want), "recovered: the newest graph, once");
-        assert_eq!(v.take_update(false), None);
+        assert_eq!(v.take_update(false).map(|p| p.look), Some(want), "recovered: the newest graph, once");
+        assert_eq!(v.take_update(false).map(|p| p.look), None);
     }
 
     #[test]
@@ -324,26 +345,46 @@ mod tests {
         assert_eq!(s.points.last(), Some(&(90_000, Some(90.0))));
     }
 
-    fn process(pid: u32, name: &str) -> ProcessSample {
-        ProcessSample {
-            pid, parent_pid: 4, create_time: 1, name: name.into(), session_id: 1, cpu_time_100ns: 0,
-            private_working_set: 0, disk_io_bytes: 0, threads: 1, handles: 1, image_path: None,
-            package_family: None, description: None,
-        }
-    }
-
-    fn window(pid: u32, hung: bool) -> WindowSample {
-        WindowSample { pid, hung, title: String::new() }
+    #[test]
+    fn the_graph_pixels_are_sent_only_when_they_change() {
+        let mut v = view(true);
+        v.on_sample(sample(30.0));
+        assert!(v.take_update(false).is_some_and(|p| p.set_icon), "the first graph");
+        // The same minute; only the reading in the tooltip differs.
+        v.on_sample(TraySample { cpu: Some(31.0), ..sample(30.0) });
+        let p = v.take_update(false).expect("the tooltip changed");
+        assert_eq!(p.look.tooltip, "CPU 31% · Negotium");
+        assert!(!p.set_icon, "the shell keeps the icon it has");
+        v.set_enabled(false);
+        assert!(v.take_update(false).is_some_and(|p| !p.set_icon && p.look.icon.is_none()), "off: the app icon");
+        v.set_enabled(true);
+        v.on_sample(sample(30.0));
+        assert!(v.take_update(false).is_some_and(|p| !p.set_icon), "on again, same pixels: the held image shows");
+        v.on_sample(sample(70.0));
+        assert!(v.take_update(false).is_some_and(|p| p.set_icon), "new pixels are sent");
+        v.forget_shown();
+        assert!(v.take_update(false).is_some_and(|p| p.set_icon), "a re-created tray holds no image yet");
     }
 
     #[test]
-    fn only_a_hung_explorer_window_holds_the_tray_back() {
-        let procs = [process(10, "explorer.exe"), process(20, "notepad.exe"), process(30, "EXPLORER.EXE")];
-        assert!(!explorer_hung(&procs, &[]), "no windows");
-        assert!(!explorer_hung(&procs, &[window(10, false), window(20, false)]), "nothing hung");
-        assert!(!explorer_hung(&procs, &[window(20, true)]), "another app's hang doesn't involve the shell");
-        assert!(explorer_hung(&procs, &[window(20, false), window(10, true)]), "the taskbar's process hangs");
-        assert!(explorer_hung(&procs, &[window(30, true)]), "names compare without case");
-        assert!(!explorer_hung(&procs, &[window(99, true)]), "a window of a process not listed");
+    fn a_switch_turned_off_during_a_hang_is_retried_until_explorer_answers() {
+        let mut v = view(true);
+        v.on_sample(sample(40.0));
+        assert!(v.take_update(false).is_some());
+        let mut retrying = false;
+        // The switch goes off while the taskbar is hung: nothing is pushed, a retry is scheduled.
+        v.set_enabled(false);
+        assert_eq!(v.take_update(true), None);
+        assert!(schedule_retry(true, retrying));
+        retrying = true;
+        assert!(!schedule_retry(true, retrying), "one retry at a time");
+        // The retry fires (clearing the flag) while still hung: it schedules the next.
+        retrying = false;
+        assert_eq!(v.take_update(true), None);
+        assert!(schedule_retry(true, retrying));
+        // The next retry finds Explorer answering: the app icon goes back, and no more retries.
+        retrying = false;
+        assert_eq!(v.take_update(false).map(|p| p.look), Some(app_icon()));
+        assert!(!schedule_retry(false, retrying));
     }
 }
