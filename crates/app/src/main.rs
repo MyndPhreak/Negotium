@@ -69,6 +69,8 @@ fn make_tray(
         tray.on_exit(move || begin_exit(&controls, &weak, &saver));
     }
     tray.show()?;
+    // A new tray (first, or after Explorer restarted) shows the current graph at once.
+    negotium::tray::attach(&tray);
     Ok(tray)
 }
 
@@ -173,6 +175,21 @@ fn main() -> Result<(), slint::PlatformError> {
     negotium::settingspage::apply_settings(&ui, &initial);
     let controls = Arc::new(Controls::default());
     controls.set_refresh_ms(initial.refresh_ms);
+    // The tray icon's CPU graph (crate::tray): drawn on this thread from the worker's samples; its
+    // size and colours are read here (window setup) and the colours again on a theme change. The
+    // shell is left alone while the worker sees a hung Explorer (PF2).
+    {
+        let controls = controls.clone();
+        negotium::tray::install(
+            negotium::tray::TrayView::new(
+                initial.tray_cpu,
+                platform::tray_icon_px(),
+                negotium::tray::colors_now(platform::read_accent(), platform::taskbar_is_light()),
+            ),
+            move || controls.shell_hung(),
+        );
+    }
+    controls.set_tray_cpu(initial.tray_cpu);
     // Shared with every exit path, which waits for its writes (`begin_exit`).
     let saver = settings::Saver::new(settings_path);
     negotium::settingspage::SettingsWiring {
@@ -182,6 +199,7 @@ fn main() -> Result<(), slint::PlatformError> {
         gpu_marker: renderer::fallback_path(),
         fallback_recorded,
         running,
+        tray_cpu_changed: Rc::new(negotium::tray::set_enabled),
     }
     .install(&ui);
     let bridge = Bridge::install(&ui, controls.clone());
@@ -197,7 +215,25 @@ fn main() -> Result<(), slint::PlatformError> {
     // Collector time counts from here, for the worker and for the bridge's scrolling view.
     let epoch = std::time::Instant::now();
     bridge.borrow_mut().set_epoch(epoch);
-    let _worker = worker::spawn(controls.clone(), history, epoch, move |frame| {
+    // Worker -> tray, like frames: one wakeup per empty slot, the newest sample wins.
+    let tray_sink: worker::TraySink = {
+        let slot: Arc<worker::Latest<negotium::tray::TraySample>> = Default::default();
+        Arc::new(move |sample| {
+            if !slot.put(sample) {
+                return;
+            }
+            let posted = slot.clone();
+            let sent = slint::invoke_from_event_loop(move || {
+                if let Some(s) = posted.take() {
+                    negotium::tray::on_sample(s);
+                }
+            });
+            if sent.is_err() {
+                slot.take(); // no event loop (shutting down): keep the next put posting
+            }
+        })
+    };
+    let _worker = worker::spawn(controls.clone(), history, epoch, Some(tray_sink), move |frame| {
         if !latest.put(frame) {
             return;
         }
@@ -602,6 +638,11 @@ fn main() -> Result<(), slint::PlatformError> {
                                 if let Some(ui) = weak.upgrade() {
                                     let theme = settings.borrow().theme;
                                     platform::on_settings_changed(&ui, theme);
+                                    // The taskbar's mode or the accent changed: redraw the tray graph.
+                                    negotium::tray::set_colors(negotium::tray::colors_now(
+                                        platform::read_accent(),
+                                        platform::taskbar_is_light(),
+                                    ));
                                 }
                             }
                         });

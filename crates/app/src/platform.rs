@@ -20,10 +20,11 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegG
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, GetPropW, GetWindowThreadProcessId, IsIconic,
-    MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SIZE_MINIMIZED, SW_RESTORE, SWP_FRAMECHANGED,
+    MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SIZE_MINIMIZED, SM_CXSMICON, SW_RESTORE, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
 };
@@ -76,6 +77,34 @@ pub fn system_prefers_dark() -> bool {
         w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
         w!("AppsUseLightTheme"),
     ))
+}
+
+/// `SystemUsesLightTheme`: 1 means the taskbar (and Start) are light. Missing means dark, the
+/// default Windows taskbar.
+pub fn light_taskbar_from(system_uses_light_theme: Option<u32>) -> bool {
+    system_uses_light_theme == Some(1)
+}
+
+/// Whether the taskbar is light (Settings > Personalization > Colors > "Choose your mode").
+pub fn taskbar_is_light() -> bool {
+    light_taskbar_from(read_hkcu_dword(
+        w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+        w!("SystemUsesLightTheme"),
+    ))
+}
+
+/// The tray icon size at `dpi`: SM_CXSMICON (16 at 96 DPI, 24 at 144, 32 at 192); 16 if the call fails.
+pub fn tray_icon_px_at(dpi: u32) -> u32 {
+    // SAFETY: plain metric query.
+    let px = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) };
+    if px > 0 { px as u32 } else { 16 }
+}
+
+/// The tray icon size at the system DPI, which the notification area uses. Read once at start:
+/// the system DPI changes only at sign-in.
+pub fn tray_icon_px() -> u32 {
+    // SAFETY: plain query of the system DPI.
+    tray_icon_px_at(unsafe { GetDpiForSystem() })
 }
 
 /// Applies a theme choice: the colour scheme (immediately, through `set-dark`), then the title bar
@@ -543,6 +572,22 @@ mod tests {
         assert!(!dark_from(Some(1)), "AppsUseLightTheme = 1: light");
         assert!(!dark_from(Some(7)), "any other value is not 0: light");
         assert!(!dark_from(None), "missing value (older Windows, policy): light, as Windows itself defaults");
+    }
+
+    #[test]
+    fn tray_icons_follow_the_dpi_and_the_taskbar_mode_reads_safely() {
+        use windows::Win32::UI::HiDpi::GetDpiForSystem;
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+        // The machine's own small-icon size (PF11): GetSystemMetrics answers at the system DPI.
+        // SAFETY: plain metric and DPI queries.
+        let (small, system_dpi) = unsafe { (GetSystemMetrics(SM_CXSMICON) as u32, GetDpiForSystem()) };
+        assert_eq!(tray_icon_px(), small, "the notification area's size, as Windows reports it");
+        // Scaled back to 96 DPI (16 on a default setup): Windows scales the metric with the DPI.
+        let at_96 = (small * 96 + system_dpi / 2) / system_dpi;
+        assert!(tray_icon_px_at(96).abs_diff(at_96) <= 1, "{} vs {at_96}", tray_icon_px_at(96));
+        assert!(tray_icon_px_at(192).abs_diff(2 * tray_icon_px_at(96)) <= 1, "twice the DPI, twice the size");
+        assert!(light_taskbar_from(Some(1)));
+        assert!(!light_taskbar_from(Some(0)) && !light_taskbar_from(None) && !light_taskbar_from(Some(7)));
     }
 
     #[test]

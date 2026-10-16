@@ -26,6 +26,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_keep_in_tray(s.keep_in_tray);
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
+    ui.set_settings_tray_cpu(s.tray_cpu);
     // Off: GraphClock rests the view on the newest sample at once (PF3).
     ui.global::<crate::GraphClock>().set_smooth(s.smooth_graphs);
 }
@@ -42,6 +43,8 @@ pub struct SettingsWiring {
     pub fallback_recorded: bool,
     /// The renderer this instance draws with: `Gpu` only if it was selected successfully.
     pub running: Renderer,
+    /// The tray shows the CPU graph or the app icon (`crate::tray::set_enabled` in the app).
+    pub tray_cpu_changed: Rc<dyn Fn(bool)>,
 }
 
 impl SettingsWiring {
@@ -51,8 +54,9 @@ impl SettingsWiring {
         ui.set_settings_gpu_running(self.running == Renderer::Gpu);
         ui.set_settings_gpu_env_override(self.running == Renderer::FromEnv);
         let change = Rc::new(Change { settings: self.settings, saver: self.saver, weak: ui.as_weak() });
+        let controls = self.controls;
         {
-            let (change, controls) = (change.clone(), self.controls);
+            let (change, controls) = (change.clone(), controls.clone());
             ui.on_refresh_chosen(move |i| {
                 let ms = refresh_from_index(i);
                 change.apply(|s| s.refresh_ms = ms);
@@ -84,6 +88,14 @@ impl SettingsWiring {
             let change = change.clone();
             ui.on_smooth_graphs_toggled(move |on| {
                 change.apply(|s| s.smooth_graphs = on);
+            });
+        }
+        {
+            let (change, controls, told) = (change.clone(), controls.clone(), self.tray_cpu_changed.clone());
+            ui.on_tray_cpu_toggled(move |on| {
+                change.apply(|s| s.tray_cpu = on);
+                controls.set_tray_cpu(on);
+                told(on);
             });
         }
         {

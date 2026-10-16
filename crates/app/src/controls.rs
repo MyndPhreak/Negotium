@@ -84,6 +84,10 @@ pub struct Controls {
     visible: AtomicBool,
     /// Refresh interval while visible (Settings), milliseconds.
     refresh_ms: AtomicU32,
+    /// Settings > Show CPU in tray icon: the worker sends each kept sample's CPU minute to the tray.
+    tray_cpu: AtomicBool,
+    /// The worker's latest snapshot shows a hung explorer.exe window: the tray waits (crate::tray, PF2).
+    shell_hung: AtomicBool,
     stop: AtomicBool,
     /// Expanded app row ids and whether a search is active: the worker builds child rows only
     /// for those (spec section 8: no per-process formatting for rows nobody can see).
@@ -103,6 +107,8 @@ impl Default for Controls {
             frozen: AtomicBool::new(false),
             visible: AtomicBool::new(true),
             refresh_ms: AtomicU32::new(1000),
+            tray_cpu: AtomicBool::new(false),
+            shell_hung: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             child_rows: Mutex::new((HashSet::new(), false)),
             woken: Mutex::new(false),
@@ -164,6 +170,18 @@ impl Controls {
     pub fn interval(&self) -> Duration {
         let refresh = self.refresh_ms.load(Ordering::Relaxed).max(100) as u64;
         Duration::from_millis(if self.visible() { refresh } else { refresh.max(2000) })
+    }
+    pub fn set_tray_cpu(&self, on: bool) {
+        self.tray_cpu.store(on, Ordering::Relaxed);
+    }
+    pub fn tray_cpu(&self) -> bool {
+        self.tray_cpu.load(Ordering::Relaxed)
+    }
+    pub fn set_shell_hung(&self, hung: bool) {
+        self.shell_hung.store(hung, Ordering::Relaxed);
+    }
+    pub fn shell_hung(&self) -> bool {
+        self.shell_hung.load(Ordering::Relaxed)
     }
     /// Shares which apps need child rows. Wakes the worker when more are needed (an expand, or a
     /// search starting), so they show without waiting for the next tick.

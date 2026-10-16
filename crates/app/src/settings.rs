@@ -44,11 +44,13 @@ pub struct Settings {
     pub gpu_rendering: bool,
     /// Graphs scroll continuously between samples (crate::smooth).
     pub smooth_graphs: bool,
+    /// The tray icon draws the CPU graph (crate::tray).
+    pub tray_cpu: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { refresh_ms: 1000, theme: ThemeChoice::System, always_on_top: false, keep_in_tray: true, gpu_rendering: true, smooth_graphs: true }
+        Self { refresh_ms: 1000, theme: ThemeChoice::System, always_on_top: false, keep_in_tray: true, gpu_rendering: true, smooth_graphs: true, tray_cpu: true }
     }
 }
 
@@ -146,6 +148,7 @@ pub fn load(path: &Path) -> (Settings, Loaded) {
     field!(keep_in_tray);
     field!(gpu_rendering);
     field!(smooth_graphs);
+    field!(tray_cpu);
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)
@@ -301,6 +304,18 @@ mod tests {
     }
 
     #[test]
+    fn tray_cpu_defaults_on_and_a_bad_value_loses_only_itself() {
+        let dir = TempDir::new("traycpu");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"keep_in_tray": false}"#).unwrap();
+        assert!(load(&p).0.tray_cpu, "a file that predates the switch: on");
+        std::fs::write(&p, r#"{"tray_cpu": 1, "keep_in_tray": false}"#).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::Partial(vec!["tray_cpu".to_string()]));
+        assert!(s.tray_cpu && !s.keep_in_tray);
+    }
+
+    #[test]
     fn settings_round_trip_as_readable_json() {
         let dir = TempDir::new("roundtrip");
         let p = dir.file();
@@ -311,6 +326,7 @@ mod tests {
             keep_in_tray: false,
             gpu_rendering: false,
             smooth_graphs: false,
+            tray_cpu: false,
         };
         save(&p, &s).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("\"theme\": \"dark\""));

@@ -1731,8 +1731,8 @@ fn choices_and_switches_show_the_current_settings() {
 
 #[test]
 fn later_version_settings_are_shown_disabled() {
-    let ui = shown_window();
-    ui.set_page(3);
+    // Tall enough for the last row: the testing backend finds only what the page's view shows.
+    let ui = settings_window(1000, 1300);
     assert!(text(&ui, "Coming in a later version").is_some());
     for label in ["Admin mode", "Open on Ctrl+Shift+Esc", "CPU temperature add-on"] {
         let s = switch(&ui, label);
@@ -1786,8 +1786,9 @@ fn a_frame_never_lands_on_the_settings_page() {
 #[test]
 fn apply_settings_sets_every_wired_property() {
     let ui = window();
-    let s = Settings { refresh_ms: 5000, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: false, smooth_graphs: false };
+    let s = Settings { refresh_ms: 5000, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: false, smooth_graphs: false, tray_cpu: false };
     negotium::settingspage::apply_settings(&ui, &s);
+    assert!(!ui.get_settings_tray_cpu());
     assert!(ui.get_on_top());
     assert_eq!(ui.get_settings_refresh(), 3);
     assert_eq!(ui.get_settings_theme(), 2);
@@ -1803,6 +1804,7 @@ fn apply_settings_sets_every_wired_property() {
     assert!(ui.get_settings_keep_in_tray());
     assert!(ui.get_settings_gpu_rendering());
     assert!(ui.get_settings_smooth_graphs() && ui.global::<negotium::GraphClock>().get_smooth());
+    assert!(ui.get_settings_tray_cpu());
     assert!(!ui.global::<negotium::Theme>().get_dark());
 }
 
@@ -1838,6 +1840,11 @@ fn saved(path: &std::path::Path, what: &str, f: impl Fn(&Settings) -> bool) {
     eventually(what, || matches!(negotium::settings::load(path), (s, negotium::settings::Loaded::File) if f(&s)));
 }
 
+thread_local! {
+    /// What the Settings page told the tray (`SettingsWiring::tray_cpu_changed`), per test thread.
+    static TRAY_TOLD: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+}
+
 /// The Settings page wired the way main.rs wires it, saving under `dir`; this instance draws with
 /// `running`.
 fn settings_wired_with(
@@ -1862,6 +1869,7 @@ fn settings_wired_with(
         gpu_marker: marker,
         fallback_recorded: fallback,
         running,
+        tray_cpu_changed: Rc::new(|on| TRAY_TOLD.with(|t| t.borrow_mut().push(on))),
     }
     .install(&ui);
     (ui, controls, settings)
@@ -1950,7 +1958,7 @@ fn settings_rects(ui: &MainWindow) -> Vec<(String, Rect)> {
     for l in ["0.5 s", "5 s", "System", "Dark"] {
         out.push((l.to_string(), rect_of(&radio(ui, l))));
     }
-    for l in ["Smooth graphs", "Always on top", "Keep running in the tray when closed", "Use GPU rendering", "Admin mode", "CPU temperature add-on"] {
+    for l in ["Smooth graphs", "Show CPU in tray icon", "Always on top", "Keep running in the tray when closed", "Use GPU rendering", "Admin mode", "CPU temperature add-on"] {
         out.push((l.to_string(), rect_of(&switch(ui, l))));
     }
     out
@@ -2015,6 +2023,7 @@ fn row_of(ui: &MainWindow, entry: &str) -> Rect {
         "Always on top" => "top-row",
         "Keep running in the tray when closed" => "tray-row",
         "Smooth graphs" => "smooth-row",
+        "Show CPU in tray icon" => "tray-cpu-row",
         _ => "gpu-row",
     };
     let rows = ui.root_element().query_descendants().match_id(format!("SettingsPage::{id}")).find_all();
@@ -2043,6 +2052,8 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
     ui.on_gpu_rendering_toggled(move |_| l.borrow_mut().push("Use GPU rendering".into()));
     let l = log.clone();
     ui.on_smooth_graphs_toggled(move |_| l.borrow_mut().push("Smooth graphs".into()));
+    let l = log.clone();
+    ui.on_tray_cpu_toggled(move |_| l.borrow_mut().push("Show CPU in tray icon".into()));
     let l = log.clone();
     ui.on_select_page(move |i| l.borrow_mut().push(format!("page {i}")));
     let in_view = |e: &El| {
@@ -2081,6 +2092,7 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
     assert_eq!(seen.last().map(String::as_str), Some("Use GPU rendering"), "Tab reaches the last enabled control: {seen:?}");
     assert!(seen.contains(&"Keep running in the tray when closed".to_string()), "{seen:?}");
     assert!(seen.contains(&"Smooth graphs".to_string()), "{seen:?}");
+    assert!(seen.contains(&"Show CPU in tray icon".to_string()), "{seen:?}");
     // And back up: the first choice comes back into view.
     let mut back = None;
     for _ in 0..30 {
@@ -2098,8 +2110,8 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
 
 #[test]
 fn screen_readers_hear_each_setting_once_with_its_description() {
-    let ui = shown_window();
-    ui.set_page(3);
+    // Tall enough for every row: the testing backend finds only what the page's view shows.
+    let ui = settings_window(1000, 1300);
     let group = El::find_by_accessible_label(&ui, "Refresh rate")
         .find(|e| e.accessible_role() == Some(AccessibleRole::Groupbox))
         .expect("the refresh choices are a labelled group");
@@ -2110,7 +2122,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 9, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 10, "the titles are still drawn");
 }
 
 #[test]
@@ -2932,4 +2944,20 @@ fn the_graph_timer_stands_still_while_the_window_is_hidden_or_minimised() {
         assert_eq!(clock.get_now(), now, "visible {visible}, minimised {minimised}: the timer doesn't run");
         assert_eq!(clock.get_offset_ms(), 0.0);
     }
+}
+
+// ---- Plan 3c Task 7: Show CPU in tray icon ----
+
+#[test]
+fn the_tray_cpu_switch_saves_and_tells_the_worker_and_the_tray() {
+    let dir = Scratch::new("traycpu");
+    let path = dir.0.join("settings.json");
+    let (ui, controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    controls.set_tray_cpu(true);
+    assert_eq!(switch(&ui, "Show CPU in tray icon").accessible_checked(), Some(true));
+    switch(&ui, "Show CPU in tray icon").invoke_accessible_default_action();
+    assert!(!controls.tray_cpu(), "the worker stops sending samples");
+    assert_eq!(TRAY_TOLD.with(|t| t.borrow().clone()), [false], "the tray shows the app icon again");
+    assert_eq!(switch(&ui, "Show CPU in tray icon").accessible_checked(), Some(false));
+    saved(&path, "tray cpu off", |s| !s.tray_cpu);
 }

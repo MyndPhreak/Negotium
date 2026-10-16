@@ -1,6 +1,11 @@
 export component NegotiumTray inherits SystemTrayIcon {
-    icon: @image-url("../assets/negotium.svg");
-    tooltip: "Negotium";
+    // crate::tray: the CPU graph (Settings > Show CPU in tray icon) or the app icon, and the
+    // hover text. Slint passes a changed icon or tooltip to the shell itself.
+    in property <bool> live;
+    in property <image> live-icon;
+    in property <string> live-tooltip: "Negotium";
+    icon: root.live ? root.live-icon : @image-url("../assets/negotium.svg");
+    tooltip: root.live-tooltip;
     callback open();
     callback exit();
     // Left-click on the icon opens the window too.

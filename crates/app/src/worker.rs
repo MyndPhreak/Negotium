@@ -2,6 +2,7 @@
 //! Frames. A panic anywhere in a tick rebuilds the pipeline after a backoff (spec section 7).
 use crate::controls::{Controls, Page};
 use crate::perf::{LastSeen, PerfInput, build_perf};
+use crate::tray::TraySample;
 use crate::view::{Frame, FrameOptions, IdMap, IdSeed, build_frame};
 use negotium_collector::{Collector, SystemInfo};
 use negotium_history::History;
@@ -77,6 +78,9 @@ pub fn supervise<S: Source, M: Fn() -> S>(
     restarts
 }
 
+/// Where each kept history sample's tray graph goes (Settings > Show CPU in tray icon).
+pub type TraySink = Arc<dyn Fn(TraySample) + Send + Sync>;
+
 /// The history, shared with the UI thread for the scrub (read under the lock, plain data).
 pub type SharedHistory = Arc<Mutex<History>>;
 
@@ -108,6 +112,7 @@ pub struct LiveSource {
     seen: Option<LastSeen>,
     elevated: bool,
     log: crate::log::Log,
+    tray: Option<TraySink>,
 }
 
 impl LiveSource {
@@ -131,7 +136,15 @@ impl LiveSource {
             seen: None,
             elevated: negotium_actions::is_elevated(),
             log: crate::log::Log::new(crate::log::Log::default_path()),
+            tray: None,
         }
+    }
+
+    /// Sends the tray a CPU sample for every history sample kept while Controls::tray_cpu is on,
+    /// visible or hidden.
+    pub fn with_tray(mut self, sink: TraySink) -> Self {
+        self.tray = Some(sink);
+        self
     }
 }
 
@@ -142,7 +155,15 @@ impl Source for LiveSource {
             self.log.warn(e);
         }
         let rows = self.model.update(&snap);
-        write_history(&self.history, |h| h.push(snap.taken_at_ms, &snap.totals, &rows));
+        let kept = write_history(&self.history, |h| h.push(snap.taken_at_ms, &snap.totals, &rows));
+        // Every tick, so the tray never waits on a stale answer (crate::tray, PF2).
+        controls.set_shell_hung(crate::tray::explorer_hung(&snap.processes, &snap.windows));
+        if kept
+            && controls.tray_cpu()
+            && let Some(tray) = &self.tray
+        {
+            tray(read_history(&self.history, |h| TraySample::from_history(h, snap.taken_at_ms, snap.totals.cpu_pct)));
+        }
         if !controls.visible() {
             return None;
         }
@@ -198,6 +219,7 @@ pub fn spawn(
     controls: Arc<Controls>,
     history: SharedHistory,
     epoch: Instant,
+    tray: Option<TraySink>,
     sink: impl FnMut(Frame) + Send + 'static,
 ) -> std::thread::JoinHandle<u32> {
     let ids = IdSeed::default();
@@ -205,7 +227,18 @@ pub fn spawn(
         .name("negotium-worker".into())
         .spawn(move || {
             let mut log = crate::log::Log::new(crate::log::Log::default_path());
-            supervise(move || LiveSource::new(history.clone(), epoch, ids.clone()), controls, sink, move |m: &str| log.warn(m))
+            supervise(
+                move || {
+                    let source = LiveSource::new(history.clone(), epoch, ids.clone());
+                    match &tray {
+                        Some(t) => source.with_tray(t.clone()),
+                        None => source,
+                    }
+                },
+                controls,
+                sink,
+                move |m: &str| log.warn(m),
+            )
         })
         .expect("spawn worker thread")
 }
@@ -284,6 +317,32 @@ mod tests {
         controls.set_page(Page::Overview);
         let f = source.next_frame(&controls).expect("visible again");
         assert!(f.perf.is_none() && !f.rows.is_empty(), "switching back stops building Performance");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_tray_gets_one_cpu_sample_per_kept_sample_even_while_hidden() {
+        let got: Arc<Mutex<Vec<crate::tray::TraySample>>> = Default::default();
+        let sink_got = got.clone();
+        let mut source = LiveSource::new(SharedHistory::default(), Instant::now(), IdSeed::default())
+            .with_tray(Arc::new(move |s| sink_got.lock().unwrap().push(s)));
+        let dir = std::env::temp_dir().join(format!("negotium-worker-tray-{}", std::process::id()));
+        source.log = crate::log::Log::new(dir.join("negotium.log"));
+        let controls = Controls::default();
+        controls.set_visible(false);
+        source.next_frame(&controls);
+        assert!(got.lock().unwrap().is_empty(), "off until Settings turns it on");
+        controls.set_tray_cpu(true);
+        std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
+        assert!(source.next_frame(&controls).is_none(), "hidden in the tray: no frame");
+        let first = got.lock().unwrap().first().cloned().expect("but the tray gets the sample");
+        assert_eq!(first.points.last().map(|p| p.0), Some(first.end_ms), "the minute up to this sample");
+        source.next_frame(&controls); // too soon: the history keeps no sample
+        assert_eq!(got.lock().unwrap().len(), 1, "one icon per kept sample");
+        controls.set_tray_cpu(false);
+        std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
+        source.next_frame(&controls);
+        assert_eq!(got.lock().unwrap().len(), 1, "switched off: no more samples");
         let _ = std::fs::remove_dir_all(dir);
     }
 

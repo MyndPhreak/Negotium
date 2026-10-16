@@ -65,33 +65,6 @@ pub fn colors(accent: Rgb, light_taskbar: bool) -> Colors {
     Colors { plate, frame, line, fill_alpha: 0.35 }
 }
 
-/// The largest known CPU value in each of the `n` newest columns of the absolute time grid that
-/// spans SPAN_MS in `n` columns (`graph::column_of`: column k covers `(k·w, (k+1)·w]`), the last one
-/// being the column holding `end` (ruling PF1: a sample keeps its column as time advances, so the
-/// icon scrolls whole columns instead of shimmering). Ruling P3-5: a spike is never averaged away.
-/// None where a column has no known value; later samples than `end` are ignored.
-pub fn columns(points: &[(u64, Option<f32>)], end: u64, n: usize) -> Vec<Option<f32>> {
-    let mut out: Vec<Option<f32>> = vec![None; n];
-    if n == 0 {
-        return out;
-    }
-    let newest = column_of(end as i64, SPAN_MS, n);
-    let oldest = newest - n as i64 + 1;
-    for &(t, v) in points {
-        let Some(v) = v.filter(|v| v.is_finite()) else { continue };
-        if t > end {
-            continue;
-        }
-        let k = column_of(t as i64, SPAN_MS, n);
-        if k < oldest {
-            continue;
-        }
-        let slot = &mut out[(k - oldest) as usize];
-        *slot = Some(slot.map_or(v, |b| b.max(v)));
-    }
-    out
-}
-
 /// Draws the icon: `size` × `size` pixels of straight-alpha RGBA8, row by row from the top.
 pub fn render(points: &[(u64, Option<f32>)], end: u64, size: u32, c: &Colors) -> Vec<u8> {
     let s = size.max(1) as f32;
@@ -140,8 +113,11 @@ struct Geo {
 type Run = Vec<(f32, f32)>;
 
 /// The joined stretches of the graph as points (x, y) from `place(column, value)`, one point per
-/// column holding a known value (its largest, ruling P3-5), on the same absolute grid as [`columns`].
-/// Like the main graphs, a stretch ends where two consecutive samples are more than PAUSE_BREAK_MS
+/// column holding a known value: its largest (ruling P3-5), a spike is never averaged away. The
+/// columns lie on the absolute time grid that spans SPAN_MS in `n` columns (`graph::column_of`:
+/// column k covers `(k·w, (k+1)·w]`), the last one holding `end` (ruling PF1: a sample keeps its
+/// column as time advances, so the icon scrolls whole columns instead of shimmering); samples
+/// later than `end` are ignored. Like the main graphs, a stretch ends where two consecutive samples are more than PAUSE_BREAK_MS
 /// apart in real time, and at a column holding only missing values; columns without samples are
 /// skipped over.
 fn runs(points: &[(u64, Option<f32>)], end: u64, n: usize, place: impl Fn(usize, f32) -> (f32, f32)) -> Vec<Run> {
@@ -272,6 +248,15 @@ mod tests {
 
     fn opaque(c: Rgb) -> [u8; 4] {
         [c.0, c.1, c.2, 255]
+    }
+
+    /// The value each of the `n` grid columns ends up with in [`runs`] (None where none is drawn).
+    fn columns(points: &[(u64, Option<f32>)], end: u64, n: usize) -> Vec<Option<f32>> {
+        let mut out = vec![None; n];
+        for (i, v) in runs(points, end, n, |i, v| (i as f32, v)).into_iter().flatten() {
+            out[i as usize] = Some(v);
+        }
+        out
     }
 
     #[test]
@@ -522,6 +507,5 @@ mod tests {
     fn each_column_keeps_its_largest_value_and_gaps_stay_empty() {
         let pts = [(1_000, Some(5.0)), (2_000, Some(90.0)), (3_000, None), (59_000, Some(f32::NAN)), (60_000, Some(20.0)), (70_000, Some(99.0))];
         assert_eq!(columns(&pts, 60_000, 6), [Some(90.0), None, None, None, None, Some(20.0)], "spikes survive; unknown and future values are skipped");
-        assert!(columns(&pts, 60_000, 0).is_empty());
     }
 }

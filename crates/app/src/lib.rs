@@ -15,6 +15,7 @@ pub mod settings;
 pub mod settingspage;
 pub mod smooth;
 pub mod startup;
+pub mod tray;
 pub mod trayicon;
 pub mod view;
 pub mod worker;

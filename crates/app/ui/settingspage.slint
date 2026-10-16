@@ -150,6 +150,8 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> keep-in-tray;
     // Graphs scroll continuously between samples (crate::smooth).
     in property <bool> smooth-graphs;
+    // The tray icon draws the CPU graph (crate::tray).
+    in property <bool> tray-cpu;
     // The saved GPU choice; whether an automatic fallback to the CPU is recorded; whether this
     // instance draws with the GPU; whether SLINT_BACKEND chose the renderer (crate::settingspage).
     in property <bool> gpu-rendering;
@@ -164,6 +166,7 @@ export component SettingsPage inherits VerticalLayout {
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
+    callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
     property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
@@ -246,6 +249,18 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     toggled(on) => { root.tray-toggled(on); }
                     focus-gained => { sv.reveal(tray-row.absolute-position.y, tray-row.height); }
+                }
+            }
+            tray-cpu-row := SettingRow {
+                title: "Show CPU in tray icon";
+                description: "The tray icon draws the last minute of CPU use; point at it to see the current value.";
+                Toggle {
+                    label: tray-cpu-row.title;
+                    description: tray-cpu-row.description;
+                    checked: root.tray-cpu;
+                    interactive: root.interactive;
+                    toggled(on) => { root.tray-cpu-toggled(on); }
+                    focus-gained => { sv.reveal(tray-cpu-row.absolute-position.y, tray-cpu-row.height); }
                 }
             }
             gpu-row := SettingRow {
