@@ -85,25 +85,70 @@ export component Graph inherits Rectangle {
         height: root.height;
         background: Theme.text;
     }
+    // The card stays inside the graph, which clips: it sits right of the cursor, or left of it
+    // when it would pass the right edge, and lists only as many apps as the graph's height holds.
+    property <length> card-w: min(210px, root.width - 16px);
+    property <length> cursor-px: root.width * root.scrub-x;
+    property <int> card-rows: max(0, min(root.scrub-rows.length, floor((root.height - 16px - 34px) / 16px)));
     if root.scrub-x >= 0 && ta.has-hover : Rectangle {
-        width: 210px;
-        height: card.preferred-height;
-        x: root.scrub-x > 0.6 ? root.width * root.scrub-x - self.width - 8px : root.width * root.scrub-x + 8px;
+        accessible-role: groupbox;
+        accessible-label: root.scrub-title;
+        width: root.card-w;
+        // Padding 8 + title 18 + rows of 16 (or two lines of the empty text) + padding 8.
+        height: 34px + (root.scrub-rows.length == 0 ? 32px : root.card-rows * 16px);
+        x: max(0px, min(root.width - self.width,
+            root.cursor-px + 8px + self.width > root.width ? root.cursor-px - self.width - 8px : root.cursor-px + 8px));
         y: 8px;
         border-radius: 6px;
         border-width: 1px;
         border-color: Theme.card-border;
         background: Theme.dark ? #2b2b2b : #ffffff;
-        card := VerticalLayout {
-            padding: 8px;
-            spacing: 2px;
-            Text { text: root.scrub-title; color: Theme.text; font-size: 12px; font-weight: 600; }
-            for r in root.scrub-rows : HorizontalLayout {
-                spacing: 8px;
-                Text { text: r.name; color: Theme.text; font-size: 11px; overflow: elide; horizontal-stretch: 1; }
-                Text { text: r.value; color: Theme.text; font-size: 11px; }
+        Text {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: 18px;
+            text: root.scrub-title;
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: 600;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        for r[i] in root.scrub-rows : Rectangle {
+            x: 8px;
+            y: 26px + i * 16px;
+            width: parent.width - 16px;
+            height: 16px;
+            visible: i < root.card-rows;
+            value := Text {
+                x: parent.width - self.width;
+                height: parent.height;
+                text: r.value;
+                color: Theme.text;
+                font-size: 11px;
+                vertical-alignment: center;
             }
-            if root.scrub-rows.length == 0 : Text { text: root.scrub-empty; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+            Text {
+                x: 0;
+                width: max(0px, parent.width - value.width - 8px);
+                height: parent.height;
+                text: r.name;
+                color: Theme.text;
+                font-size: 11px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+        if root.scrub-rows.length == 0 : Text {
+            x: 8px;
+            y: 26px;
+            width: parent.width - 16px;
+            height: 32px;
+            text: root.scrub-empty;
+            color: Theme.muted;
+            font-size: 11px;
+            wrap: word-wrap;
         }
     }
 }

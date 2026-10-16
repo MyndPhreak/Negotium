@@ -29,7 +29,15 @@ fn ticks_produce_complete_snapshots() {
 
 #[test]
 fn a_shared_epoch_carries_collector_time_across_a_rebuilt_collector() {
-    let epoch = std::time::Instant::now() - Duration::from_secs(5);
+    let now = std::time::Instant::now();
+    // Shortly after boot an Instant may not reach 5 s back: then use an epoch the test waits past.
+    let (epoch, at_least) = match now.checked_sub(Duration::from_secs(5)) {
+        Some(earlier) => (earlier, 5_000),
+        None => {
+            std::thread::sleep(Duration::from_millis(200));
+            (now, 200)
+        }
+    };
     let snap = negotium_collector::Collector::with_epoch(epoch).tick();
-    assert!(snap.taken_at_ms >= 5_000);
+    assert!(snap.taken_at_ms >= at_least, "{} ms", snap.taken_at_ms);
 }

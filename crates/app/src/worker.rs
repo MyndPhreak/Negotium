@@ -80,6 +80,23 @@ pub fn supervise<S: Source, M: Fn() -> S>(
 /// The history, shared with the UI thread for the scrub (read under the lock, plain data).
 pub type SharedHistory = Arc<Mutex<History>>;
 
+/// Changes the shared history. This is the only place a panic can poison its lock, and a
+/// poisoned lock therefore means a write was cut short: `LiveSource::new` starts the history over.
+fn write_history<R>(history: &SharedHistory, f: impl FnOnce(&mut History) -> R) -> R {
+    f(&mut history.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Reads the shared history for view building. A panic in `f` leaves the history intact, so it
+/// goes on (to the supervisor) only after the guard is released: the lock is not poisoned and the
+/// restarted worker keeps the history.
+fn read_history<R>(history: &SharedHistory, f: impl FnOnce(&History) -> R) -> R {
+    let result = {
+        let h = history.lock().unwrap_or_else(|e| e.into_inner());
+        catch_unwind(AssertUnwindSafe(|| f(&h)))
+    };
+    result.unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
 pub struct LiveSource {
     collector: Collector,
     info: SystemInfo,
@@ -93,7 +110,8 @@ pub struct LiveSource {
 
 impl LiveSource {
     /// `history` and `epoch` outlive a restart after a panic, so the graphs keep their past. A
-    /// panic while the history was locked may have left it half-written: it starts over empty.
+    /// poisoned lock means a write was cut short (see `write_history`): the possibly half-written
+    /// history starts over empty.
     pub fn new(history: SharedHistory, epoch: Instant) -> Self {
         if history.is_poisoned() {
             *history.lock().unwrap_or_else(|e| e.into_inner()) = History::new();
@@ -121,8 +139,7 @@ impl Source for LiveSource {
             self.log.warn(e);
         }
         let rows = self.model.update(&snap);
-        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
-        history.push(snap.taken_at_ms, &snap.totals, &rows);
+        write_history(&self.history, |h| h.push(snap.taken_at_ms, &snap.totals, &rows));
         if !controls.visible() {
             return None;
         }
@@ -133,12 +150,15 @@ impl Source for LiveSource {
                 let order = self.ranker.order(&rows, metric, snap.taken_at_ms, controls.frozen());
                 let (expanded, all_children) = controls.child_rows();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children };
-                Some(build_frame(&mut self.ids, &snap, &rows, &order, &history, &opts))
+                let ids = &mut self.ids;
+                Some(read_history(&self.history, |h| build_frame(ids, &snap, &rows, &order, h, &opts)))
             }
             Page::Performance => {
                 let (device, range) = controls.perf();
-                let input = PerfInput { snap: &snap, history: &history, info: &self.info, device: &device, range };
-                Some(Frame { page: Page::Performance, perf: Some(build_perf(&input)), ..Default::default() })
+                let perf = read_history(&self.history, |h| {
+                    build_perf(&PerfInput { snap: &snap, history: h, info: &self.info, device: &device, range })
+                });
+                Some(Frame { page: Page::Performance, perf: Some(perf), ..Default::default() })
             }
         }
     }
@@ -190,7 +210,7 @@ mod tests {
     impl Source for Panicky {
         fn next_frame(&mut self, _: &Controls) -> Option<Frame> {
             if self.0.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
-                panic!("collector blew up");
+                panic!("test panic: collector blew up");
             }
             Some(Frame::default())
         }
@@ -231,22 +251,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn a_restart_keeps_the_history_but_recovers_one_poisoned_by_a_panic() {
-        let history = SharedHistory::default();
-        history.lock().unwrap().push(1_000, &Default::default(), &[]);
-        let kept = LiveSource::new(history.clone(), Instant::now());
-        assert_eq!(kept.history.lock().unwrap().len(), 1, "a healthy history survives the restart");
-        drop(kept);
+    /// Panics whose message starts with this are expected by a test and not printed.
+    const EXPECTED: &str = "test panic:";
 
-        let h = history.clone();
-        std::panic::set_hook(Box::new(|_| {}));
-        let _ = std::thread::spawn(move || {
-            let _guard = h.lock().unwrap();
-            panic!("panicked mid-push");
-        })
-        .join();
-        let _ = std::panic::take_hook();
+    /// Installs, once, a hook that hides expected panics and passes every other one to the hook
+    /// installed before it. Never removed, so tests running in parallel can't drop each other's.
+    fn quiet_expected_panics() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if !panic_text(info.payload()).starts_with(EXPECTED) {
+                    previous(info);
+                }
+            }));
+        });
+    }
+
+    fn one_sample() -> SharedHistory {
+        let history = SharedHistory::default();
+        write_history(&history, |h| h.push(1_000, &Default::default(), &[]));
+        history
+    }
+
+    #[test]
+    fn a_panic_while_building_a_view_keeps_the_history_across_the_restart() {
+        quiet_expected_panics();
+        let history = one_sample();
+        let r = catch_unwind(|| read_history(&history, |_| -> Frame { panic!("test panic: view building") }));
+        assert_eq!(panic_text(&*r.expect_err("the panic reaches the supervisor")), "test panic: view building");
+        assert!(!history.is_poisoned(), "a read never poisons the lock");
+        let source = LiveSource::new(history.clone(), Instant::now());
+        assert_eq!(source.history.lock().unwrap().len(), 1, "the restarted worker keeps the history");
+    }
+
+    #[test]
+    fn a_panic_during_a_push_starts_the_history_over_on_restart() {
+        quiet_expected_panics();
+        let history = one_sample();
+        let r = catch_unwind(|| write_history(&history, |_| panic!("test panic: mid-push")));
+        assert!(r.is_err());
         assert!(history.is_poisoned());
         let _source = LiveSource::new(history.clone(), Instant::now());
         assert!(!history.is_poisoned(), "the poison is cleared");
@@ -273,7 +317,7 @@ mod tests {
 
     #[test]
     fn panics_are_survived_with_backoff_and_frames_keep_flowing() {
-        std::panic::set_hook(Box::new(|_| {}));
+        quiet_expected_panics();
         let controls = Arc::new(Controls::default());
         controls.set_visible(true);
         let calls = Arc::new(AtomicU32::new(0));
@@ -293,7 +337,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1800));
         controls.request_stop();
         let restarts = handle.join().unwrap();
-        let _ = std::panic::take_hook();
         assert!(restarts >= 1, "a panic must trigger a restart");
         assert!(restarts <= 3, "backoff must prevent a tight restart loop: {restarts}");
         assert!(frames.load(Ordering::SeqCst) >= 1, "frames continue after a restart");

@@ -3,6 +3,7 @@ use negotium::{DeviceData, GraphData, SegmentData, StatData};
 use negotium::controls::Page;
 use negotium::perf::{DeviceView, GraphView, PerfFrame, Range, StatView};
 use negotium::worker::SharedHistory;
+use negotium::ScrubRow;
 use negotium::{MainWindow, MeterData, RowData};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::cell::RefCell;
@@ -1121,14 +1122,12 @@ fn the_scrub_never_waits_for_the_worker_and_keeps_its_card_while_the_history_is_
 
     // A worker panic poisoned the lock: the card stays (no UI-thread panic) until the restarted
     // worker resets the history.
-    let h = history.clone();
-    std::panic::set_hook(Box::new(|_| {}));
-    let _ = std::thread::spawn(move || {
-        let _guard = h.lock().unwrap();
-        panic!("worker panicked mid-push");
-    })
-    .join();
-    let _ = std::panic::take_hook();
+    quiet_expected_panics();
+    let _ = std::panic::catch_unwind(|| {
+        let _guard = history.lock().unwrap();
+        panic!("test panic: worker panicked mid-push");
+    });
+    assert!(history.is_poisoned());
     bridge.borrow_mut().scrub(&ui, 0.25);
     assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:46");
     bridge.borrow_mut().scrub(&ui, -1.0);
@@ -1148,4 +1147,46 @@ fn leaving_the_performance_page_ends_the_scrub() {
     bridge.borrow_mut().set_page(&ui, Page::Performance);
     bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM + 1_000));
     assert_eq!(ui.get_scrub_x(), -1.0, "no cursor comes back without a pointer over a graph");
+}
+
+/// Panics whose message starts with "test panic:" are expected by a test and not printed. The hook
+/// is installed once and passes every other panic to the hook installed before it; it is never
+/// removed, so tests running in parallel can't drop each other's.
+fn quiet_expected_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let p = info.payload();
+            let text = p.downcast_ref::<&str>().copied().or_else(|| p.downcast_ref::<String>().map(String::as_str));
+            if !text.is_some_and(|t| t.starts_with("test panic:")) {
+                previous(info);
+            }
+        }));
+    });
+}
+
+#[test]
+fn the_scrub_card_stays_inside_the_graph_at_the_smallest_window() {
+    let ui = perf_window(760, 440, &["% Utilization"], cores(4));
+    let rows: Vec<ScrubRow> = (0..10)
+        .map(|i| ScrubRow { name: format!("A rather long application name {i}").into(), value: "100.0%".into() })
+        .collect();
+    ui.set_scrub_rows(ModelRc::new(VecModel::from(rows)));
+    let graph = rect(&ui, "% Utilization graph");
+    let visible = (graph.0.max(0.0), graph.1.max(0.0), (graph.0 + graph.2).min(760.0), (graph.1 + graph.3).min(440.0));
+    for f in [0.02f32, 0.59, 0.98] {
+        let title = format!("Top apps at {f}");
+        ui.set_scrub_title(title.as_str().into());
+        let cursor = graph.0 + graph.2 * f;
+        move_pointer(&ui, cursor, graph.1 + graph.3 / 2.0);
+        slint::platform::update_timers_and_animations();
+        ui.set_scrub_x(f);
+        let card = rect(&ui, &title);
+        let (l, t, r, b) = (card.0, card.1, card.0 + card.2, card.1 + card.3);
+        assert!(l >= visible.0 && t >= visible.1 && r <= visible.2 && b <= visible.3,
+            "at {f} the card {card:?} leaves the visible graph {visible:?}");
+        assert!(r <= cursor || l >= cursor, "at {f} the card {card:?} covers the cursor at {cursor}");
+        assert!(card.3 >= 34.0 + 5.0 * 16.0, "at {f} the card lists several apps: {card:?}");
+    }
 }
