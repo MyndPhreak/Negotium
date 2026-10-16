@@ -82,10 +82,12 @@ impl Scroll {
 }
 
 /// Answers `GraphClock.redraw-hz`, which sets how often the graph timer redraws, with
-/// [`redraw_hz`] at speed 1 (a run's speed changes with nearly every frame, and a new interval
-/// re-arms the running timer: between 0.5x and 2x a redraw moves half a pixel to two), and `GraphClock.clock`, the time graphs scroll by, with `clock`: the bridge
-/// passes the time since the collector's epoch, so its view edge and Slint's agree; tests pass the
-/// testing backend's mocked time. `Bridge::install` calls it.
+/// [`redraw_hz`] at speed 1: a run's speed changes with nearly every frame, and a new interval
+/// re-arms the running timer (between 0.5x and 2x a redraw moves half a pixel to two).
+///
+/// Answers `GraphClock.clock`, the time graphs scroll by, with `clock`: the bridge passes the time
+/// since the collector's epoch, so its view edge and Slint's agree; tests pass the testing
+/// backend's mocked time. `Bridge::install` calls it.
 pub fn install(ui: &crate::MainWindow, clock: impl Fn() -> std::time::Duration + 'static) {
     use slint::ComponentHandle;
     let graph_clock = ui.global::<crate::GraphClock>();
