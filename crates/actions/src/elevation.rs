@@ -75,6 +75,7 @@ pub fn restart_as_admin(args: &str, owner: isize) -> Result<(), ActionError> {
     let params = HSTRING::from(args);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        // Only the UAC prompt's owner (z-order): 0 means none, and a destroyed handle is tolerated.
         hwnd: HWND(owner as *mut c_void),
         // The caller exits right after: the launch must complete inside this call.
         fMask: SEE_MASK_NOASYNC,

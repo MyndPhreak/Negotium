@@ -174,11 +174,12 @@ The top lists dominate. A typical machine (16 logical processors, 2 disks, 2 ada
 3. All-users entries without admin: switches disabled with "Needs admin" and the inline banner; "Restart as admin" reopens Negotium on Startup with those switches enabled.
 4. Settings: each refresh rate visibly changes the update pace; Theme System/Light/Dark switch content, title bar and Mica; with System, flipping Windows' mode follows within a second; Always on top holds above Explorer; with "Keep running in the tray" off, closing the window exits.
 5. Settings persist across restarts; replacing `%LOCALAPPDATA%\Negotium\settings.json` with `{` starts Negotium with defaults and leaves `settings.json.bad`.
-6. GPU renderer: it is the default and resizing is smooth. The debug build with `NEGOTIUM_SIMULATE_STALL=1` relaunches into software once and creates `%LOCALAPPDATA%\Negotium\renderer-fallback`. Settings → "Use GPU rendering" then shows off with its explanation; turning it on clears the marker after a restart. A minimised start must not trigger the fallback; the tray appears after about 10 s.
-7. Graphs fill their boxes top to bottom.
+6. GPU renderer: it is the default and resizing is smooth. The debug build with `NEGOTIUM_SIMULATE_STALL=1` relaunches into software once and creates `%LOCALAPPDATA%\Negotium\renderer-fallback`. Settings → "Use GPU rendering" then shows off with its explanation; turning it on clears the marker after a restart. A minimised start must not trigger the fallback; the tray appears after about 10 s (the watchdog's fallback timer).
+7. Graphs fill their boxes top to bottom, on the Overview meters and the Performance graphs.
 8. Shift+F10 / the Menu key with nothing focused highlights a row first, and a second press opens the menu.
 9. Task Manager's `StartupApproved\StartupFolder` value name matches Negotium's, which is the shortcut file name including `.lnk`.
-10. A hidden (+h) shortcut in the Startup folder: does Task Manager list it, and does it run at sign-in? Negotium skips hidden and system files.
-11. After disabling a packaged task in Settings or Task Manager, check whether `LastDisabledTime` is written. Negotium writes only `State`.
+10. A hidden (+h) shortcut in the Startup folder: does Task Manager list it, and does it run at sign-in? Negotium skips hidden and system files. If Task Manager lists it, Negotium should too: note it for a follow-up.
+11. After disabling a packaged task in Settings or Task Manager, check whether `LastDisabledTime` is written. Negotium writes only `State`. If Windows writes it, note that Negotium should too.
 12. The UAC prompt for "Restart as admin" appears in front, not as a flashing taskbar button.
-13. Theme change: the title bar repaints at once, and the Settings Tab order scrolls each focused row into view.
+13. Theme change: the title bar repaints at once.
+14. Tab through Settings at a small window: each focused row scrolls into view.

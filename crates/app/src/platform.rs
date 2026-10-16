@@ -293,22 +293,32 @@ pub fn unmark_main_window(hwnd: HWND) {
 
 /// The main window of a running instance (this process's included), visible or not.
 pub fn find_main_window() -> Option<HWND> {
+    find_main_window_where(|_| true)
+}
+
+/// The first marked window that `accept` takes (tests narrow it to their own window, so another
+/// running instance can't answer).
+fn find_main_window_where(accept: impl Fn(HWND) -> bool) -> Option<HWND> {
+    struct Search<'a> {
+        accept: &'a dyn Fn(HWND) -> bool,
+        found: Option<HWND>,
+    }
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        // SAFETY: lparam is the `&mut Option<HWND>` passed below for the duration of EnumWindows.
-        let found = unsafe { &mut *(lparam.0 as *mut Option<HWND>) };
+        // SAFETY: lparam is the `&mut Search` passed below for the duration of EnumWindows.
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
         // SAFETY: read-only property lookup on a handle supplied by EnumWindows.
-        if !unsafe { GetPropW(hwnd, MAIN_WINDOW_PROP) }.is_invalid() {
-            *found = Some(hwnd);
+        if !unsafe { GetPropW(hwnd, MAIN_WINDOW_PROP) }.is_invalid() && (search.accept)(hwnd) {
+            search.found = Some(hwnd);
             return false.into();
         }
         true.into()
     }
-    let mut found: Option<HWND> = None;
-    // SAFETY: `found` outlives the synchronous enumeration.
+    let mut search = Search { accept: &accept, found: None };
+    // SAFETY: `search` outlives the synchronous enumeration.
     unsafe {
-        let _ = EnumWindows(Some(visit), LPARAM(&mut found as *mut Option<HWND> as isize));
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
     }
-    found
+    search.found
 }
 
 /// Asks the running instance to show itself, waiting up to `timeout` for its window to exist
@@ -490,15 +500,15 @@ mod tests {
     fn a_hidden_main_window_is_found_by_its_mark() {
         let hwnd = hidden_window();
         mark_main_window(hwnd);
-        let found = find_main_window();
+        let found = find_main_window_where(|h| h == hwnd);
         unmark_main_window(hwnd);
-        let after = find_main_window();
+        let after = find_main_window_where(|h| h == hwnd);
         // SAFETY: our own test window.
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
         assert_eq!(found, Some(hwnd));
-        assert_ne!(after, Some(hwnd), "an exiting instance is no longer found");
+        assert_eq!(after, None, "an exiting instance is no longer found");
     }
 
     #[test]
