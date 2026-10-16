@@ -51,14 +51,16 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 }
 
 /// The icon's colours on a light or dark taskbar: the plate in the taskbar's tone, the outline in
-/// the opposite one, and the accent moved toward the outline's tone, in tenths, until it stands out
-/// from the plate by MIN_CONTRAST.
+/// the opposite one, and the accent moved, in hundredths and the smallest move first, toward the
+/// outline's tone or away from it, until the line stands out by MIN_CONTRAST from both the plate
+/// and the outline (an accent near either tone would otherwise vanish into it).
 pub fn colors(accent: Rgb, light_taskbar: bool) -> Colors {
     let (plate, frame, toward) =
         if light_taskbar { (LIGHT_PLATE, DARK_FRAME, (0, 0, 0)) } else { (DARK_PLATE, LIGHT_FRAME, (255, 255, 255)) };
-    let line = (0..=10)
-        .map(|i| mix(accent, toward, i as f32 / 10.0))
-        .find(|&c| contrast(c, plate) >= MIN_CONTRAST)
+    let away = (255 - toward.0, 255 - toward.1, 255 - toward.2);
+    let line = (0..=100)
+        .flat_map(|i| [mix(accent, toward, i as f32 / 100.0), mix(accent, away, i as f32 / 100.0)])
+        .find(|&c| contrast(c, plate) >= MIN_CONTRAST && contrast(c, frame) >= MIN_CONTRAST)
         .unwrap_or(toward);
     Colors { plate, frame, line, fill_alpha: 0.35 }
 }
@@ -97,20 +99,12 @@ pub fn render(points: &[(u64, Option<f32>)], end: u64, size: u32, c: &Colors) ->
     let radius = (s * 0.2).max(2.0);
     let (g0, gw) = (stroke, s - 2.0 * stroke); // the graph area, a square inside the outline
     let n = (gw.round() as usize).max(1); // one column per pixel
-    let (col_w, col_ms) = (gw / n as f32, SPAN_MS as f32 / n as f32);
-    // Runs of joined columns: consecutive known columns no further apart than a pause.
-    let mut runs: Vec<Vec<(f32, f32)>> = Vec::new();
-    let mut last: Option<usize> = None;
-    for (i, v) in columns(points, end, n).into_iter().enumerate() {
-        let Some(v) = v else { continue };
-        if !last.is_some_and(|l| (i - l) as f32 * col_ms <= PAUSE_BREAK_MS as f32) {
-            runs.push(Vec::new());
-        }
-        let point = (g0 + (i as f32 + 0.5) * col_w, g0 + gw * (1.0 - v.clamp(0.0, 100.0) / 100.0));
-        runs.last_mut().expect("pushed above").push(point);
-        last = Some(i);
-    }
+    let col_w = gw / n as f32;
     let half = (s / 16.0 * 1.25).max(1.0) / 2.0; // half the line's width
+    // The line's extremes sit half its width inside the graph area, so 0 % and 100 % show it whole.
+    let (y_top, y_span) = (g0 + half, gw - 2.0 * half);
+    let runs = runs(points, end, n, |i, v| (g0 + (i as f32 + 0.5) * col_w, y_top + y_span * (1.0 - v.clamp(0.0, 100.0) / 100.0)));
+    let geo = Geo { s, stroke, radius, half, edge: col_w / 2.0 };
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for py in 0..size {
         for px in 0..size {
@@ -119,7 +113,7 @@ pub fn render(points: &[(u64, Option<f32>)], end: u64, size: u32, c: &Colors) ->
                 for sx in 0..SS {
                     let x = px as f32 + (sx as f32 + 0.5) / SS as f32;
                     let y = py as f32 + (sy as f32 + 0.5) / SS as f32;
-                    if let Some(c) = shade(x, y, s, stroke, radius, &runs, half, c) {
+                    if let Some(c) = shade(x, y, &geo, &runs, c) {
                         (0..3).for_each(|i| rgb[i] += c[i]);
                         covered += 1.0;
                     }
@@ -132,22 +126,85 @@ pub fn render(points: &[(u64, Option<f32>)], end: u64, size: u32, c: &Colors) ->
     out
 }
 
+/// Sizes the pixel shader needs, in pixels.
+struct Geo {
+    s: f32,
+    stroke: f32,
+    radius: f32,
+    /// Half the line's width.
+    half: f32,
+    /// How far the fill extends past a run's first and last point: half a column.
+    edge: f32,
+}
+
+type Run = Vec<(f32, f32)>;
+
+/// The joined stretches of the graph as points (x, y) from `place(column, value)`, one point per
+/// column holding a known value (its largest, ruling P3-5), on the same absolute grid as [`columns`].
+/// Like the main graphs, a stretch ends where two consecutive samples are more than PAUSE_BREAK_MS
+/// apart in real time, and at a column holding only missing values; columns without samples are
+/// skipped over.
+fn runs(points: &[(u64, Option<f32>)], end: u64, n: usize, place: impl Fn(usize, f32) -> (f32, f32)) -> Vec<Run> {
+    let newest = column_of(end as i64, SPAN_MS, n);
+    let oldest = newest - n as i64 + 1;
+    let mut runs: Vec<Run> = Vec::new();
+    let mut broken = true;
+    let mut current: Option<(usize, Option<f32>)> = None;
+    let mut prev_t: Option<u64> = None;
+    let emit = |runs: &mut Vec<Run>, broken: &mut bool, cell: Option<(usize, Option<f32>)>| match cell {
+        Some((i, Some(v))) => {
+            if *broken {
+                runs.push(Vec::new());
+                *broken = false;
+            }
+            runs.last_mut().expect("pushed above").push(place(i, v));
+        }
+        Some((_, None)) => *broken = true,
+        None => {}
+    };
+    for &(t, v) in points {
+        let k = column_of(t as i64, SPAN_MS, n);
+        if t > end || k < oldest {
+            continue;
+        }
+        if prev_t.is_some_and(|p| t.saturating_sub(p) > PAUSE_BREAK_MS) {
+            emit(&mut runs, &mut broken, current.take());
+            broken = true;
+        }
+        prev_t = Some(t);
+        let i = (k - oldest) as usize;
+        let v = v.filter(|v| v.is_finite());
+        match &mut current {
+            Some((cur, best)) if *cur == i => {
+                if let Some(v) = v {
+                    *best = Some(best.map_or(v, |b| b.max(v)));
+                }
+            }
+            _ => {
+                emit(&mut runs, &mut broken, current.take());
+                current = Some((i, v));
+            }
+        }
+    }
+    emit(&mut runs, &mut broken, current);
+    runs
+}
+
 /// The opaque colour at (x, y), or None outside the icon's rounded square.
-#[allow(clippy::too_many_arguments)]
-fn shade(x: f32, y: f32, s: f32, stroke: f32, radius: f32, runs: &[Vec<(f32, f32)>], half: f32, c: &Colors) -> Option<[f32; 3]> {
+fn shade(x: f32, y: f32, g: &Geo, runs: &[Run], c: &Colors) -> Option<[f32; 3]> {
     let rgb = |c: Rgb| [c.0 as f32, c.1 as f32, c.2 as f32];
-    if !inside_rounded(x, y, s, radius) {
+    if !inside_rounded(x, y, g.s, g.radius) {
         return None;
     }
-    if !inside_rounded(x - stroke, y - stroke, s - 2.0 * stroke, (radius - stroke).max(0.0)) {
+    if !inside_rounded(x - g.stroke, y - g.stroke, g.s - 2.0 * g.stroke, (g.radius - g.stroke).max(0.0)) {
         return Some(rgb(c.frame));
     }
     let mut out = rgb(c.plate);
-    if runs.iter().any(|r| below(r, x, y)) {
+    if runs.iter().any(|r| below(r, x, y, g.edge)) {
         let line = rgb(c.line);
         (0..3).for_each(|i| out[i] += (line[i] - out[i]) * c.fill_alpha);
     }
-    if runs.iter().any(|r| near(r, x, y, half)) {
+    if runs.iter().any(|r| near(r, x, y, g.half)) {
         out = rgb(c.line);
     }
     Some(out)
@@ -163,12 +220,23 @@ fn inside_rounded(x: f32, y: f32, side: f32, r: f32) -> bool {
     dx * dx + dy * dy <= r * r
 }
 
-/// Whether (x, y) is under the run's line, within the run's extent.
-fn below(run: &[(f32, f32)], x: f32, y: f32) -> bool {
+/// Whether (x, y) is under the run's line, which the fill follows half a column (`edge`) past both
+/// ends, flat, so a graph that spans the whole icon is filled edge to edge.
+fn below(run: &[(f32, f32)], x: f32, y: f32, edge: f32) -> bool {
+    let (Some(&(x0, y0)), Some(&(xn, yn))) = (run.first(), run.last()) else { return false };
+    if x < x0 - edge || x > xn + edge {
+        return false;
+    }
+    if x < x0 {
+        return y >= y0;
+    }
+    if x > xn {
+        return y >= yn;
+    }
     run.windows(2).any(|w| {
-        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
-        x >= x0 && x <= x1 && y >= y0 + (y1 - y0) * (x - x0) / (x1 - x0)
-    })
+        let ((a, ay), (b, by)) = (w[0], w[1]);
+        x >= a && x <= b && y >= ay + (by - ay) * (x - a) / (b - a)
+    }) || (run.len() == 1 && y >= y0)
 }
 
 /// Whether (x, y) is within `half` of the run's line; a lone point draws a dot.
@@ -349,13 +417,92 @@ mod tests {
         assert_eq!(pixel(&img, 32, 16, 29), opaque(c.plate), "nor along the floor");
     }
 
+    /// A graph of two known samples `gap_ms` apart at 50 %, and whether the middle of the gap is drawn.
+    fn joined(size: u32, gap_ms: u64, between: Option<f32>) -> bool {
+        let c = colors(ACCENT, false);
+        let mut pts = vec![(30_000, Some(50.0))];
+        if let Some(v) = between {
+            pts.push((30_000 + gap_ms / 2, Some(v)));
+        }
+        pts.push((30_000 + gap_ms, Some(50.0)));
+        let img = render(&pts, 60_000, size, &c);
+        let stroke = if size >= 32 { 2 } else { 1 };
+        let n = (size - 2 * stroke) as usize;
+        let (c1, c2) = (column_of(30_000, SPAN_MS, n), column_of((30_000 + gap_ms) as i64, SPAN_MS, n));
+        let mid = (c1 + c2) / 2;
+        assert!(c2 - c1 >= 2, "{size} px: the samples are columns apart");
+        let x = stroke + (mid - (column_of(60_000, SPAN_MS, n) - n as i64 + 1)) as u32;
+        (stroke + 1..size - stroke - 1).any(|y| pixel(&img, size, x, y) != opaque(c.plate))
+    }
+
+    #[test]
+    fn a_gap_of_nine_seconds_is_joined_and_eleven_breaks_at_any_size() {
+        for size in [16, 20, 24, 32] {
+            assert!(joined(size, 9_000, None), "{size} px: 9 s apart stays one line");
+            assert!(!joined(size, 11_000, None), "{size} px: 11 s apart is two");
+        }
+    }
+
+    #[test]
+    fn an_unknown_sample_breaks_the_line() {
+        for size in [16, 24] {
+            // Samples 4.5 s either side of a missing one: close enough to join, yet the unknown value splits them.
+            assert!(!joined(size, 9_000, Some(f32::NAN)), "{size} px");
+            assert!(joined(size, 9_000, Some(50.0)), "{size} px: the same with a known middle sample");
+        }
+    }
+
+    #[test]
+    fn flat_full_and_idle_lines_show_their_whole_width_at_16_px() {
+        let c = colors(ACCENT, false);
+        let top = render(&flat(100.0), 60_000, 16, &c);
+        let bottom = render(&flat(0.0), 60_000, 16, &c);
+        // The line's width at 16 px is 1.25 px: one whole pixel row plus a quarter of the next.
+        assert_eq!(pixel(&top, 16, 8, 1), opaque(c.line), "100 %: the whole row under the outline");
+        assert_eq!(pixel(&bottom, 16, 8, 14), opaque(c.line), "0 %: the whole row above the outline");
+        assert_ne!(pixel(&top, 16, 8, 2), opaque(c.plate), "and the rest of its width below it");
+        assert_ne!(pixel(&bottom, 16, 8, 13), opaque(c.plate));
+    }
+
+    #[test]
+    fn the_fill_reaches_both_edges_of_the_graph() {
+        let c = colors(ACCENT, false);
+        let img = render(&flat(50.0), 60_000, 32, &c);
+        let plate = pixel(&img, 32, 16, 8);
+        assert_eq!(plate, opaque(c.plate));
+        for x in [2, 29] {
+            let p = pixel(&img, 32, x, 24);
+            assert_ne!(p, opaque(c.plate), "filled at x = {x}");
+            assert_ne!(p, opaque(c.frame));
+            assert_eq!(p, pixel(&img, 32, 16, 24), "the same fill at the edge as in the middle");
+        }
+    }
+
+    #[test]
+    fn a_light_taskbar_gets_a_light_plate_a_dark_outline_and_a_dark_line() {
+        let c = colors(ACCENT, true);
+        assert_eq!((c.plate, c.frame), ((0xF3, 0xF3, 0xF3), (0x1A, 0x1A, 0x1A)));
+        let full = render(&flat(100.0), 60_000, 32, &c);
+        let idle = render(&flat(0.0), 60_000, 32, &c);
+        assert_eq!(pixel(&idle, 32, 16, 16), [0xF3, 0xF3, 0xF3, 255]);
+        assert_eq!(pixel(&idle, 32, 16, 0), [0x1A, 0x1A, 0x1A, 255]);
+        assert_eq!(pixel(&full, 32, 16, 2), opaque(c.line));
+        assert!(luminance(c.line) < luminance(c.plate), "dark line on a light plate");
+        // The fill is the line's colour at fill_alpha over the plate.
+        let half = render(&flat(50.0), 60_000, 32, &c);
+        let fill = pixel(&half, 32, 16, 24);
+        let want = 0xF3 as f32 + (c.line.0 as f32 - 0xF3 as f32) * c.fill_alpha;
+        assert!((fill[0] as f32 - want).abs() <= 1.0, "{fill:?} vs {want}");
+    }
+
     #[test]
     fn the_line_contrasts_with_the_plate_whatever_the_accent_and_taskbar() {
-        for accent in [(0x00, 0x78, 0xD4), (0x00, 0x1B, 0x3D), (0x1F, 0x1F, 0x1F), (0xFF, 0xF4, 0x9C), (0xFF, 0xFF, 0xFF), (0xE8, 0x11, 0x23)] {
+        for accent in [(0x00, 0x78, 0xD4), (0x00, 0x1B, 0x3D), (0x1F, 0x1F, 0x1F), (0xFF, 0xF4, 0x9C), (0xFF, 0xFF, 0xFF), (0xE8, 0x11, 0x23), (0xE6, 0xE6, 0xE6), (0xF3, 0xF3, 0xF3), (0x1A, 0x1A, 0x1A), (0x20, 0x20, 0x20)] {
             for light in [false, true] {
                 let c = colors(accent, light);
                 assert!(contrast(c.line, c.plate) >= MIN_CONTRAST, "{accent:?}, light taskbar {light}: {c:?}");
                 assert!(contrast(c.frame, c.plate) >= 4.5, "the outline stands out: {c:?}");
+                assert!(contrast(c.line, c.frame) >= MIN_CONTRAST, "the line is not lost in the outline: {c:?}");
             }
         }
         // Near the taskbar's own tone: navy on a dark taskbar, pale yellow on a light one.
