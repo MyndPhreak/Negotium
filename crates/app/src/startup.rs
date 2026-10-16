@@ -121,29 +121,31 @@ pub struct JobOutcome {
 /// has the details.
 pub const JOB_FAILED: &str = "Something went wrong on the Startup page; details are in the log.";
 
-/// Turns a job's result (or its panic) into what the page shows, logging what it must: each
-/// read error (a "Skipped" line is informational and not logged) and a panic's message.
+/// Turns a job's result (or its panic) into what the page shows, logging to the app's log: see
+/// [`finish_with`]. One log for every startup job, so a line already written isn't written again
+/// on each open.
 pub fn finish(result: std::thread::Result<JobResult>) -> JobOutcome {
+    static LOG: std::sync::OnceLock<std::sync::Mutex<crate::log::Log>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| std::sync::Mutex::new(crate::log::Log::new(crate::log::Log::default_path())));
+    finish_with(&mut log.lock().unwrap_or_else(std::sync::PoisonError::into_inner), result)
+}
+
+/// [`finish`] logging to `log`: each read error (a "Skipped" line is informational and not
+/// logged) and a panic's message.
+pub fn finish_with(log: &mut crate::log::Log, result: std::thread::Result<JobResult>) -> JobOutcome {
     match result {
         Ok((entries, errors, failure)) => {
             let read_errors: Vec<&String> = errors.iter().filter(|e| is_read_error(e)).collect();
             for e in &read_errors {
-                warn(&format!("startup list: {e}"));
+                log.warn(&format!("startup list: {e}"));
             }
             JobOutcome { entries: Some(entries), read_error: !read_errors.is_empty(), failure, panicked: false }
         }
         Err(panic) => {
-            warn(&format!("startup job panicked: {}", crate::worker::panic_text(&*panic)));
+            log.warn(&format!("startup job panicked: {}", crate::worker::panic_text(&*panic)));
             JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.to_string()), panicked: true }
         }
     }
-}
-
-/// One log for every startup job, so a line already written isn't written again on each open.
-fn warn(msg: &str) {
-    static LOG: std::sync::OnceLock<std::sync::Mutex<crate::log::Log>> = std::sync::OnceLock::new();
-    let log = LOG.get_or_init(|| std::sync::Mutex::new(crate::log::Log::new(crate::log::Log::default_path())));
-    log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).warn(msg);
 }
 
 /// Runs `job` on an action thread and hands its outcome to `deliver` on the UI thread. The one
@@ -262,17 +264,49 @@ mod tests {
         assert!(!after.iter().find(|e| e.key == "Tool").unwrap().enabled);
     }
 
+    /// A log in a fresh temp directory, removed when dropped: tests never write the user's log.
+    struct TempLog(std::path::PathBuf);
+
+    impl TempLog {
+        fn new(name: &str) -> Self {
+            let d = std::env::temp_dir().join(format!("negotium-startup-log-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            Self(d)
+        }
+
+        fn log(&self) -> crate::log::Log {
+            crate::log::Log::new(self.0.join("negotium.log"))
+        }
+
+        fn text(&self) -> String {
+            std::fs::read_to_string(self.0.join("negotium.log")).unwrap_or_default()
+        }
+    }
+
+    impl Drop for TempLog {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn only_read_errors_are_noted_and_a_panic_still_delivers() {
+        let dir = TempLog::new("finish");
+        let mut log = dir.log();
         let skipped = format!("{}Bad in HKCU Run: it isn't a command", negotium_actions::startup::SKIPPED);
-        let ok = finish(Ok((vec![], vec![skipped.clone()], None)));
+        let ok = finish_with(&mut log, Ok((vec![], vec![skipped.clone()], None)));
         assert_eq!(ok, JobOutcome { entries: Some(vec![]), read_error: false, failure: None, panicked: false }, "a skipped value is no read error");
-        let unread = finish(Ok((vec![], vec![skipped, "HKLM Run: access denied".into()], Some("x".into()))));
+        assert_eq!(dir.text(), "", "a skipped value is not logged");
+        let unread = finish_with(&mut log, Ok((vec![], vec![skipped, "HKLM Run: access denied".into()], Some("x".into()))));
         assert!(unread.read_error);
         assert_eq!(unread.failure.as_deref(), Some("x"));
         crate::worker::quiet_expected_panics();
-        let panicked = finish(std::panic::catch_unwind(|| -> JobResult { panic!("test panic: startup job") }));
+        let panicked = finish_with(&mut log, std::panic::catch_unwind(|| -> JobResult { panic!("test panic: startup job") }));
         assert_eq!(panicked, JobOutcome { entries: None, read_error: false, failure: Some(JOB_FAILED.into()), panicked: true });
         assert!(!JOB_FAILED.contains("read"), "a toggle can panic too: the message mustn't say reading failed");
+        let text = dir.text();
+        assert!(text.contains("startup list: HKLM Run: access denied"), "{text}");
+        assert!(text.contains("startup job panicked: test panic: startup job"), "{text}");
+        assert!(!text.contains("Skipped"), "{text}");
     }
 }
