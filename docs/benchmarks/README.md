@@ -120,7 +120,8 @@ two bugs, fixed by the R9 wave before the four visible GPU runs were repeated:
 | Software | Overview | on | 2.96 (7.7) | 0.00 | — | not re-run |
 
 The GPU rows are the post-R9 re-run. The software rows come from the first run, before R9, and were
-not repeated. Frames are counted over the whole run from app start. All runs report
+not repeated. The "Before R9" column is the first run's figures: the re-run overwrote those runs'
+JSON files, so they are recorded here only. Frames are counted over the whole run from app start. All runs report
 `renderer_used` as requested (no GPU-to-software fallback).
 
 Software renderer, one scroll step at 1920 × 1080 × 1.5 (`scroll_step_cost_under_the_software_renderer`,
@@ -134,8 +135,8 @@ Budget (ruling P3c-3): smooth graphs may add at most 0.5 % of one core on the Ov
 the Performance page. Result after R9: Δ = +0.61 on the Overview and Δ = +6.55 on Performance, so
 **over budget**. Step 1 (whole-pixel steps) was applied; step 2 (a 33 ms floor) was not, because the
 investigation showed it has no effect at this window size. Decision (user, ruling R10): the cost is
-accepted as it is and Smooth graphs stays on by default everywhere. The Performance figure is about
-0.3 % of the machine's total CPU while that page is visible; nothing scrolls while hidden or
+accepted as it is and Smooth graphs stays on by default everywhere. The Performance figure is
+Δ ≈ 0.2 % of total CPU on this 32-thread machine (absolute ≈ 0.3 %) while that page is visible; nothing scrolls while hidden or
 minimised. Follow-up: cheaper redraws of the core cells (for example, render the cells only when a
 sample arrives).
 
