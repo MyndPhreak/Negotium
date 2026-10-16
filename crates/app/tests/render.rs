@@ -574,10 +574,10 @@ fn a_performance_frame_draws_once() {
     ui.global::<negotium::GraphClock>().set_smooth(false);
     ui.set_page(1);
     let devices = |v: &str| -> Vec<DeviceData> {
-        (0..6).map(|i| DeviceData { id: format!("d{i}").into(), title: "Disk".into(), value: v.into(), spark: "M 0 50 L 1000 40".into() }).collect()
+        (0..20).map(|i| DeviceData { id: format!("d{i}").into(), title: format!("Disk {i}").into(), value: v.into(), spark: "M 0 50 L 1000 40".into() }).collect()
     };
     let stats = |v: &str| -> Vec<StatData> { (0..12).map(|_| StatData { label: "Speed".into(), value: v.into() }).collect() };
-    let cells = |seed: u32| -> Vec<GraphData> { (0..16).map(|i| busy_graph(&format!("CPU {i}"), 60, i + seed, Load::Smooth)).collect() };
+    let cells = |seed: u32| -> Vec<GraphData> { (0..64).map(|i| busy_graph(&format!("CPU {i}"), 60, i + seed, Load::Smooth)).collect() };
     let (d, s) = (std::rc::Rc::new(VecModel::from(devices("1%"))), std::rc::Rc::new(VecModel::from(stats("3.4 GHz"))));
     let (g, c) = (std::rc::Rc::new(VecModel::from(vec![busy_graph("% Utilization", 60, 1, Load::Smooth)])), std::rc::Rc::new(VecModel::from(cells(7))));
     ui.set_perf_devices(ModelRc::from(d.clone()));
@@ -587,6 +587,16 @@ fn a_performance_frame_draws_once() {
     ui.show().unwrap();
     ui.window().set_size(PhysicalSize::new(1000, 720));
     frames.run(100);
+    // Both views overflow, so the frame is counted with their scrollbars present: the details' indicator...
+    let indicators = ElementHandle::find_by_element_id(&ui, "ScrollIndicator::thumb").filter(|t| t.size().width > 0.0).count();
+    assert_eq!(indicators, 1, "sixty-four cells overflow the details: their indicator shows");
+    // ...and the device list's Fluent bar: its last device lies below the list (or isn't built).
+    let list = ElementHandle::find_by_element_id(&ui, "PerformancePage::device-list").next().expect("the device list");
+    let list_bottom = list.absolute_position().y + list.size().height;
+    let below = |label: &str| ElementHandle::find_by_accessible_label(&ui, label).next().is_none_or(|d| d.absolute_position().y + d.size().height > list_bottom);
+    assert!(!below("Disk 0 performance"), "the first device is in view");
+    let in_view = (0..slint::Model::row_count(&*d)).filter(|i| !below(&format!("Disk {i} performance"))).count();
+    assert!(in_view < slint::Model::row_count(&*d), "{in_view} of twenty devices in view: they overflow the list");
     // The next second's frame, as crate::bridge::sync_model applies it: values change in place.
     use slint::Model;
     for (i, v) in devices("2%").into_iter().enumerate() { d.set_row_data(i, v); }

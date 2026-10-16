@@ -101,7 +101,7 @@ export component PerformancePage inherits HorizontalLayout {
         return 0.12;
     }
 
-    ListView {
+    device-list := ListView {
         width: 220px;
         for d in root.devices : DeviceButton {
             data: d;
