@@ -92,8 +92,9 @@ Negotium renders with winit + FemtoVG (OpenGL) by default (see "Renderer" below)
 
 Measured with `negotium-bench` (release, elevated terminal, no other Negotium running), 1000 × 720
 window, idle desktop, `--runs 1 --sample-secs 60` after the 5 s warm-up; each run starts Negotium
-with its own LOCALAPPDATA and settings file (`NEGOTIUM_SETTINGS`), so the user's settings are never
-read or changed. CPU is the share of one core (`cpu_one_core_pct`, mean of 59 one-second deltas;
+with its own scratch LOCALAPPDATA, and the bench writes the run's settings to
+`<scratch LOCALAPPDATA>\Negotium\settings.json`, where the app reads them (a watchdog relaunch too), so
+the user's settings are never read or changed. CPU is the share of one core (`cpu_one_core_pct`, mean of 59 one-second deltas;
 single samples are tick-granular), GPU the busiest engine attributed to the process (`gpu_pct`),
 frames and render time from `frame_stats` (GPU renderer only). Files: `docs/benchmarks/3c-*.json`.
 

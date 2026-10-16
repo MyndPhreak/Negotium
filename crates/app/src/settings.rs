@@ -92,21 +92,15 @@ pub fn close_action(keep_in_tray: bool, exit_on_close: bool) -> CloseAction {
     if keep_in_tray && !exit_on_close { CloseAction::HideToTray } else { CloseAction::Exit }
 }
 
-/// Names a settings file to use instead of the user's: the benchmark starts Negotium with settings
-/// of its own that way, never reading or changing the user's.
-pub const SETTINGS_ENV: &str = "NEGOTIUM_SETTINGS";
-
 /// The settings file: `%LOCALAPPDATA%\Negotium\settings.json` (the temp directory if
-/// `LOCALAPPDATA` is unset), or the file [`SETTINGS_ENV`] names.
+/// `LOCALAPPDATA` is unset). The benchmark gives Negotium a scratch LOCALAPPDATA with settings of
+/// its own there, so it never reads or changes the user's.
 pub fn default_path() -> PathBuf {
-    path_from(std::env::var_os(SETTINGS_ENV), std::env::var_os("LOCALAPPDATA"))
+    path_from(std::env::var_os("LOCALAPPDATA"))
 }
 
-/// [`default_path`] from the two variables' values.
-pub fn path_from(settings: Option<std::ffi::OsString>, local_app_data: Option<std::ffi::OsString>) -> PathBuf {
-    if let Some(p) = settings.filter(|p| !p.is_empty()) {
-        return PathBuf::from(p);
-    }
+/// [`default_path`] from LOCALAPPDATA's value.
+pub fn path_from(local_app_data: Option<std::ffi::OsString>) -> PathBuf {
     local_app_data.map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Negotium").join("settings.json")
 }
 
@@ -283,13 +277,14 @@ mod tests {
         assert!(!s.smooth_graphs && !s.tray_cpu && !s.keep_in_tray, "{s:?}");
     }
 
+    /// The only settings file is the one under LOCALAPPDATA: the benchmark gives Negotium a
+    /// scratch LOCALAPPDATA and writes its settings there (crates/bench `childenv::settings_path`),
+    /// so a relaunch keeps them too. Nothing else redirects the shipping app's settings.
     #[test]
-    fn the_benchmark_can_name_its_own_settings_file() {
+    fn the_settings_file_is_under_local_app_data() {
         use std::ffi::OsString;
-        let local = || Some(OsString::from(r"C:\L"));
-        assert_eq!(path_from(Some(r"C:\bench\s.json".into()), local()), PathBuf::from(r"C:\bench\s.json"));
-        assert_eq!(path_from(None, local()), PathBuf::from(r"C:\L\Negotium\settings.json"));
-        assert_eq!(path_from(Some(OsString::new()), local()), PathBuf::from(r"C:\L\Negotium\settings.json"), "an empty value is no value");
+        assert_eq!(path_from(Some(OsString::from(r"C:\L"))), PathBuf::from(r"C:\L\Negotium\settings.json"));
+        assert_eq!(path_from(None), std::env::temp_dir().join("Negotium").join("settings.json"));
     }
 
     /// A fresh directory under the temp dir, removed when dropped (also when a test fails).

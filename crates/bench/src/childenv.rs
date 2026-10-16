@@ -2,6 +2,10 @@
 //! `%LOCALAPPDATA%\Negotium` (settings.json, renderer-fallback marker, log): each run gets a fresh
 //! scratch directory, with its own settings file and an explicit renderer. Pure: computes what
 //! to change; `apply_to_process` is the only side effect.
+//!
+//! The run's settings go where the app looks for them, `<scratch>\Negotium\settings.json`
+//! ([`settings_path`]): the app has no other way to name a settings file, and a watchdog relaunch
+//! (which inherits the environment) reads the same file.
 use anyhow::{Result, bail};
 #[cfg(test)]
 use std::collections::HashMap;
@@ -29,13 +33,18 @@ fn same_path(a: &OsStr, b: &OsStr) -> bool {
     norm(a) == norm(b)
 }
 
-/// What a Negotium child needs: its own LOCALAPPDATA, its own settings file, the frame-stats file
-/// and, unless it is left to Negotium's own GPU choice (`None`, which keeps the watchdog), the
-/// `SLINT_BACKEND` of the renderer under test.
-pub fn negotium_child_env(scratch_local_appdata: &Path, settings: &Path, stats: &Path, backend: Option<&'static str>) -> ChildEnv {
+/// The settings file a child started with [`negotium_child_env`] reads: the app's own
+/// `%LOCALAPPDATA%\Negotium\settings.json` under the scratch LOCALAPPDATA.
+pub fn settings_path(scratch_local_appdata: &Path) -> PathBuf {
+    scratch_local_appdata.join("Negotium").join("settings.json")
+}
+
+/// What a Negotium child needs: its own LOCALAPPDATA (which holds its settings file,
+/// [`settings_path`]), the frame-stats file and, unless it is left to Negotium's own GPU choice
+/// (`None`, which keeps the watchdog), the `SLINT_BACKEND` of the renderer under test.
+pub fn negotium_child_env(scratch_local_appdata: &Path, stats: &Path, backend: Option<&'static str>) -> ChildEnv {
     let mut set = vec![
         ("LOCALAPPDATA", scratch_local_appdata.as_os_str().to_owned()),
-        ("NEGOTIUM_SETTINGS", settings.as_os_str().to_owned()),
         ("NEGOTIUM_FRAME_STATS", stats.as_os_str().to_owned()),
     ];
     let mut remove = vec!["NEGOTIUM_SIMULATE_STALL"];
@@ -116,9 +125,12 @@ mod tests {
         let real = r"C:\Users\someone\AppData\Local";
         let scratch = scratch_local_appdata(Path::new(r"C:\Temp"), Some(OsStr::new(real)), 7, 2).unwrap();
         let mut env = parent_env(real);
-        negotium_child_env(&scratch, Path::new(r"C:\Temp\s.json"), Path::new(r"C:\Temp\stats.json"), None).apply_to(&mut env);
-        assert_eq!(env["NEGOTIUM_SETTINGS"], r"C:\Temp\s.json");
+        negotium_child_env(&scratch, Path::new(r"C:\Temp\stats.json"), None).apply_to(&mut env);
         assert_eq!(env["LOCALAPPDATA"], scratch.as_os_str());
+        // The settings file is the one the app reads from that LOCALAPPDATA (settings::default_path).
+        assert_eq!(settings_path(&scratch), scratch.join("Negotium").join("settings.json"));
+        assert!(!settings_path(&scratch).starts_with(real), "never the user's settings");
+        assert!(!env.contains_key("NEGOTIUM_SETTINGS"), "the app has no settings override");
         assert_ne!(env["LOCALAPPDATA"], OsString::from(real));
         assert!(scratch.starts_with(r"C:\Temp"), "{scratch:?}");
         assert_eq!(env["PATH"], "p", "the rest is untouched");
@@ -158,11 +170,11 @@ mod tests {
 
     #[test]
     fn no_backend_leaves_slint_backend_unset_and_a_backend_selects_it() {
-        let (dir, settings, stats) = (Path::new(r"C:\S"), Path::new(r"C:\S\settings.json"), Path::new(r"C:\s.json"));
+        let (dir, stats) = (Path::new(r"C:\S"), Path::new(r"C:\s.json"));
         let mut env = parent_env(r"C:\Real");
-        negotium_child_env(dir, settings, stats, None).apply_to(&mut env);
+        negotium_child_env(dir, stats, None).apply_to(&mut env);
         assert!(!env.contains_key("SLINT_BACKEND"), "an inherited SLINT_BACKEND must not leak into the GPU run");
-        negotium_child_env(dir, settings, stats, Some("winit-software")).apply_to(&mut env);
+        negotium_child_env(dir, stats, Some("winit-software")).apply_to(&mut env);
         assert_eq!(env["SLINT_BACKEND"], "winit-software");
     }
 }

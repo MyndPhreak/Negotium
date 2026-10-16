@@ -119,8 +119,8 @@ fn valid_page(name: &str) -> Result<String> {
     Ok(lower)
 }
 
-/// What a finished run left in its scratch directory (`<scratch>\settings.json` and the app's
-/// `<scratch>\Negotium\...`): whether the GPU renderer fell back to software.
+/// What a finished run left in its scratch directory (the app's `<scratch>\Negotium\...`, which
+/// holds the run's settings.json): whether the GPU renderer fell back to software.
 #[derive(Debug, Default, PartialEq)]
 struct RunFiles {
     renderer_fell_back: bool,
@@ -130,7 +130,7 @@ struct RunFiles {
 /// tolerant, so an invalid value would otherwise fall back to a default and the run would measure
 /// something other than its report says), and notes a renderer fallback.
 fn check_run_files(scratch: &Path) -> Result<RunFiles> {
-    let bad = scratch.join("settings.json.bad");
+    let bad = childenv::settings_path(scratch).with_extension("json.bad");
     if bad.exists() {
         bail!("the app set the run's settings aside ({}): the bench's settings do not match the app's", bad.display());
     }
@@ -263,9 +263,11 @@ fn main() -> Result<()> {
             // the next run).
             let dir = childenv::scratch_local_appdata(&std::env::temp_dir(), real_local_app_data.as_deref(), std::process::id(), run_index)?;
             let dir = childenv::ScratchDir::create(dir)?;
-            let settings_path = dir.path().join("settings.json");
+            // The run's settings sit where the app reads them, so a watchdog relaunch keeps them.
+            let settings_path = childenv::settings_path(dir.path());
+            std::fs::create_dir_all(settings_path.parent().context("settings directory")?).context("create the run's settings directory")?;
             std::fs::write(&settings_path, run.settings_json()).context("write the run's settings")?;
-            childenv::negotium_child_env(dir.path(), &settings_path, &stats_path, backend).apply_to_process();
+            childenv::negotium_child_env(dir.path(), &stats_path, backend).apply_to_process();
             // Assigning drops the previous run's directory; its child was closed above.
             scratch = Some(dir);
         }
@@ -711,7 +713,10 @@ mod tests {
         std::fs::write(logs.join("negotium.log"), "1 WARN settings.json had invalid fields (tray_cpu); they use their defaults\n").unwrap();
         assert!(check_run_files(&root).is_err());
         std::fs::write(logs.join("negotium.log"), "").unwrap();
+        // Set aside next to the run's settings, in the app's own directory (settings::load).
         std::fs::write(root.join("settings.json.bad"), "{}").unwrap();
+        assert!(check_run_files(&root).is_ok(), "not where the app sets it aside");
+        std::fs::write(root.join("Negotium").join("settings.json.bad"), "{}").unwrap();
         assert!(check_run_files(&root).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
