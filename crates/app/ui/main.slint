@@ -55,7 +55,7 @@ export component MainWindow inherits Window {
     // Smooth graphs (crate::smooth). The paths put each frame's newest sample at x = 1000, and
     // GraphClock moves the view's right edge from `lead-ms` toward it. This timer advances the
     // clock while the window is shown on a page with graphs, as often as the widest scrolling
-    // graph there needs to move half a physical pixel (crate::smooth::redraw_hz): at most about
+    // graph there needs to move a whole physical pixel (crate::smooth::redraw_hz): at most about
     // 60 times a second, far less for the narrow sparklines and the long ranges, never less than
     // once a second. It only moves the view: the paths change only when a frame lands.
     in property <float> perf-span-ms: 60000;

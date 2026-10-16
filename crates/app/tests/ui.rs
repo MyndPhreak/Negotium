@@ -2649,7 +2649,8 @@ fn a_run_cut_short_rests_on_the_newest_sample_when_scrolling_resumes() {
     let clock = ui.global::<GraphClock>();
     ui.invoke_scroll_from(-1_000.0, 1.0);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    // The Overview's sparklines move a pixel about every 400 ms: the timer has ticked once.
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500));
     assert!(clock.get_offset_ms() < 0.0 && clock.get_offset_ms() > -1_000.0, "a run under way: {}", clock.get_offset_ms());
     clock.set_shown(false);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // change handlers run
@@ -2660,15 +2661,15 @@ fn a_run_cut_short_rests_on_the_newest_sample_when_scrolling_resumes() {
 }
 
 #[test]
-fn graphs_are_redrawn_as_often_as_half_a_pixel_of_scrolling_needs_up_to_60_a_second() {
+fn graphs_are_redrawn_as_often_as_a_pixel_of_scrolling_needs_up_to_60_a_second() {
     let ui = shown_window(); // 1000 × 720
     negotium::smooth::install(&ui, mocked_clock);
     let overview = ui.get_scroll_interval();
-    assert!((100..=400).contains(&overview), "1 min sparklines, ~150 px wide: {overview} ms");
+    assert!((200..=800).contains(&overview), "1 min sparklines, ~150 px wide: {overview} ms");
     ui.set_page(1);
     ui.set_perf_span_ms(60_000.0);
     let minute = ui.get_scroll_interval();
-    assert!((25..=80).contains(&minute), "the 1 min main graph, ~650 px wide: {minute} ms");
+    assert!((50..=160).contains(&minute), "the 1 min main graph, ~650 px wide: {minute} ms");
     ui.set_perf_span_ms(3_600_000.0);
     assert_eq!(ui.get_scroll_interval(), 1_000, "the 1 h graph moves under a pixel a second");
     ui.set_perf_span_ms(60_000.0);
@@ -2689,7 +2690,7 @@ fn the_graph_timer_and_a_landing_frame_ask_for_no_extra_frame() {
     assert!(!ui.window().has_active_animations(), "a landing frame starts no animation");
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // the timer starts
     let now = clock.get_now();
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500)); // a tick on the Overview (~400 ms)
     assert!(clock.get_now() > now, "the timer ran");
     assert!(!ui.window().has_active_animations(), "a timer tick starts no animation");
 }
@@ -2992,7 +2993,7 @@ fn the_graph_timer_stands_still_while_the_window_is_hidden_or_minimised() {
         ui.invoke_scroll_from(-5_000.0, 1.0);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
         let (now, offset) = (clock.get_now(), clock.get_offset_ms());
-        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500)); // a tick on the Overview (~400 ms)
         assert!(clock.get_now() > now && clock.get_offset_ms() > offset, "on screen, the timer runs");
         negotium::smooth::set_shown(&ui, visible, minimised);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);

@@ -27,10 +27,10 @@ pub fn lag_ms(refresh_ms: u64) -> f64 {
 }
 
 /// Redraws per second a graph `width_px` wide needs to scroll smoothly over `span_ms` at `speed`
-/// (graph ms per real ms): half a pixel of motion is worth a redraw, within the ruled range of
-/// 16 ms to 1 s between redraws (1 to 60 a second; zero or NaN gives the 1 s floor).
+/// (graph ms per real ms): a whole pixel of motion is worth a redraw (ruling P3c-3), within the
+/// ruled range of 16 ms to 1 s between redraws (1 to 60 a second; zero or NaN gives the 1 s floor).
 pub fn redraw_hz(width_px: f64, span_ms: f64, speed: f64) -> f64 {
-    let hz = 2.0 * width_px * speed * 1_000.0 / span_ms.max(1.0);
+    let hz = width_px * speed * 1_000.0 / span_ms.max(1.0);
     if hz.is_finite() { hz.clamp(1.0, 60.0) } else if hz > 0.0 { 60.0 } else { 1.0 }
 }
 
@@ -329,8 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn a_minute_at_a_thousand_pixels_redraws_about_thirty_three_times_a_second() {
-        assert!((redraw_hz(1_000.0, 60_000.0, 1.0) - 33.3).abs() < 0.1);
+    fn a_minute_at_a_thousand_pixels_redraws_about_seventeen_times_a_second() {
+        assert!((redraw_hz(1_000.0, 60_000.0, 1.0) - 16.7).abs() < 0.1);
     }
 
     #[test]
