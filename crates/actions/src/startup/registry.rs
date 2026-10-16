@@ -351,7 +351,20 @@ pub fn subkeys(key: &RegKey) -> Result<Vec<String>, ActionError> {
     Ok(out)
 }
 
-/// The one function that writes: value `name` of `key` (its hive and subkey), creating the key.
+/// Writes value `name` into the open key `h`.
+fn set_value(h: &Key, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(), ActionError> {
+    let name = HSTRING::from(name);
+    // SAFETY: valid key handle; the data is passed as a slice.
+    let status = unsafe { RegSetValueExW(h.0, &name, None, kind, Some(data)) };
+    if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(error(status))
+    }
+}
+
+/// Writes value `name` of `key` (its hive and subkey), creating the key. One of the two writers;
+/// both check `guard_write` first.
 fn set(key: &RegKey, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(), ActionError> {
     guard_write(key)?;
     let mut h = HKEY::default();
@@ -373,15 +386,18 @@ fn set(key: &RegKey, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<()
     if status != ERROR_SUCCESS {
         return Err(error(status));
     }
-    let h = Key(h);
-    let name = HSTRING::from(name);
-    // SAFETY: valid key handle; the data is passed as a slice.
-    let status = unsafe { RegSetValueExW(h.0, &name, None, kind, Some(data)) };
-    if status == ERROR_SUCCESS {
-        Ok(())
-    } else {
-        Err(error(status))
-    }
+    set_value(&Key(h), name, kind, data)
+}
+
+/// Writes DWORD `name` of `key` only if the key exists: `Ok(false)` when it doesn't, and nothing
+/// is created. The other writer; `guard_write` comes first.
+pub fn set_existing_dword(key: &RegKey, name: &str, value: u32) -> Result<bool, ActionError> {
+    guard_write(key)?;
+    let Some(h) = open(key, KEY_SET_VALUE)? else {
+        return Ok(false);
+    };
+    set_value(&h, name, REG_DWORD, &value.to_le_bytes())?;
+    Ok(true)
 }
 
 pub fn set_binary(key: &RegKey, name: &str, data: &[u8]) -> Result<(), ActionError> {
@@ -479,6 +495,32 @@ mod tests {
                 assert!(!text.is_empty() && !text.ends_with('.'), "{text:?}")
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn existing_key_writes_never_create_the_key_and_check_the_guard_first() {
+        let base = RegKey::new(
+            Hive::CurrentUser,
+            &format!(r"{TEST_ROOT}\existing-{}", std::process::id()),
+        );
+        let _ = delete_test_tree(&base);
+        let key = base.child("Task");
+        assert_eq!(
+            set_existing_dword(&key, "State", 1),
+            Ok(false),
+            "missing: not written"
+        );
+        assert!(subkeys(&base).unwrap().is_empty(), "and not created");
+        set_dword(&key, "State", 2).unwrap();
+        assert_eq!(set_existing_dword(&key, "State", 1), Ok(true));
+        assert_eq!(value(&key, "State").and_then(|v| v.dword()), Some(1));
+        let _ = delete_test_tree(&base);
+        // Outside the sandbox the guard answers before Windows is asked, even for a missing key.
+        let outside = RegKey::new(Hive::CurrentUser, r"Software\Negotium-NoSuchKey\x");
+        match set_existing_dword(&outside, "State", 1) {
+            Err(ActionError::Other(text)) => assert!(text.contains("not allowed"), "{text}"),
+            other => panic!("expected the guard, got {other:?}"),
         }
     }
 }

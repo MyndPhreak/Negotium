@@ -17,6 +17,7 @@ const LOCATION: &str = "Packaged app";
 
 /// Per-package AppModel data kept beside the task keys. Only task keys are known to carry a
 /// `State` (checked on one machine, not documented), so these never count as tasks.
+/// `is_task_key` also asks for the `TASK_MARKER` every real task carries.
 const NOT_TASKS: &[&str] = &[
     "Schemas",
     "PSR",
@@ -48,15 +49,25 @@ pub fn family_fallback_name(pfn: &str) -> String {
     pfn.split('_').next().unwrap_or(pfn).to_string()
 }
 
-/// A task's `State`, when the key is a startup task: a DWORD StartupTaskState (0–4) on a key
-/// that isn't other AppModel data.
-fn task_state(family: &RegKey, task: &str) -> Option<u32> {
+/// A DWORD Windows writes on every startup task key, set or not (0 until the user first enables
+/// the task).
+const TASK_MARKER: &str = "UserEnabledStartupOnce";
+
+/// The highest StartupTaskState (enabled by policy).
+const MAX_STATE: u32 = 4;
+
+/// `task`'s `State` under `family` when the key is a startup task: its name isn't other AppModel
+/// data, its `State` is a DWORD StartupTaskState (0–4), and it carries a DWORD `TASK_MARKER`.
+/// The one test for both listing and writing.
+fn is_task_key(family: &RegKey, task: &str) -> Option<u32> {
     if NOT_TASKS.iter().any(|n| n.eq_ignore_ascii_case(task)) {
         return None;
     }
-    registry::value(&family.child(task), "State")
+    let key = family.child(task);
+    registry::value(&key, TASK_MARKER).and_then(|v| v.dword())?;
+    registry::value(&key, "State")
         .and_then(|v| v.dword())
-        .filter(|&s| s <= 4)
+        .filter(|&s| s <= MAX_STATE)
 }
 
 /// (display name, publisher) of an installed package; `Ok(None)` when the family isn't installed
@@ -131,7 +142,7 @@ fn entries_with(
             }
         };
         for task in tasks {
-            let Some(state) = task_state(&family, &task) else {
+            let Some(state) = is_task_key(&family, &task) else {
                 continue;
             };
             let (name, publisher) = named
@@ -162,6 +173,7 @@ fn entries_with(
             });
         }
     }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
     out
 }
 
@@ -171,9 +183,10 @@ pub(super) fn packaged_entries(packaged: &RegKey, errors: &mut Vec<String>) -> V
     entries_with(packaged, |pfn| names.lookup(pfn), errors)
 }
 
-/// Writes 2 or 1 to the task's `State`. A task whose state a policy sets (as listed, or as it reads
-/// now) is refused and left as it is; so is one whose `State` is gone (its app uninstalled since
-/// the listing), which is never written back into being.
+/// Writes 2 or 1 to the task's `State`. Refused, and left as it is: a key that isn't a startup task
+/// (`is_task_key`) or is gone (its app uninstalled since the listing; it is never written back into
+/// being), a state Windows doesn't define, and a state a policy sets (as listed, or as it reads
+/// now).
 pub(super) fn set_enabled(
     packaged: &RegKey,
     entry: &StartupEntry,
@@ -183,14 +196,25 @@ pub(super) fn set_enabled(
         .key
         .split_once('\\')
         .ok_or_else(|| ActionError::Other("unknown packaged task".into()))?;
-    let key = packaged.child(pfn).child(task);
+    let family = packaged.child(pfn);
+    let key = family.child(task);
+    let gone = || ActionError::Other("it is no longer installed".into());
     let Some(now) = registry::value(&key, "State").and_then(|v| v.dword()) else {
-        return Err(ActionError::Other("it is no longer installed".into()));
+        return Err(gone());
     };
+    if now > MAX_STATE {
+        return Err(ActionError::Other("its state is unknown".into()));
+    }
+    if is_task_key(&family, task).is_none() {
+        return Err(ActionError::Other("it isn't a startup task".into()));
+    }
     if !entry.changeable || !state_changeable(now) {
         return Err(ActionError::Other("its state is set by a policy".into()));
     }
-    registry::set_dword(&key, "State", toggled_state(enabled))
+    match registry::set_existing_dword(&key, "State", toggled_state(enabled))? {
+        true => Ok(()),
+        false => Err(gone()),
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +248,12 @@ mod tests {
         assert_eq!(family_fallback_name("odd"), "odd");
     }
 
+    /// A startup task key as Windows writes it: `State` and the `UserEnabledStartupOnce` marker.
+    fn task(key: &RegKey, state: u32) {
+        registry::set_dword(key, "State", state).unwrap();
+        registry::set_dword(key, "UserEnabledStartupOnce", 0).unwrap();
+    }
+
     /// A sandbox key under the test root, removed on drop.
     struct Sandbox(RegKey);
 
@@ -248,12 +278,19 @@ mod tests {
     fn only_task_keys_with_a_startup_state_are_listed() {
         let sb = Sandbox::new("filter");
         let family = sb.0.child("Contoso.App_abc");
-        registry::set_dword(&family.child("Task"), "State", 0).unwrap();
-        // AppModel keeps other per-package data beside the tasks; none of it is a startup task.
-        registry::set_dword(&family.child("Schemas"), "State", 2).unwrap();
-        registry::set_dword(&family.child("SplashScreen"), "State", 2).unwrap();
-        registry::set_dword(&family.child("Odd"), "State", 9).unwrap();
+        task(&family.child("Task"), 0);
+        // AppModel keeps other per-package data beside the tasks; none of it is a startup task,
+        // even with the marker.
+        task(&family.child("Schemas"), 2);
+        task(&family.child("SplashScreen"), 2);
+        task(&family.child("Odd"), 9);
         registry::set_string(&family.child("Text"), "State", "2").unwrap();
+        registry::set_dword(&family.child("Text"), "UserEnabledStartupOnce", 0).unwrap();
+        // A State without the marker.
+        registry::set_dword(&family.child("Unmarked"), "State", 2).unwrap();
+        // A marker that isn't a DWORD.
+        registry::set_dword(&family.child("BadMarker"), "State", 2).unwrap();
+        registry::set_string(&family.child("BadMarker"), "UserEnabledStartupOnce", "0").unwrap();
         let mut errors = Vec::new();
         let entries = entries_with(&sb.0, |_| Ok(None), &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
@@ -265,10 +302,10 @@ mod tests {
     #[test]
     fn names_come_from_the_package_and_a_failed_lookup_keeps_the_family_name() {
         let sb = Sandbox::new("names");
-        registry::set_dword(&sb.0.child(r"Contoso.Named_abc\A"), "State", 2).unwrap();
-        registry::set_dword(&sb.0.child(r"Contoso.Named_abc\B"), "State", 1).unwrap();
-        registry::set_dword(&sb.0.child(r"Contoso.Broken_abc\T"), "State", 2).unwrap();
-        registry::set_dword(&sb.0.child(r"Contoso.Gone_abc\T"), "State", 2).unwrap();
+        task(&sb.0.child(r"Contoso.Named_abc\A"), 2);
+        task(&sb.0.child(r"Contoso.Named_abc\B"), 1);
+        task(&sb.0.child(r"Contoso.Broken_abc\T"), 2);
+        task(&sb.0.child(r"Contoso.Gone_abc\T"), 2);
         let mut asked = Vec::new();
         let mut errors = Vec::new();
         let entries = entries_with(

@@ -579,17 +579,18 @@ fn the_cleanup_helper_refuses_anything_outside_the_test_root() {
     );
 }
 
+/// A startup task key as Windows writes it: `State` and the `UserEnabledStartupOnce` marker.
+fn task(key: &RegKey, state: u32) {
+    registry::set_dword(key, "State", state).unwrap();
+    registry::set_dword(key, "UserEnabledStartupOnce", 0).unwrap();
+}
+
 #[test]
 fn packaged_tasks_are_listed_from_their_state_and_toggle_it() {
     let sb = Sandbox::new("packaged");
     let r = &sb.roots;
-    registry::set_dword(
-        &r.packaged.child(r"Contoso.App_8wekyb3d8bbwe\StartTask"),
-        "State",
-        2,
-    )
-    .unwrap();
-    registry::set_dword(&r.packaged.child(r"Contoso.Locked_abc\Boot"), "State", 3).unwrap();
+    task(&r.packaged.child(r"Contoso.App_8wekyb3d8bbwe\StartTask"), 2);
+    task(&r.packaged.child(r"Contoso.Locked_abc\Boot"), 3);
     registry::set_string(
         &r.packaged.child(r"Contoso.NoTasks_xyz\Schemas"),
         "Version",
@@ -640,7 +641,7 @@ fn a_task_fixed_by_policy_after_listing_is_not_written() {
     let sb = Sandbox::new("latepolicy");
     let r = &sb.roots;
     let key = r.packaged.child(r"Contoso.App_abc\Task");
-    registry::set_dword(&key, "State", 1).unwrap();
+    task(&key, 1);
     let task = find(&list_startup(r).0, r"Contoso.App_abc\Task").clone();
     assert!(task.changeable);
     registry::set_dword(&key, "State", 4).unwrap();
@@ -657,7 +658,7 @@ fn a_task_gone_since_listing_is_not_recreated() {
     let sb = Sandbox::new("gonetask");
     let r = &sb.roots;
     let family = r.packaged.child("Contoso.App_abc");
-    registry::set_dword(&family.child("Task"), "State", 2).unwrap();
+    task(&family.child("Task"), 2);
     let task = find(&list_startup(r).0, r"Contoso.App_abc\Task").clone();
     registry::delete_test_tree(&family).unwrap();
     let refused = set_startup_enabled(r, &task, false).unwrap_err();
@@ -689,7 +690,7 @@ fn an_installed_package_is_named_after_its_display_name() {
     let family = package.Id().unwrap().FamilyName().unwrap().to_string();
     let sb = Sandbox::new("installed");
     let r = &sb.roots;
-    registry::set_dword(&r.packaged.child(&format!(r"{family}\Task")), "State", 2).unwrap();
+    task(&r.packaged.child(&format!(r"{family}\Task")), 2);
     let (entries, errors) = list_startup(r);
     assert!(errors.is_empty(), "{errors:?}");
     let e = find(&entries, &format!(r"{family}\Task"));
@@ -763,7 +764,7 @@ fn listing_works_on_a_thread_already_in_the_mta() {
         "-n 1",
     )
     .unwrap();
-    registry::set_dword(&r.packaged.child(r"Contoso.App_abc\Task"), "State", 2).unwrap();
+    task(&r.packaged.child(r"Contoso.App_abc\Task"), 2);
     std::thread::spawn(move || {
         // SAFETY: this thread's own apartment, balanced below on the same thread.
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.unwrap();
@@ -782,4 +783,63 @@ fn listing_works_on_a_thread_already_in_the_mta() {
     })
     .join()
     .unwrap();
+}
+
+/// A key with a `State` but without the startup-task marker is no task: not listed, not written.
+#[test]
+fn a_state_without_the_task_marker_is_neither_listed_nor_toggled() {
+    let sb = Sandbox::new("nomarker");
+    let r = &sb.roots;
+    let key = r.packaged.child(r"Contoso.App_abc\Other");
+    registry::set_dword(&key, "State", 2).unwrap();
+    assert!(list_startup(r).0.is_empty());
+    let forged = StartupEntry {
+        source: StartupSource::Packaged,
+        key: r"Contoso.App_abc\Other".to_string(),
+        name: "Contoso.App".to_string(),
+        publisher: None,
+        enabled: true,
+        changeable: true,
+        command: "Other".to_string(),
+        location: "Packaged app".to_string(),
+    };
+    assert!(set_startup_enabled(r, &forged, false).is_err());
+    assert_eq!(
+        registry::value(&key, "State").and_then(|v| v.dword()),
+        Some(2)
+    );
+}
+
+/// A state Windows doesn't define is refused as unknown, not blamed on a policy.
+#[test]
+fn an_unknown_task_state_is_refused_as_unknown() {
+    let sb = Sandbox::new("oddstate");
+    let r = &sb.roots;
+    let key = r.packaged.child(r"Contoso.App_abc\Task");
+    task(&key, 1);
+    let listed = find(&list_startup(r).0, r"Contoso.App_abc\Task").clone();
+    registry::set_dword(&key, "State", 7).unwrap();
+    let refused = set_startup_enabled(r, &listed, true).unwrap_err();
+    assert_eq!(
+        refused.message("Contoso.App", false),
+        "Couldn't change Contoso.App: its state is unknown."
+    );
+    assert_eq!(
+        registry::value(&key, "State").and_then(|v| v.dword()),
+        Some(7)
+    );
+}
+
+#[test]
+fn packaged_tasks_are_sorted_by_key() {
+    let sb = Sandbox::new("sorted");
+    let r = &sb.roots;
+    for key in [r"B.App_x\T", r"A.App_x\Z", r"A.App_x\B", r"C.App_x\T"] {
+        task(&r.packaged.child(key), 2);
+    }
+    let keys: Vec<String> = list_startup(r).0.into_iter().map(|e| e.key).collect();
+    assert_eq!(
+        keys,
+        [r"A.App_x\B", r"A.App_x\Z", r"B.App_x\T", r"C.App_x\T"]
+    );
 }

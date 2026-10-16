@@ -74,7 +74,10 @@ pub(super) fn is_host_program(exe: &str) -> bool {
 pub(super) fn is_remote_path(path: &str, drive_is_remote: impl Fn(char) -> bool) -> bool {
     let path = path.replace('/', "\\");
     let path = path.strip_prefix(r"\\?\").map_or(path.as_str(), |rest| {
-        if rest.get(..4).is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\")) {
+        if rest
+            .get(..4)
+            .is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\"))
+        {
             r"\\" // `\\?\UNC\server\…`
         } else {
             rest

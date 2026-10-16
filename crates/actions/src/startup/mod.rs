@@ -1,6 +1,7 @@
-//! Startup apps (spec §5.3): Run-key entries, the Startup folders and packaged startup tasks, with the enabled state Task Manager uses. Listing and toggling call
-//! Windows: run them on an action thread. Only StartupApproved values (and packaged task states)
-//! are ever written; Run values and shortcuts are never edited or deleted.
+//! Startup apps (spec §5.3): Run-key entries, the Startup folders and packaged startup tasks,
+//! with the enabled state Task Manager uses. Listing and toggling call Windows: run them on an
+//! action thread. Only StartupApproved values (and packaged task states) are ever written; Run
+//! values and shortcuts are never edited or deleted.
 mod approved;
 mod command;
 mod folders;
