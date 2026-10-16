@@ -36,8 +36,6 @@ pub const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(10);
 pub const FALLBACK_ARG: &str = "--renderer-fallback";
 /// Makes the relaunch wait for this instance's single-instance lock (as restart-as-admin does).
 pub const RESTARTED_ARG: &str = "--restarted";
-/// The `SLINT_BACKEND` value the relaunched process gets.
-pub const SOFTWARE_BACKEND: &str = "winit-software";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Renderer {
@@ -326,13 +324,7 @@ impl SoftwareRelaunch {
             "the UI thread showed no frame and no heartbeat for {} s; relaunching with the software renderer",
             WATCHDOG_TIMEOUT.as_secs()
         ));
-        let spawned = self.exe.and_then(|exe| {
-            std::process::Command::new(exe)
-                .args(&self.args)
-                .env("SLINT_BACKEND", SOFTWARE_BACKEND)
-                .spawn()
-                .map_err(|e| e.to_string())
-        });
+        let spawned = self.exe.and_then(|exe| relaunch_command(&exe, &self.args).spawn().map_err(|e| e.to_string()));
         match spawned {
             // The marker and the log are written and closed above.
             Ok(_) => crate::platform::terminate_self(),
@@ -342,6 +334,15 @@ impl SoftwareRelaunch {
             }
         }
     }
+}
+
+/// The software relaunch: `exe` with `args` (which carry [`FALLBACK_ARG`], so `decide` selects
+/// software). No SLINT_BACKEND: the relaunched instance would then count as overridden by the
+/// environment (Settings: "Overridden by SLINT_BACKEND"); one inherited is removed as well.
+fn relaunch_command(exe: &Path, args: &[OsString]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args).env_remove("SLINT_BACKEND");
+    cmd
 }
 
 #[cfg(test)]
@@ -558,6 +559,31 @@ mod tests {
         let r = SoftwareRelaunch::resolve();
         assert!(r.exe.is_ok());
         assert!(r.args.ends_with(&[OsString::from(RESTARTED_ARG), OsString::from(FALLBACK_ARG)]));
+    }
+
+    /// The relaunched instance selects software through `decide` (its `--renderer-fallback`), not
+    /// through SLINT_BACKEND: an inherited SLINT_BACKEND would make it FromEnv, and Settings would
+    /// then wrongly say the renderer was overridden.
+    #[test]
+    fn the_relaunched_instance_selects_software_without_slint_backend() {
+        let exe = std::env::temp_dir().join("negotium.exe");
+        let cmd = relaunch_command(&exe, &relaunch_args(std::iter::empty()));
+        let env_backend_set = cmd.get_envs().any(|(k, v)| k == "SLINT_BACKEND" && v.is_some());
+        assert!(!env_backend_set, "no SLINT_BACKEND is passed");
+        assert!(
+            cmd.get_envs().any(|(k, v)| k == "SLINT_BACKEND" && v.is_none()),
+            "an inherited one is removed too"
+        );
+        let relaunched = cmd.get_args().any(|a| a == FALLBACK_ARG);
+        for gpu_rendering in [false, true] {
+            for marker in [false, true] {
+                assert_eq!(
+                    decide(env_backend_set, gpu_rendering, marker, relaunched),
+                    Decision { renderer: Renderer::Software, watchdog: false },
+                    "gpu {gpu_rendering}, marker {marker}"
+                );
+            }
+        }
     }
 
     #[test]

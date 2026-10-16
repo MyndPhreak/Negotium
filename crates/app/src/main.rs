@@ -146,8 +146,8 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     };
-    // The choice is made: keep SLINT_BACKEND (the user's, or the watchdog's winit-software) out of
-    // the processes Negotium starts (Open file location, Run new task). No other thread runs yet.
+    // The choice is made: keep the user's SLINT_BACKEND out of the processes Negotium starts (Open
+    // file location, Run new task, a restart). No other thread runs yet.
     platform::remove_env_var("SLINT_BACKEND");
     // Armed before the window is created: creating it already probes OpenGL.
     // The relaunch (exe path, arguments) is resolved now, so the stall path only spawns.
