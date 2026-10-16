@@ -84,7 +84,7 @@ impl IdMap {
     }
 }
 
-fn metric_text(row_value: f64, metric: Metric) -> String {
+pub(crate) fn metric_text(row_value: f64, metric: Metric) -> String {
     match metric {
         Metric::Cpu | Metric::Gpu => format::pct1(row_value as f32),
         Metric::Memory => format::bytes(row_value),

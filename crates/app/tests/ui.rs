@@ -2,6 +2,7 @@ use i_slint_backend_testing::ElementHandle;
 use negotium::{DeviceData, GraphData, SegmentData, StatData};
 use negotium::controls::Page;
 use negotium::perf::{DeviceView, GraphView, PerfFrame, Range, StatView};
+use negotium::worker::SharedHistory;
 use negotium::{MainWindow, MeterData, RowData};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::cell::RefCell;
@@ -1032,4 +1033,119 @@ fn text_on_the_accent_contrasts_with_it() {
     assert_eq!(theme.get_on_accent(), slint::Color::from_rgb_u8(255, 255, 255), "white on the default blue");
     theme.set_accent(slint::Color::from_rgb_u8(0xff, 0xd7, 0x00));
     assert_eq!(theme.get_on_accent(), slint::Color::from_rgb_u8(0, 0, 0), "dark on a light accent");
+}
+
+#[test]
+fn hovering_a_graph_scrubs_and_leaving_ends_it() {
+    let ui = shown_window();
+    ui.set_page(1);
+    ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![graph_data("% Utilization")])));
+    let got = Rc::new(RefCell::new(Vec::<f32>::new()));
+    let g = got.clone();
+    ui.on_scrub(move |f| g.borrow_mut().push(f));
+    let graph = El::find_by_accessible_label(&ui, "% Utilization graph").next().expect("graph");
+    let (x, y) = centre(&graph);
+    move_pointer(&ui, x, y);
+    slint::platform::update_timers_and_animations();
+    let last = *got.borrow().last().expect("the scrub reports the pointer");
+    assert!((last - 0.5).abs() < 0.05, "{last}");
+    move_pointer(&ui, 5.0, 5.0);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(got.borrow().last(), Some(&-1.0));
+}
+
+/// One sample a second from 1 s to 61 s; at second s, chrome uses s % CPU.
+fn scrub_history() -> SharedHistory {
+    use negotium_model::{AppKey, AppKind, AppRow};
+    let history: SharedHistory = Default::default();
+    for s in 1..=61u64 {
+        let chrome = AppRow {
+            key: AppKey::Background { pid: 1, create_time: 0 }, name: "chrome".into(), kind: AppKind::Background,
+            processes: vec![], cpu_pct: s as f32, private_bytes: 0, disk_bps: 0.0, gpu_pct: None, net_bps: None, hung_for_ms: None,
+        };
+        history.lock().unwrap().push(s * 1_000, &Default::default(), &[chrome]);
+    }
+    history
+}
+
+/// A CPU frame whose graph window ends at collector time `end`, `clock` ms after midnight.
+fn scrub_frame(end: u64, clock: u64) -> Frame {
+    let mut f = perf_frame("cpu", "cpu");
+    let p = f.perf.as_mut().unwrap();
+    (p.window_end_ms, p.span_ms, p.end_clock_ms) = (end, 60_000, clock);
+    f
+}
+
+const TWO_PM: u64 = 14 * 3_600_000;
+
+#[test]
+fn the_bridge_answers_a_scrub_from_the_shared_history_and_follows_new_frames() {
+    use slint::Model;
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Performance);
+    bridge.borrow_mut().set_history(scrub_history());
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM));
+    bridge.borrow_mut().scrub(&ui, 0.5);
+    assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:30");
+    assert_eq!(ui.get_scrub_rows().row_data(0).unwrap().name, "chrome");
+    assert!((ui.get_scrub_x() - 0.5).abs() < 1e-6);
+    // A second later the window has moved under the still pointer: the card follows.
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM + 1_000));
+    assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:31");
+    assert_eq!(ui.get_scrub_rows().row_data(0).unwrap().value, "31.0%");
+    bridge.borrow_mut().scrub(&ui, -1.0);
+    assert_eq!(ui.get_scrub_x(), -1.0);
+}
+
+#[test]
+fn the_scrub_never_waits_for_the_worker_and_keeps_its_card_while_the_history_is_busy() {
+    use slint::Model;
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Performance);
+    let history = scrub_history();
+    bridge.borrow_mut().set_history(history.clone());
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM));
+    bridge.borrow_mut().scrub(&ui, 0.5);
+    {
+        // The worker holds the lock (mid-tick). A blocking lock here would deadlock this thread.
+        let _worker = history.lock().unwrap();
+        bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM + 1_000));
+        bridge.borrow_mut().scrub(&ui, 0.75);
+        assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:30", "the current card stays");
+        assert_eq!(ui.get_scrub_rows().row_data(0).unwrap().value, "30.0%");
+        assert!((ui.get_scrub_x() - 0.5).abs() < 1e-6);
+    }
+    bridge.borrow_mut().scrub(&ui, 0.75);
+    assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:46", "answered once the lock is free");
+    assert!((ui.get_scrub_x() - 0.75).abs() < 1e-6);
+
+    // A worker panic poisoned the lock: the card stays (no UI-thread panic) until the restarted
+    // worker resets the history.
+    let h = history.clone();
+    std::panic::set_hook(Box::new(|_| {}));
+    let _ = std::thread::spawn(move || {
+        let _guard = h.lock().unwrap();
+        panic!("worker panicked mid-push");
+    })
+    .join();
+    let _ = std::panic::take_hook();
+    bridge.borrow_mut().scrub(&ui, 0.25);
+    assert_eq!(ui.get_scrub_title(), "Top apps at 13:59:46");
+    bridge.borrow_mut().scrub(&ui, -1.0);
+    assert_eq!(ui.get_scrub_x(), -1.0, "leaving the graph always hides the scrub");
+}
+
+#[test]
+fn leaving_the_performance_page_ends_the_scrub() {
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Performance);
+    bridge.borrow_mut().set_history(scrub_history());
+    bridge.borrow_mut().apply(&ui, scrub_frame(60_000, TWO_PM));
+    bridge.borrow_mut().scrub(&ui, 0.5);
+    assert!(ui.get_scrub_x() >= 0.0);
+    bridge.borrow_mut().set_page(&ui, Page::Overview);
+    assert_eq!(ui.get_scrub_x(), -1.0);
+    bridge.borrow_mut().set_page(&ui, Page::Performance);
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM + 1_000));
+    assert_eq!(ui.get_scrub_x(), -1.0, "no cursor comes back without a pointer over a graph");
 }

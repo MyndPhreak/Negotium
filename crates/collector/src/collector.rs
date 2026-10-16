@@ -26,12 +26,18 @@ impl Default for Collector {
 
 impl Collector {
     pub fn new() -> Self {
+        Self::with_epoch(Instant::now())
+    }
+
+    /// Collector time (`Snapshot::taken_at_ms`) counts from `started`. A restarted worker passes
+    /// the same instant, so time never goes backwards for the history it keeps.
+    pub fn with_epoch(started: Instant) -> Self {
         let info = read_system_info();
         Self {
             processes: ProcessReader::new(),
             identity: IdentityCache::new(),
             pdh: PdhSources::open(),
-            started: Instant::now(),
+            started,
             logical_cpus: logical_cpus(),
             gpu_temps: crate::gpu::GpuTemps::open(&info.gpus),
             info,

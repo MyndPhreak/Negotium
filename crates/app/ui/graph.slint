@@ -1,6 +1,7 @@
 import { Theme } from "theme.slint";
 
 export struct GraphData { label: string, value: string, scale: string, line: string, area: string, line2: string }
+export struct ScrubRow { name: string, value: string }
 
 // A time graph: grid, translucent area, line and an optional second line (write / send). The
 // paths come from crate::graph for a 1000 × 100 view box, newest sample on the right edge.
@@ -54,5 +55,55 @@ export component Graph inherits Rectangle {
         fill: transparent;
         stroke: Theme.muted;
         stroke-width: 1.5px;
+    }
+
+    // History scrub (only the large graphs take part).
+    in property <bool> scrubbable: false;
+    // Fraction across the graph of the scrub cursor, -1 when none.
+    in property <float> scrub-x: -1;
+    in property <string> scrub-title;
+    in property <string> scrub-empty;
+    in property <[ScrubRow]> scrub-rows;
+    callback scrub(float);
+
+    ta := TouchArea {
+        enabled: root.scrubbable;
+        // mouse-x follows the pointer while it hovers, so every move over the graph reports.
+        changed mouse-x => {
+            if (self.has-hover) {
+                root.scrub(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+        changed has-hover => {
+            root.scrub(self.has-hover ? clamp(self.mouse-x / self.width, 0, 1) : -1);
+        }
+    }
+    if root.scrub-x >= 0 : Rectangle {
+        x: root.width * root.scrub-x;
+        y: 0;
+        width: 1px;
+        height: root.height;
+        background: Theme.text;
+    }
+    if root.scrub-x >= 0 && ta.has-hover : Rectangle {
+        width: 210px;
+        height: card.preferred-height;
+        x: root.scrub-x > 0.6 ? root.width * root.scrub-x - self.width - 8px : root.width * root.scrub-x + 8px;
+        y: 8px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        background: Theme.dark ? #2b2b2b : #ffffff;
+        card := VerticalLayout {
+            padding: 8px;
+            spacing: 2px;
+            Text { text: root.scrub-title; color: Theme.text; font-size: 12px; font-weight: 600; }
+            for r in root.scrub-rows : HorizontalLayout {
+                spacing: 8px;
+                Text { text: r.name; color: Theme.text; font-size: 11px; overflow: elide; horizontal-stretch: 1; }
+                Text { text: r.value; color: Theme.text; font-size: 11px; }
+            }
+            if root.scrub-rows.length == 0 : Text { text: root.scrub-empty; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+        }
     }
 }

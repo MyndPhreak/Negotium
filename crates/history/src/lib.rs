@@ -292,10 +292,16 @@ impl History {
     }
 
     /// Records one sample. Returns false (and records nothing) when it comes less than
-    /// MIN_SPACING_MS after the last kept sample.
+    /// MIN_SPACING_MS after the last kept sample. A sample older than the last one is a timeline
+    /// break (collector time restarted): the history is cleared and starts again from it, rather
+    /// than refusing every sample until time catches up.
     pub fn push(&mut self, t_ms: u64, totals: &SystemTotals, rows: &[AppRow]) -> bool {
-        if self.times.back().is_some_and(|&last| t_ms < last.saturating_add(MIN_SPACING_MS)) {
-            return false;
+        if let Some(&last) = self.times.back() {
+            if t_ms < last {
+                *self = Self::new();
+            } else if t_ms < last.saturating_add(MIN_SPACING_MS) {
+                return false;
+            }
         }
         let oldest = t_ms.saturating_sub(WINDOW_MS);
         while self.times.front().is_some_and(|&t| t < oldest) || self.times.len() >= MAX_SAMPLES {
@@ -556,6 +562,22 @@ mod tests {
         assert!(h.push(1_000, &totals(3.0, 1), &[]));
         assert!(!h.push(1_000, &totals(4.0, 1), &[]), "an extra tick from a UI poke");
         assert_eq!(values(&h, &Series::Cpu), [Some(1.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn time_going_backwards_starts_a_new_timeline_instead_of_refusing_samples() {
+        let mut h = History::new();
+        for s in 100..=110u64 {
+            assert!(h.push(s * 1_000, &totals(1.0, 1), &[row(1, "old", 9.0)]));
+        }
+        // A rebuilt collector without the shared epoch would restart near 0.
+        assert!(h.push(2_000, &totals(7.0, 1), &[row(2, "new", 5.0)]), "the sample is recorded");
+        assert_eq!(h.len(), 1, "the old timeline is cleared");
+        assert_eq!(h.latest_t(), Some(2_000));
+        assert_eq!(values(&h, &Series::Cpu), [Some(7.0)]);
+        assert_eq!(h.top_at(105_000, Metric::Cpu, 2_500), None, "no apps from the old timeline");
+        assert_eq!(h.top_at(2_000, Metric::Cpu, 2_500).unwrap().1, vec![("new".to_string(), 5.0)]);
+        assert!(h.push(3_000, &totals(8.0, 1), &[]), "the new timeline goes on normally");
     }
 
     #[test]

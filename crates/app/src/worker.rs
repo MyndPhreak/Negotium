@@ -77,37 +77,40 @@ pub fn supervise<S: Source, M: Fn() -> S>(
     restarts
 }
 
+/// The history, shared with the UI thread for the scrub (read under the lock, plain data).
+pub type SharedHistory = Arc<Mutex<History>>;
+
 pub struct LiveSource {
     collector: Collector,
     info: SystemInfo,
     model: Model,
     ranker: Ranker,
-    history: History,
+    history: SharedHistory,
     ids: IdMap,
     elevated: bool,
     log: crate::log::Log,
 }
 
 impl LiveSource {
-    pub fn new() -> Self {
-        let collector = Collector::new();
+    /// `history` and `epoch` outlive a restart after a panic, so the graphs keep their past. A
+    /// panic while the history was locked may have left it half-written: it starts over empty.
+    pub fn new(history: SharedHistory, epoch: Instant) -> Self {
+        if history.is_poisoned() {
+            *history.lock().unwrap_or_else(|e| e.into_inner()) = History::new();
+            history.clear_poison();
+        }
+        let collector = Collector::with_epoch(epoch);
         let info = collector.system_info().clone();
         Self {
             collector,
             info,
             model: Model::new(),
             ranker: Ranker::new(),
-            history: History::new(),
+            history,
             ids: IdMap::new(),
             elevated: negotium_actions::is_elevated(),
             log: crate::log::Log::new(crate::log::Log::default_path()),
         }
-    }
-}
-
-impl Default for LiveSource {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -118,7 +121,8 @@ impl Source for LiveSource {
             self.log.warn(e);
         }
         let rows = self.model.update(&snap);
-        self.history.push(snap.taken_at_ms, &snap.totals, &rows);
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        history.push(snap.taken_at_ms, &snap.totals, &rows);
         if !controls.visible() {
             return None;
         }
@@ -129,11 +133,11 @@ impl Source for LiveSource {
                 let order = self.ranker.order(&rows, metric, snap.taken_at_ms, controls.frozen());
                 let (expanded, all_children) = controls.child_rows();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children };
-                Some(build_frame(&mut self.ids, &snap, &rows, &order, &self.history, &opts))
+                Some(build_frame(&mut self.ids, &snap, &rows, &order, &history, &opts))
             }
             Page::Performance => {
                 let (device, range) = controls.perf();
-                let input = PerfInput { snap: &snap, history: &self.history, info: &self.info, device: &device, range };
+                let input = PerfInput { snap: &snap, history: &history, info: &self.info, device: &device, range };
                 Some(Frame { page: Page::Performance, perf: Some(build_perf(&input)), ..Default::default() })
             }
         }
@@ -164,13 +168,15 @@ impl<T> Latest<T> {
 
 pub fn spawn(
     controls: Arc<Controls>,
+    history: SharedHistory,
     sink: impl FnMut(Frame) + Send + 'static,
 ) -> std::thread::JoinHandle<u32> {
+    let epoch = Instant::now();
     std::thread::Builder::new()
         .name("negotium-worker".into())
         .spawn(move || {
             let mut log = crate::log::Log::new(crate::log::Log::default_path());
-            supervise(LiveSource::new, controls, sink, move |m: &str| log.warn(m))
+            supervise(move || LiveSource::new(history.clone(), epoch), controls, sink, move |m: &str| log.warn(m))
         })
         .expect("spawn worker thread")
 }
@@ -193,7 +199,7 @@ mod tests {
     #[test]
     fn only_the_visible_page_is_built_while_collection_keeps_running() {
         use crate::controls::Page;
-        let mut source = LiveSource::new();
+        let mut source = LiveSource::new(SharedHistory::default(), Instant::now());
         let dir = std::env::temp_dir().join(format!("negotium-worker-test-{}", std::process::id()));
         source.log = crate::log::Log::new(dir.join("negotium.log"));
         let controls = Controls::default();
@@ -212,17 +218,39 @@ mod tests {
             "no Overview view while Performance shows");
 
         controls.set_visible(false);
-        let before = source.history.len();
+        let before = source.history.lock().unwrap().len();
         // History keeps one sample per MIN_SPACING_MS: wait so this tick's sample is kept.
         std::thread::sleep(Duration::from_millis(negotium_history::MIN_SPACING_MS + 50));
         assert!(source.next_frame(&controls).is_none(), "nothing is built while hidden in the tray");
-        assert!(source.history.len() > before, "collection and history keep running while hidden");
+        assert!(source.history.lock().unwrap().len() > before, "collection and history keep running while hidden");
 
         controls.set_visible(true);
         controls.set_page(Page::Overview);
         let f = source.next_frame(&controls).expect("visible again");
         assert!(f.perf.is_none() && !f.rows.is_empty(), "switching back stops building Performance");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_restart_keeps_the_history_but_recovers_one_poisoned_by_a_panic() {
+        let history = SharedHistory::default();
+        history.lock().unwrap().push(1_000, &Default::default(), &[]);
+        let kept = LiveSource::new(history.clone(), Instant::now());
+        assert_eq!(kept.history.lock().unwrap().len(), 1, "a healthy history survives the restart");
+        drop(kept);
+
+        let h = history.clone();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _guard = h.lock().unwrap();
+            panic!("panicked mid-push");
+        })
+        .join();
+        let _ = std::panic::take_hook();
+        assert!(history.is_poisoned());
+        let _source = LiveSource::new(history.clone(), Instant::now());
+        assert!(!history.is_poisoned(), "the poison is cleared");
+        assert!(history.lock().expect("lockable again").is_empty(), "a possibly half-written history starts over");
     }
 
     #[test]

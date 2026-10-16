@@ -108,7 +108,7 @@ fn trace(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u
         Some(v) => {
             // The column's end time, but never past the newest moment.
             let col_end = ((k + 1) as f64 * span as f64 / buckets as f64).min(end as f64);
-            let x = (VIEW_W - (end as f64 - col_end) / span as f64 * VIEW_W).clamp(0.0, VIEW_W);
+            let x = time_to_x(col_end, end, span);
             let y = if max > 0.0 { 100.0 - (v / max).clamp(0.0, 1.0) as f64 * 100.0 } else { 100.0 };
             pen.point(x, y);
         }
@@ -148,8 +148,15 @@ fn trace(points: impl IntoIterator<Item = (u64, Option<f32>)>, end: u64, span: u
     pen.finish()
 }
 
-/// The collector time under a pointer `fraction` of the way across a graph of `[end - span, end]`;
-/// negative when that moment lies before the collector started.
+/// Where collector time `t` is drawn on a graph of `[end - span, end]`: x in the view box, the
+/// newest moment on the right edge. [`fraction_to_time`] is its inverse.
+fn time_to_x(t: f64, end: u64, span: u64) -> f64 {
+    (VIEW_W - (end as f64 - t) / span as f64 * VIEW_W).clamp(0.0, VIEW_W)
+}
+
+/// The collector time under a pointer `fraction` of the way across a graph of `[end - span, end]`
+/// (the inverse of where [`shape`] draws a time, so the scrub reads back the moment drawn under the
+/// pointer); negative when that moment lies before the collector started.
 pub fn fraction_to_time(fraction: f32, end: u64, span: u64) -> i64 {
     let f = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 1.0 };
     end as i64 - span as i64 + (f as f64 * span as f64).round() as i64
@@ -275,6 +282,26 @@ mod tests {
         assert_eq!(fraction_to_time(0.5, 60_000, 60_000), 30_000);
         assert_eq!(fraction_to_time(-3.0, 60_000, 60_000), 0);
         assert_eq!(fraction_to_time(0.1, 61_000, 3_600_000), -3_179_000, "before the collector started");
+    }
+
+    #[test]
+    fn the_scrub_reads_back_the_time_each_column_was_drawn_at() {
+        // An hour graph of 300 columns (12 s each), at a moment between column boundaries.
+        let (end, span, buckets) = (4_005_500u64, 3_600_000u64, 300usize);
+        let w = span / buckets as u64;
+        let pts: Vec<(u64, Option<f32>)> = (406..=end / 1_000).map(|s| (s * 1_000, Some(50.0))).collect();
+        let s = shape(pts, end, span, 100.0, buckets);
+        for x in xs(&s.line) {
+            let t = fraction_to_time((x / VIEW_W) as f32, end, span);
+            // Path coordinates keep one decimal (span / 10 000 ms); a lone point's stub adds 0.1.
+            let to_col_end = (t as u64 % w).min(w - t as u64 % w);
+            assert!(t as u64 == end || to_col_end <= 2 * span / 10_000, "x {x} -> {t} ms, {to_col_end} ms off a column end");
+        }
+        assert_eq!(fraction_to_time((time_to_x(end as f64, end, span) / VIEW_W) as f32, end, span), end as i64, "right edge");
+        for t in [410_000u64, 1_234_000, 3_999_000] {
+            let back = fraction_to_time((time_to_x(t as f64, end, span) / VIEW_W) as f32, end, span);
+            assert!((back - t as i64).abs() <= 1, "{t} -> {back}");
+        }
     }
 
     #[test]

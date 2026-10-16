@@ -80,6 +80,12 @@ pub fn hung(ms: u64) -> String {
     if s < 60 { format!("Not responding · {s}s") } else { format!("Not responding · {}m {:02}s", s / 60, s % 60) }
 }
 
+/// "HH:MM:SS" for a time of day in milliseconds since midnight.
+pub fn clock(ms: u64) -> String {
+    let s = ms / 1000 % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3_600, s / 60 % 60, s % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +100,13 @@ mod tests {
         assert_eq!(uptime(59), "0:00:00:59");
         assert_eq!(millis(0.4), "0.4 ms");
         assert_eq!(millis(f32::NAN), "—");
+    }
+
+    #[test]
+    fn wall_clock_times() {
+        assert_eq!(clock(50_370_000), "13:59:30");
+        assert_eq!(clock(86_399_999), "23:59:59");
+        assert_eq!(clock(0), "00:00:00");
     }
 
     #[test]

@@ -26,3 +26,10 @@ fn ticks_produce_complete_snapshots() {
     assert!(lists.modified + lists.standby + lists.free <= m.total);
     assert!(c.system_info().cpu_name.as_deref().is_some_and(|n| !n.is_empty()));
 }
+
+#[test]
+fn a_shared_epoch_carries_collector_time_across_a_rebuilt_collector() {
+    let epoch = std::time::Instant::now() - Duration::from_secs(5);
+    let snap = negotium_collector::Collector::with_epoch(epoch).tick();
+    assert!(snap.taken_at_ms >= 5_000);
+}

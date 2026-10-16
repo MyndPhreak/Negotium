@@ -5,9 +5,9 @@ import { AppList, RowData } from "applist.slint";
 import { Banner, Toast, Modal } from "overlays.slint";
 import { Rail } from "rail.slint";
 import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
-import { GraphData } from "graph.slint";
+import { GraphData, ScrubRow } from "graph.slint";
 export { NegotiumTray } from "tray.slint";
-export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData }
+export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -44,6 +44,11 @@ export component MainWindow inherits Window {
     in property <[SegmentData]> perf-segments;
     // Graph range: 0 = 1 min, 1 = 10 min, 2 = 1 h (crate::perf::Range).
     in-out property <int> perf-range: 0;
+    // History scrub on the Performance graphs: cursor fraction (-1 = none) and the card's content.
+    in property <float> scrub-x: -1;
+    in property <string> scrub-title;
+    in property <string> scrub-empty;
+    in property <[ScrubRow]> scrub-rows;
     out property <bool> modal-open: confirm-visible || details-visible;
     out property <int> menu-target: list.menu-target;
 
@@ -64,6 +69,7 @@ export component MainWindow inherits Window {
     callback dismiss-toast();
     callback select-device(string);
     callback select-range(int);
+    callback scrub(float);
 
     // has-hover only re-evaluates on the next pointer event, so release the list freeze explicitly
     // when a modal opens and re-evaluate it when the modal closes.
@@ -73,6 +79,8 @@ export component MainWindow inherits Window {
         root.list-hover(!root.modal-open && list.hovered);
         if (root.modal-open) {
             root.clear-key-focus();
+            // The graph's hover, like the list's, would only clear on the next pointer event.
+            root.scrub(-1);
         }
     }
 
@@ -173,6 +181,11 @@ export component MainWindow inherits Window {
                     interactive: !root.modal-open;
                     select-device(id) => { root.select-device(id); }
                     select-range(i) => { root.select-range(i); }
+                    scrub-x: root.scrub-x;
+                    scrub-title: root.scrub-title;
+                    scrub-empty: root.scrub-empty;
+                    scrub-rows: root.scrub-rows;
+                    scrub(f) => { root.scrub(f); }
                 }
             }
         }

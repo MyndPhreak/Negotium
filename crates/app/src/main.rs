@@ -94,7 +94,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     let sink_ui = weak.clone();
     let latest: Arc<worker::Latest<negotium::view::Frame>> = Default::default();
-    let _worker = worker::spawn(controls.clone(), move |frame| {
+    // Kept across worker restarts; the UI thread reads it for the history scrub.
+    let history: worker::SharedHistory = Default::default();
+    bridge.borrow_mut().set_history(history.clone());
+    let _worker = worker::spawn(controls.clone(), history, move |frame| {
         if !latest.put(frame) {
             return;
         }
@@ -134,6 +137,14 @@ fn main() -> Result<(), slint::PlatformError> {
             controls.select_device(&id);
             if let Some(ui) = weak.upgrade() {
                 ui.set_perf_selected(id);
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_scrub(move |f| {
+            if let Some(ui) = weak.upgrade() {
+                b.borrow_mut().scrub(&ui, f);
             }
         });
     }

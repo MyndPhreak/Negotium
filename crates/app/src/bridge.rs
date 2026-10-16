@@ -3,7 +3,8 @@
 use crate::controls::{Controls, Page};
 use crate::perf::{GraphView, PerfFrame};
 use crate::view::{Frame, RowView, Target, visible_rows};
-use crate::{DeviceData, GraphData, MainWindow, MeterData, RowData, SegmentData, StatData, TileData};
+use crate::worker::SharedHistory;
+use crate::{DeviceData, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StatData, TileData};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -173,6 +174,11 @@ pub struct Bridge {
     perf_segments: Rc<VecModel<SegmentData>>,
     /// The Performance frame on screen (the scrub reads its graph window).
     pub last_perf: Option<PerfFrame>,
+    /// The worker's history, read (never waited for) to answer the scrub.
+    history: Option<SharedHistory>,
+    /// Where the pointer is across a Performance graph, while it hovers one.
+    scrub_at: Option<f32>,
+    scrub_rows: Rc<VecModel<ScrubRow>>,
     expanded: HashSet<i32>,
     /// Groups expanded automatically for their current hang (see `auto_expand_hung_groups`).
     auto_expanded: HashSet<i32>,
@@ -202,6 +208,9 @@ impl Bridge {
             perf_stats: Rc::new(VecModel::default()),
             perf_segments: Rc::new(VecModel::default()),
             last_perf: None,
+            history: None,
+            scrub_at: None,
+            scrub_rows: Rc::new(VecModel::default()),
             expanded: HashSet::new(),
             auto_expanded: HashSet::new(),
             search: String::new(),
@@ -223,6 +232,7 @@ impl Bridge {
         ui.set_perf_cells(ModelRc::from(b.perf_cells.clone()));
         ui.set_perf_stats(ModelRc::from(b.perf_stats.clone()));
         ui.set_perf_segments(ModelRc::from(b.perf_segments.clone()));
+        ui.set_scrub_rows(ModelRc::from(b.scrub_rows.clone()));
         Rc::new(RefCell::new(b))
     }
 
@@ -232,6 +242,10 @@ impl Bridge {
         if page != Page::Overview {
             // The hidden list can't report pointer-leave: release the hover freeze here.
             self.set_hover(false);
+        }
+        if page != Page::Performance {
+            // Likewise the hidden graphs: end any scrub.
+            self.scrub(ui, -1.0);
         }
         ui.set_page(page.index());
     }
@@ -278,6 +292,36 @@ impl Bridge {
         ui.set_perf_note(p.note.as_str().into());
         ui.set_perf_range(p.range.index());
         self.last_perf = Some(p);
+        // The window moved under a still pointer: the card follows it to the new moment.
+        self.show_scrub(ui);
+    }
+
+    pub fn set_history(&mut self, history: SharedHistory) {
+        self.history = Some(history);
+    }
+
+    /// The pointer is `fraction` of the way across a Performance graph (-1: it left).
+    pub fn scrub(&mut self, ui: &MainWindow, fraction: f32) {
+        self.scrub_at = (fraction.is_finite() && fraction >= 0.0).then_some(fraction.min(1.0));
+        self.show_scrub(ui);
+    }
+
+    /// Runs on the UI thread, which never waits for the worker: while the worker holds the history
+    /// (or a panic left it poisoned, until the restarted worker resets it) the current card stays.
+    fn show_scrub(&self, ui: &MainWindow) {
+        let (Some(f), Some(perf), Some(history)) = (self.scrub_at, self.last_perf.as_ref(), self.history.as_ref()) else {
+            ui.set_scrub_x(-1.0);
+            return;
+        };
+        let Ok(h) = history.try_lock() else {
+            return;
+        };
+        let view = crate::scrub::scrub(&h, perf, f);
+        drop(h);
+        ui.set_scrub_title(view.title.into());
+        ui.set_scrub_empty(view.empty.into());
+        sync_model(&*self.scrub_rows, view.rows.into_iter().map(|(name, value)| ScrubRow { name: name.into(), value: value.into() }).collect());
+        ui.set_scrub_x(f);
     }
 
     fn apply_overview(&mut self, ui: &MainWindow, frame: Frame) {

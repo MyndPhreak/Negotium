@@ -8,6 +8,7 @@ pub mod framestats;
 pub mod log;
 pub mod perf;
 pub mod platform;
+pub mod scrub;
 pub mod view;
 pub mod worker;
 

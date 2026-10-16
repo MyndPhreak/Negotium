@@ -1,7 +1,7 @@
 import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
-import { Graph, GraphData } from "graph.slint";
+import { Graph, GraphData, ScrubRow } from "graph.slint";
 
 export struct DeviceData { id: string, title: string, value: string, spark: string }
 export struct StatData { label: string, value: string }
@@ -78,8 +78,13 @@ export component PerformancePage inherits HorizontalLayout {
     in property <[SegmentData]> segments;
     in property <int> range;
     in property <bool> interactive: true;
+    in property <float> scrub-x: -1;
+    in property <string> scrub-title;
+    in property <string> scrub-empty;
+    in property <[ScrubRow]> scrub-rows;
     callback select-device(string);
     callback select-range(int);
+    callback scrub(float);
     max-width: 16384px; // see MetersRow: repeaters must not cap the window width
     padding: 12px;
     spacing: 12px;
@@ -139,7 +144,18 @@ export component PerformancePage inherits HorizontalLayout {
                     Text { text: g.label; color: Theme.muted; font-size: 12px; horizontal-stretch: 1; }
                     Text { text: g.scale; color: Theme.muted; font-size: 11px; }
                 }
-                Graph { min-height: 180px; vertical-stretch: 1; data: g; }
+                Graph {
+                    min-height: 180px;
+                    vertical-stretch: 1;
+                    data: g;
+                    // Not under an open modal.
+                    scrubbable: root.interactive;
+                    scrub-x: root.scrub-x;
+                    scrub-title: root.scrub-title;
+                    scrub-empty: root.scrub-empty;
+                    scrub-rows: root.scrub-rows;
+                    scrub(f) => { root.scrub(f); }
+                }
                 Text { text: g.value; color: Theme.text; font-size: 14px; font-weight: 600; vertical-stretch: 0; }
             }
             if root.segments.length > 0 : VerticalLayout {
