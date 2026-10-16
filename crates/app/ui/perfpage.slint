@@ -212,7 +212,7 @@ export component PerformancePage inherits HorizontalLayout {
                             Text { text: c.label; color: Theme.muted; font-size: 10px; overflow: elide; horizontal-stretch: 1; }
                             Text { text: c.value; color: Theme.muted; font-size: 10px; horizontal-alignment: right; horizontal-stretch: 0; min-width: self.preferred-width; }
                         }
-                        Graph { data: c; vertical-stretch: 1; }
+                        Graph { data: c; filled: false; vertical-stretch: 1; }
                     }
                 }
             }

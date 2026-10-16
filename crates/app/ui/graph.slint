@@ -7,6 +7,10 @@ export struct ScrubRow { name: string, value: string }
 // paths come from crate::graph for a 1000 × 100 view box, newest sample on the right edge.
 export component Graph inherits Rectangle {
     in property <GraphData> data;
+    // Draw the translucent area under the line. The small multiples turn it off: the software
+    // renderer rasterises every Path on every frame, at a cost that grows with the area covered,
+    // and dozens of filled cells made resizing the Performance page slow.
+    in property <bool> filled: true;
     border-radius: 4px;
     border-width: 1px;
     border-color: Theme.card-border;
@@ -29,6 +33,7 @@ export component Graph inherits Rectangle {
         viewbox-width: 1000;
         viewbox-height: 100;
         fit: fill;
+        visible: root.filled;
         commands: root.data.area;
         fill: Theme.accent.with-alpha(0.16);
         stroke: transparent;
