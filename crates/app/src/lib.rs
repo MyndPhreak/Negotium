@@ -9,6 +9,7 @@ pub mod log;
 pub mod nav;
 pub mod perf;
 pub mod platform;
+pub mod renderer;
 pub mod scrub;
 pub mod view;
 pub mod worker;

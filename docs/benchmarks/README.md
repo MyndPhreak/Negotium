@@ -86,10 +86,7 @@ Run both from an elevated terminal (close both apps first):
 | UI responsiveness (WM_NULL) median / p95 / max | pending | pending | — |
 | Render time per frame, max / frames > 16 ms (excludes first paint; whole app lifetime) | n/a | pending | none > 16 ms |
 
-Negotium renders with Slint's software renderer by default (see "Renderer" below). That renderer has no rendering notifier, so a default run has no frame stats: the stats file reports 0 frames, the bench prints the stats as they are, and the app logs "frame stats unavailable". The bench still reports UI responsiveness through WM_NULL. To fill the render-time row, run the Negotium bench with the FemtoVG (OpenGL) renderer selected:
-
-    set SLINT_BACKEND=winit-femtovg
-    target\release\negotium-bench.exe negotium --runs 5 --sample-secs 60 --out docs\benchmarks\negotium-femtovg.json
+Negotium renders with winit + FemtoVG (OpenGL) by default (see "Renderer" below). FemtoVG has a rendering notifier, so a default run reports frame stats without setting `SLINT_BACKEND`. The software renderer has no notifier. It is in use when forced with `SLINT_BACKEND=winit-software` or after a recorded fallback, and then the stats file reports 0 frames, the bench prints the stats as they are, and the app logs "frame stats unavailable". The bench still reports UI responsiveness through WM_NULL. Before a run, check that `%LOCALAPPDATA%\Negotium\renderer-fallback` does not exist, or set `SLINT_BACKEND=winit-femtovg` to be sure of the GPU renderer.
 
 ## Renderer: launch → window, FemtoVG vs software
 
@@ -103,7 +100,17 @@ During development the default winit + FemtoVG (OpenGL) renderer sometimes took 
 | software pinned | `SLINT_BACKEND=winit-software` | 154, 138, 110, 63, 62, 80 | 95 |
 | software pinned | default (no `SLINT_BACKEND`) | 93, 95, 93, 64, 110, 63 | 93 |
 
-No launch stalled in these runs (the stall is intermittent), and software opened the window faster on every launch (about 500 ms faster at the median). Negotium therefore selects winit + software unless `SLINT_BACKEND` is set; set `SLINT_BACKEND=winit-femtovg` to use the GPU renderer.
+No launch stalled in these runs (the stall is intermittent), and software opened the window faster on every launch (about 500 ms faster at the median). Plans 1 to 3a therefore pinned winit + software.
+
+### Renderer: the default since Plan 3b
+
+The software renderer repaints the whole window on every resize step: softbuffer reallocates its buffer, so Slint draws a new buffer each time. That makes resizing slow on a large display (5120 × 1440), while FemtoVG resizes smoothly. Since Plan 3b Negotium therefore selects **winit + FemtoVG** by default and accepts its slower start (about 550 ms against 95 ms). A safety net covers the GPU renderer (`crates/app/src/renderer.rs`):
+
+- **GL errors:** if OpenGL is unavailable or fails, Slint's winit backend falls back to software in-process. This also happens when FemtoVG is selected by name, because window creation retries every built-in renderer when the chosen one fails.
+- **GL stalls:** a stall blocks the UI thread, so a watchdog thread is armed before the window is created. It waits 3 s for the first frame to be presented. The signal is the rendering notifier's first `AfterRendering`, followed by a zero-delay timer, so it fires only once the event loop is back after the present. If no frame arrives in time, the watchdog writes the marker file `%LOCALAPPDATA%\Negotium\renderer-fallback` (the temp directory if `LOCALAPPDATA` is unset). It then relaunches the exe with the same arguments plus `--restarted --renderer-fallback` and `SLINT_BACKEND=winit-software`, and exits. `--restarted` makes the new instance wait for the old one's single-instance lock. `--renderer-fallback` stops the new instance from arming a watchdog of its own, so there is at most one relaunch. The tray icon is created only after the first presented frame, so a replaced instance leaves no icon behind.
+- **No flip-flop:** while the marker exists, every launch selects software. Only an explicit user action clears it: `renderer::clear_fallback()`, for the Settings switch of a later task. Task 1 moves the marker into settings.json as `gpu_rendering: false`. To retry the GPU renderer by hand, delete the marker file.
+- **Forcing a renderer:** `SLINT_BACKEND` overrides both the default and the marker, and the watchdog never guards an explicit choice. Use `SLINT_BACKEND=winit-femtovg` for the GPU renderer or `SLINT_BACKEND=winit-software` for the software renderer.
+- **Testing the net:** in a debug build, `NEGOTIUM_SIMULATE_STALL=1` blocks the UI thread before the first frame of a guarded launch. After about 3 s a software window should replace it, and the marker should exist. Delete the marker afterwards.
 
 ## Manual check: frozen windows
 
