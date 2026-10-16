@@ -16,6 +16,13 @@ pub const PAUSE_BREAK_MS: u64 = 10_000;
 /// exactly 1 h (ruling PF9), so there is nothing older to draw there.
 pub const LEAD_MS: u64 = PAUSE_BREAK_MS;
 
+/// The graphs' right edge: the newest history sample, `fallback` (the tick) while there is none. At
+/// refresh rates under a second the history keeps one sample a second (ruling P3-3), so a tick can
+/// be newer; anchoring on it would pull every line's end in from the edge.
+pub fn end_of(history: &negotium_history::History, fallback: u64) -> u64 {
+    history.latest_t().unwrap_or(fallback)
+}
+
 /// The earliest sample time a graph of `[end - span, end]` draws (see [`LEAD_MS`]).
 pub fn since(end: u64, span: u64) -> u64 {
     end.saturating_sub(span + LEAD_MS)

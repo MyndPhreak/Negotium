@@ -58,8 +58,12 @@ fn at_column(history: &History, perf: &PerfFrame, t: i64) -> Option<(u64, Vec<(S
 /// Local wall-clock time (ms since midnight) of collector time `t_ms`, counted back from the
 /// window's end, wrapping past midnight.
 pub fn clock_at(perf: &PerfFrame, t_ms: i64) -> u64 {
-    let back = (perf.window_end_ms as i64 - t_ms).rem_euclid(DAY_MS as i64) as u64;
-    (perf.end_clock_ms % DAY_MS + DAY_MS - back) % DAY_MS
+    clock_before(perf.end_clock_ms, (perf.window_end_ms as i64 - t_ms).rem_euclid(DAY_MS as i64) as u64)
+}
+
+/// The local wall-clock time (ms since midnight) `back_ms` before `clock_ms`, wrapping past midnight.
+pub fn clock_before(clock_ms: u64, back_ms: u64) -> u64 {
+    (clock_ms % DAY_MS + DAY_MS - back_ms % DAY_MS) % DAY_MS
 }
 
 #[cfg(test)]

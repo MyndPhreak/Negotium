@@ -182,52 +182,80 @@ fn data_paths() -> Vec<(String, String)> {
 }
 
 /// Every data path stretches to its box: the default `fit: contain` keeps the 10:1 aspect and
-/// squashes the data into a band.
+/// squashes the data into a band. Every data Path lives in the one `DataPath` component.
 #[test]
 fn every_data_path_stretches_to_fill_its_box() {
     let paths = data_paths();
-    assert!(paths.len() >= 5, "found only {} data paths", paths.len());
+    assert_eq!(paths.len(), 1, "data Paths belong in DataPath only: {:?}", paths.iter().map(|p| &p.0).collect::<Vec<_>>());
     for (file, body) in &paths {
         assert!(sets(body, "fit", &["fill"]), "{file}: a data Path without fit: fill: {body}");
     }
 }
 
-/// Every data path clips to its box: frames draw history left of their window at negative x
-/// (crate::graph::LEAD_MS), which must never paint outside the graph.
+/// `DataPath` wraps its Path in a clip rectangle (history left of the window is drawn at negative x,
+/// crate::graph::LEAD_MS, and must never paint outside the graph). The pixel tests below check it.
 #[test]
-fn every_data_path_clips_to_its_box() {
-    for (file, body) in &data_paths() {
-        assert!(sets(body, "clip", &["true"]), "{file}: a data Path without clip: true: {body}");
-    }
+fn the_data_path_sits_in_a_clip_rectangle() {
+    let src = squeezed(&std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/graph.slint")).unwrap());
+    assert!(src.contains("exportcomponentDataPathinheritsRectangle{"), "DataPath is missing");
+    assert!(src.contains("clip:true;Path{"), "the data Path is not directly inside a clip rectangle");
+}
+
+/// Meters (CPU, Memory, Disk, GPU, Network) drawn with these sparklines, rendered: per meter the
+/// rows (absolute y) tinted by the accent away from its edges, and how many pixels beside the first
+/// meter, in the gap to the second, are tinted.
+fn render_sparks(sparks: [&str; 5]) -> (Vec<Vec<u32>>, usize) {
+    software_backend();
+    let ui = MainWindow::new().unwrap();
+    ui.global::<Theme>().set_accent(slint::Color::from_rgb_u8(255, 0, 0));
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    let labels = ["CPU", "Memory", "Disk", "GPU", "Network"];
+    let meters: Vec<negotium::MeterData> = labels
+        .iter()
+        .zip(sparks)
+        .map(|(l, s)| negotium::MeterData { label: (*l).into(), value: "1%".into(), sub: "".into(), spark: s.into(), available: true })
+        .collect();
+    ui.set_meters(ModelRc::new(VecModel::from(meters)));
+    ui.set_selected_metric(-1); // no meter is tinted by being selected
+    ui.show().unwrap();
+    let shot = ui.window().take_snapshot().expect("snapshot");
+    let find = |l: &str| ElementHandle::find_by_accessible_label(&ui, &format!("{l} meter")).next().expect("meter");
+    let tinted = |y0: f32, y1: f32, x0: f32, x1: f32| -> Vec<u32> {
+        (y0.round() as u32..y1.round() as u32)
+            .filter(|&y| (x0.round() as u32..x1.round() as u32).any(|x| accent_tinted(shot.as_slice()[(y * shot.width() + x) as usize])))
+            .collect()
+    };
+    let rows = labels
+        .iter()
+        .map(|l| {
+            let (e, s) = (find(l), find(l).size());
+            let p = e.absolute_position();
+            tinted(p.y, p.y + s.height, p.x + 12.0, p.x + s.width - 12.0)
+        })
+        .collect();
+    let (first, second) = (find("CPU"), find("Memory"));
+    let (p, s) = (first.absolute_position(), first.size());
+    let gap = tinted(p.y, p.y + s.height, p.x + s.width + 1.0, second.absolute_position().x - 1.0).len();
+    (rows, gap)
+}
+
+/// A line along the floor or the ceiling keeps its full stroke width (1.5 px: two pixel rows); a clip
+/// at the path's own box would trim it to half.
+#[test]
+fn floor_and_ceiling_lines_keep_their_full_stroke() {
+    let mid = "M 0 50 L 1000 50";
+    let (rows, _) = render_sparks(["M 0 100 L 1000 100", "M 0 0 L 1000 0", mid, mid, mid]);
+    assert!(rows[0].len() >= 2, "floor rows {:?}", rows[0]);
+    assert!(rows[1].len() >= 2, "ceiling rows {:?}", rows[1]);
 }
 
 /// A sparkline's history left of its window stays inside its meter: nothing is drawn in the gap
 /// between two meters.
 #[test]
 fn a_sparklines_off_screen_history_is_clipped_to_its_meter() {
-    software_backend();
-    let ui = MainWindow::new().unwrap();
-    ui.global::<Theme>().set_accent(slint::Color::from_rgb_u8(255, 0, 0));
-    ui.window().set_size(PhysicalSize::new(1000, 720));
-    let meter = |label: &str| negotium::MeterData {
-        label: label.into(), value: "1%".into(), sub: "".into(), spark: "M -400 50 L 1400 50".into(), available: true,
-    };
-    let meters: Vec<negotium::MeterData> = ["CPU", "Memory", "Disk", "GPU", "Network"].into_iter().map(meter).collect();
-    ui.set_meters(ModelRc::new(VecModel::from(meters)));
-    ui.set_selected_metric(-1); // no meter is tinted by being selected
-    ui.show().unwrap();
-    let shot = ui.window().take_snapshot().expect("snapshot");
-    let memory = ElementHandle::find_by_accessible_label(&ui, "Memory meter").next().expect("memory meter");
-    let disk = ElementHandle::find_by_accessible_label(&ui, "Disk meter").next().expect("disk meter");
-    let (m, mw, mh, d) = (memory.absolute_position(), memory.size().width, memory.size().height, disk.absolute_position());
-    let tinted = |x0: f32, x1: f32| {
-        (m.y.round() as u32..(m.y + mh).round() as u32)
-            .flat_map(|y| (x0.round() as u32..x1.round() as u32).map(move |x| (x, y)))
-            .filter(|&(x, y)| accent_tinted(shot.as_slice()[(y * shot.width() + x) as usize]))
-            .count()
-    };
-    assert!(tinted(m.x + 12.0, m.x + mw - 12.0) > 0, "the line shows inside the meter");
-    assert_eq!(tinted(m.x + mw + 1.0, d.x - 1.0), 0, "nothing is drawn between the meters");
+    let (rows, gap) = render_sparks(["M -400 50 L 1400 50"; 5]);
+    assert!(!rows[1].is_empty(), "the line shows inside the meter");
+    assert_eq!(gap, 0, "nothing is drawn between the meters");
 }
 
 /// Bench data: `Smooth` is load-like (a slow wave with a little noise); `Noise` is uniform

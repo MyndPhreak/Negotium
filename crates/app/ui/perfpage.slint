@@ -1,7 +1,7 @@
 import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
-import { Graph, GraphData, ScrubRow } from "graph.slint";
+import { DataPath, Graph, GraphData, ScrubRow } from "graph.slint";
 
 export struct DeviceData { id: string, title: string, value: string, spark: string }
 export struct StatData { label: string, value: string }
@@ -25,17 +25,11 @@ component DeviceButton inherits FocusButton {
             width: 56px;
             border-width: 1px;
             border-color: Theme.card-border;
-            Path {
+            DataPath {
                 width: parent.width;
                 height: parent.height;
-                viewbox-width: 1000;
-                viewbox-height: 100;
-                fit: fill;
-                clip: true;
                 commands: root.data.spark;
                 stroke: Theme.accent;
-                stroke-width: 1.5px;
-                fill: transparent;
             }
         }
         VerticalLayout {

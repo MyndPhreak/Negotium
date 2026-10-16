@@ -310,18 +310,14 @@ impl PerfInput<'_> {
         self.snap.taken_at_ms
     }
 
-    /// The graphs' right edge: the newest history sample. At refresh rates under a second the
-    /// history keeps one sample a second (ruling P3-3), so a tick can be newer; anchoring on the
-    /// tick would pull every line's end in from the edge.
+    /// The graphs' right edge (see [`graph::end_of`]).
     fn anchor(&self) -> u64 {
-        self.history.latest_t().unwrap_or(self.snap.taken_at_ms)
+        graph::end_of(self.history, self.end())
     }
 
     /// Local wall-clock time (ms since midnight) of the graphs' right edge.
     fn anchor_clock(&self) -> u64 {
-        let day = crate::scrub::DAY_MS;
-        let back = self.end().saturating_sub(self.anchor()) % day;
-        (self.snap.totals.local_time_ms % day + day - back) % day
+        crate::scrub::clock_before(self.snap.totals.local_time_ms, self.end().saturating_sub(self.anchor()))
     }
 
     fn shape(&self, key: &Series, max: f32, buckets: usize) -> Shape {

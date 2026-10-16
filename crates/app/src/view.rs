@@ -131,16 +131,10 @@ fn busiest_gpu(gpus: &[negotium_snapshot::GpuSample]) -> Option<&negotium_snapsh
     best
 }
 
-/// The graphs' right edge: the newest history sample. A tick can be newer (the history keeps one
-/// sample a second, ruling P3-3); anchoring on it would pull every line's end in from the edge.
-fn graph_end(snap: &Snapshot, history: &History) -> u64 {
-    history.latest_t().unwrap_or(snap.taken_at_ms)
-}
-
 fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
     let t = &snap.totals;
     let span = SPARK_SECONDS * 1000;
-    let end = graph_end(snap, history);
+    let end = graph::end_of(history, snap.taken_at_ms);
     let since = graph::since(end, span);
     let spark = |key: Series, max: f32| graph::line(history.points(&key, since), end, span, max, SPARK_SECONDS as usize);
     // A zero total is no reading (as on the Memory page): "Unavailable", never 100% in use.

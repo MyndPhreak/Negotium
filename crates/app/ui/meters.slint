@@ -1,5 +1,6 @@
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
+import { DataPath } from "graph.slint";
 
 export struct MeterData { label: string, value: string, sub: string, spark: string, available: bool }
 
@@ -20,16 +21,10 @@ component Meter inherits FocusButton {
         Text { text: data.label; color: Theme.muted; font-size: 12px; }
         Text { text: data.available ? data.value : "Unavailable"; color: Theme.text; font-size: data.available ? 20px : 14px; font-weight: 600; }
         Text { text: data.sub; color: Theme.muted; font-size: 11px; }
-        Path {
+        DataPath {
             height: 26px;
             commands: data.spark;
-            viewbox-width: 1000;
-            fill: transparent;
-            viewbox-height: 100;
-            fit: fill;
-            clip: true;
             stroke: Theme.accent;
-            stroke-width: 1.5px;
         }
     }
 }

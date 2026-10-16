@@ -3,6 +3,37 @@ import { Theme } from "theme.slint";
 export struct GraphData { label: string, value: string, scale: string, line: string, area: string, line2: string }
 export struct ScrubRow { name: string, value: string }
 
+// A data path: crate::graph's 1000 × 100 view box stretched over the element. It clips to its box
+// horizontally only: history left of the window is drawn at negative x (crate::graph::LEAD_MS) and
+// must stay out of sight, but a stroke centred on y = 0 or y = 100 (an idle 0% line) keeps its
+// full width, so the clip rectangle reaches past the box and the Path sits inside it.
+export component DataPath inherits Rectangle {
+    in property <string> commands;
+    in property <brush> paint: transparent;
+    in property <brush> stroke: transparent;
+    in property <length> stroke-width: 1.5px;
+    Rectangle {
+        x: 0;
+        y: -2px;
+        width: parent.width;
+        height: parent.height + 4px;
+        clip: true;
+        Path {
+            x: 0;
+            y: 2px;
+            width: parent.width;
+            height: parent.height - 4px;
+            viewbox-width: 1000;
+            viewbox-height: 100;
+            fit: fill;
+            commands: root.commands;
+            fill: root.paint;
+            stroke: root.stroke;
+            stroke-width: root.stroke-width;
+        }
+    }
+}
+
 // A time graph: grid, translucent area, line and an optional second line (write / send). The
 // paths come from crate::graph for a 1000 × 100 view box, newest sample on the right edge.
 export component Graph inherits Rectangle {
@@ -25,45 +56,30 @@ export component Graph inherits Rectangle {
         height: 1px;
         background: Theme.card-border;
     }
-    Path {
+    DataPath {
         x: 0;
         y: 0;
         width: root.width;
         height: root.height;
-        viewbox-width: 1000;
-        viewbox-height: 100;
-        fit: fill;
-        clip: true;
         visible: root.filled;
         commands: root.data.area;
-        fill: Theme.accent.with-alpha(0.16);
-        stroke: transparent;
+        paint: Theme.accent.with-alpha(0.16);
     }
-    Path {
+    DataPath {
         x: 0;
         y: 0;
         width: root.width;
         height: root.height;
-        viewbox-width: 1000;
-        viewbox-height: 100;
-        fit: fill;
-        clip: true;
         commands: root.data.line;
-        fill: transparent;
         stroke: Theme.accent;
         stroke-width: 1.5px;
     }
-    Path {
+    DataPath {
         x: 0;
         y: 0;
         width: root.width;
         height: root.height;
-        viewbox-width: 1000;
-        viewbox-height: 100;
-        fit: fill;
-        clip: true;
         commands: root.data.line2;
-        fill: transparent;
         stroke: Theme.muted;
         stroke-width: 1.5px;
     }
