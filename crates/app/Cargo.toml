@@ -13,6 +13,7 @@ negotium-history.workspace = true
 negotium-actions.workspace = true
 slint.workspace = true
 raw-window-handle.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",

@@ -4,6 +4,7 @@ use negotium::bridge::Bridge;
 use negotium::controls::Controls;
 use negotium::platform::{self, ShellEvent};
 use negotium::renderer;
+use negotium::settings;
 use negotium::{MainWindow, NegotiumTray, worker};
 use negotium_model::Metric;
 use slint::ComponentHandle;
@@ -77,8 +78,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // GPU (FemtoVG) by default, software once a stall has been recorded, SLINT_BACKEND over both
     // (crate::renderer; docs/benchmarks/README.md, "Renderer").
     let relaunched = std::env::args_os().any(|a| a == renderer::FALLBACK_ARG);
-    let decision =
-        renderer::decide(std::env::var_os("SLINT_BACKEND").is_some(), renderer::fallback_recorded(), relaunched);
+    // Read once, before the window shows (allowed on the UI thread).
+    let (settings, loaded) = settings::load(&settings::default_path());
+    if let settings::Loaded::Recovered(why) = &loaded {
+        warn(&format!("settings.json was unusable and was set aside as settings.json.bad: {why}"));
+    }
+    let decision = renderer::decide(
+        std::env::var_os("SLINT_BACKEND").is_some(),
+        settings.gpu_rendering,
+        renderer::fallback_recorded(),
+        relaunched,
+    );
     let selector = slint::BackendSelector::new();
     let (selector, name) = match decision.renderer {
         // Selected now, while SLINT_BACKEND is still set: the selector reads it.

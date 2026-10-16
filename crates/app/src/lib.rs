@@ -11,6 +11,7 @@ pub mod perf;
 pub mod platform;
 pub mod renderer;
 pub mod scrub;
+pub mod settings;
 pub mod view;
 pub mod worker;
 

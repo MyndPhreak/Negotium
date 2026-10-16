@@ -14,10 +14,11 @@
 //!   is not mistaken for a stall.
 //!
 //! The fallback is recorded in a marker file ([`fallback_path`]) and every later launch honours
-//! it. Only an explicit user action clears it ([`clear_fallback`], for the Settings switch of a
-//! later task), so the renderer never flips back and forth. Task 1 folds the marker into
-//! settings.json (`gpu_rendering: false`) by redirecting the three functions below.
-//! `SLINT_BACKEND` overrides both the default and the marker.
+//! it. Only an explicit user action clears it ([`set_gpu_rendering`], for the Settings switch of
+//! a later task), so the renderer never flips back and forth. The marker stays the durable record
+//! of an automatic fallback (the watchdog writes it from a background thread just before
+//! terminating); settings.json holds the user's own choice (`gpu_rendering`). The GPU is used only
+//! when the setting is on AND no marker exists. `SLINT_BACKEND` overrides all of it.
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -56,10 +57,15 @@ pub struct Decision {
 /// The renderer for this launch. Only Negotium's own GPU choice is guarded: an explicit
 /// `SLINT_BACKEND` is the user's (or the bench's) call, and a process the watchdog started must
 /// never relaunch again.
-pub fn decide(env_backend_set: bool, fallback_recorded: bool, relaunched_by_watchdog: bool) -> Decision {
+pub fn decide(
+    env_backend_set: bool,
+    gpu_rendering: bool,
+    fallback_recorded: bool,
+    relaunched_by_watchdog: bool,
+) -> Decision {
     let renderer = if env_backend_set {
         Renderer::FromEnv
-    } else if fallback_recorded || relaunched_by_watchdog {
+    } else if !gpu_rendering || fallback_recorded || relaunched_by_watchdog {
         Renderer::Software
     } else {
         Renderer::Gpu
@@ -84,9 +90,20 @@ pub fn record_fallback() -> std::io::Result<()> {
 }
 
 /// Forgets the fallback, so the next launch tries the GPU again. Only for an explicit user
-/// action (the Settings switch, a later task); nothing calls it automatically.
+/// action ([`set_gpu_rendering`]); nothing calls it automatically.
 pub fn clear_fallback() -> std::io::Result<()> {
     clear_fallback_at(&fallback_path())
+}
+
+/// The Settings switch "Use GPU rendering" (takes effect on the next launch). Turning it on
+/// forgets an earlier automatic fallback, so the GPU is really tried again; turning it off needs
+/// no marker, because the choice itself is saved as `Settings::gpu_rendering`.
+pub fn set_gpu_rendering(on: bool) -> std::io::Result<()> {
+    set_gpu_rendering_at(&fallback_path(), on)
+}
+
+pub fn set_gpu_rendering_at(marker: &Path, on: bool) -> std::io::Result<()> {
+    if on { clear_fallback_at(marker) } else { Ok(()) }
 }
 
 pub fn fallback_recorded_at(path: &Path) -> bool {
@@ -281,26 +298,35 @@ mod tests {
 
     #[test]
     fn decides_gpu_with_a_watchdog_by_default() {
-        assert_eq!(decide(false, false, false), Decision { renderer: Renderer::Gpu, watchdog: true });
+        assert_eq!(decide(false, true, false, false), Decision { renderer: Renderer::Gpu, watchdog: true });
+    }
+
+    #[test]
+    fn turning_gpu_rendering_off_selects_software_unguarded() {
+        let software = Decision { renderer: Renderer::Software, watchdog: false };
+        assert_eq!(decide(false, false, false, false), software);
+        assert_eq!(decide(false, false, true, true), software);
     }
 
     #[test]
     fn a_recorded_fallback_or_a_watchdog_relaunch_selects_software_unguarded() {
         let software = Decision { renderer: Renderer::Software, watchdog: false };
-        assert_eq!(decide(false, true, false), software);
-        assert_eq!(decide(false, false, true), software);
-        assert_eq!(decide(false, true, true), software);
+        assert_eq!(decide(false, true, true, false), software);
+        assert_eq!(decide(false, true, false, true), software);
+        assert_eq!(decide(false, true, true, true), software);
     }
 
     #[test]
     fn slint_backend_overrides_everything_and_is_never_guarded() {
-        for marker in [false, true] {
-            for relaunched in [false, true] {
-                assert_eq!(
-                    decide(true, marker, relaunched),
-                    Decision { renderer: Renderer::FromEnv, watchdog: false },
-                    "marker {marker}, relaunched {relaunched}"
-                );
+        for gpu in [false, true] {
+            for marker in [false, true] {
+                for relaunched in [false, true] {
+                    assert_eq!(
+                        decide(true, gpu, marker, relaunched),
+                        Decision { renderer: Renderer::FromEnv, watchdog: false },
+                        "gpu {gpu}, marker {marker}, relaunched {relaunched}"
+                    );
+                }
             }
         }
     }
@@ -322,6 +348,18 @@ mod tests {
         clear_fallback_at(&path).unwrap();
         assert!(!fallback_recorded_at(&path));
         clear_fallback_at(&path).unwrap(); // clearing when absent is fine
+    }
+
+    #[test]
+    fn the_gpu_switch_clears_the_marker_only_when_turned_on() {
+        let path = temp_marker("switch");
+        record_fallback_at(&path).unwrap();
+        set_gpu_rendering_at(&path, false).unwrap();
+        assert!(fallback_recorded_at(&path), "turning it off leaves the record alone");
+        set_gpu_rendering_at(&path, true).unwrap();
+        assert!(!fallback_recorded_at(&path), "turning it on forgets the automatic fallback");
+        set_gpu_rendering_at(&path, true).unwrap(); // nothing to clear is fine
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 
     #[test]
