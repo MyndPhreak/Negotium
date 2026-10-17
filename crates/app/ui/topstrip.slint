@@ -16,9 +16,13 @@ export component TopStrip inherits VerticalLayout {
     // worth a redraw). Not `animate`: an animation draws at display rate for its whole length, and
     // the tiles' averaged weights change a little with nearly every frame, so a 450 ms animation
     // drew about 108 frames a second at 240 Hz for motion of a pixel or two. Instead this timer
-    // steps the glide as often as its widest move needs (about 16 ms to one step for under a pixel).
-    // `glide-now` is the glide's own clock: GraphClock's, but it always moves by at least a step,
-    // so a glide ends even before Rust installs the clock (which then answers 0).
+    // steps the glide about once per pixel the tiles move (16 ms a step at most, one step for
+    // under a pixel). `glide-now` is the glide's own clock: GraphClock's, but it always moves by
+    // at least a step, so a glide ends even before Rust installs the clock (which then answers 0).
+    // Tiles glide only while `live`: smoothing on and the window on screen (GraphClock.shown, as
+    // the graphs). Otherwise every tile sits on its target, so turning either back on finds them
+    // where they are shown, and nothing steps a glide nobody sees.
+    out property <bool> live: root.smooth && GraphClock.shown;
     property <duration> glide-now;
     property <duration> glide-end;
     property <float> glide-px;
@@ -27,16 +31,18 @@ export component TopStrip inherits VerticalLayout {
     property <duration> glide-ms: 450ms;
     Timer {
         interval: root.glide-step;
-        running: root.smooth && root.glide-now < root.glide-end;
+        running: root.live && root.glide-now < root.glide-end;
         triggered => { root.glide-now = max(GraphClock.clock(), root.glide-now + self.interval); }
     }
-    // A tile starts gliding (`px`: about how far it moves, physical pixels); returns its start.
+    // A tile starts gliding (`px`: about how far its width changes, physical pixels); returns its
+    // start. A tile edge moves by the width changes of every tile left of it, so the glide steps by
+    // their sum, not the largest.
     function start-glide(px: float) -> duration {
         if (root.glide-now >= root.glide-end) {
             root.glide-px = 0; // the last glide is over
         }
         root.glide-now = max(GraphClock.clock(), root.glide-now);
-        root.glide-px = max(root.glide-px, px);
+        root.glide-px += px;
         root.glide-end = root.glide-now + root.glide-ms;
         return root.glide-now;
     }
@@ -69,22 +75,32 @@ export component TopStrip inherits VerticalLayout {
             property <float> eased: 1 - (1 - self.progress) * (1 - self.progress); // ease-out
             property <float> stretch: self.from + (self.to - self.from) * self.eased;
             property <float> shown: self.from-shown + (self.to-shown - self.from-shown) * self.eased;
+            property <bool> live: root.live;
             changed target => { self.glide(); }
             changed target-shown => { self.glide(); }
+            changed live => { self.glide(); }
             function glide() {
-                // From where it is now. Pixels per unit of stretch from its own width; a tile
-                // growing from nothing moves far.
-                self.from = self.stretch;
+                if (!root.live) {
+                    // Not gliding: settled on the target (see `live`).
+                    self.from = self.target;
+                    self.to = self.target;
+                    self.from-shown = self.target-shown;
+                    self.to-shown = self.target-shown;
+                    return;
+                }
+                // From where it is now (read before `to` moves). Its width change in pixels,
+                // about: pixels per unit of stretch from its own width (the other tiles' changes
+                // shift it a little too); a tile growing from nothing moves far.
+                let from = self.stretch;
                 self.from-shown = self.shown;
+                self.from = from;
                 self.to = self.target;
                 self.to-shown = self.target-shown;
-                if (root.smooth) {
-                    self.start = root.start-glide(self.from > 0.001 ? self.width / 1phx * abs(self.to - self.from) / self.from : 1000);
-                }
+                self.start = root.start-glide(from > 0.001 ? self.width / 1phx * abs(self.to - from) / from : 1000);
             }
-            horizontal-stretch: root.smooth ? self.stretch : self.target;
-            min-width: 28px * (root.smooth ? self.shown : self.target-shown);
-            opacity: root.smooth ? self.shown : self.target-shown;
+            horizontal-stretch: root.live ? self.stretch : self.target;
+            min-width: 28px * (root.live ? self.shown : self.target-shown);
+            opacity: root.live ? self.shown : self.target-shown;
             clip: true;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);

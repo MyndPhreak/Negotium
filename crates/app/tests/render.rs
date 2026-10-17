@@ -708,3 +708,44 @@ fn a_frame_that_nudges_the_top_tiles_glides_them_in_a_few_redraws() {
         assert!(drawn.len() <= 12, "second {sec}: {} frames for tiles a few pixels apart: {drawn:?}", drawn.len());
     }
 }
+
+/// Tiles laid out while Smooth graphs is off stay where they are, fully shown, when it is turned
+/// on: no glide ran for them, so nothing may leave them at a glide's starting point (nothing).
+#[test]
+fn tiles_stay_shown_at_their_widths_when_smooth_graphs_turns_on() {
+    use std::time::Duration;
+    software_backend();
+    let ui = MainWindow::new().unwrap();
+    negotium::smooth::install(&ui, || Duration::from_millis(i_slint_backend_testing::get_mocked_time()));
+    ui.global::<Theme>().set_accent(slint::Color::from_rgb_u8(255, 0, 0));
+    ui.set_settings_smooth_graphs(false);
+    let tile = |i: i32, w: f32| negotium::TileData { id: i, name: format!("App {i}").into(), value: "1%".into(), weight: w, hung: false, leaving: false };
+    ui.set_tiles(ModelRc::new(VecModel::from(vec![tile(0, 1.0), tile(1, 3.0)])));
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.show().unwrap();
+    let rects = || -> Vec<(f32, f32, f32)> {
+        (0..2).map(|i| {
+            let t = ElementHandle::find_by_accessible_label(&ui, &format!("App {i} tile")).next().expect("tile");
+            (t.absolute_position().x, t.absolute_position().y, t.size().width)
+        }).collect()
+    };
+    rects(); // lays the tiles out, so their birth timers start
+    for ms in [0, 1, 1000] {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(ms));
+    }
+    let before = rects();
+    assert!(before[1].2 > before[0].2 * 2.0, "three times the weight, wider: {before:?}");
+    ui.set_settings_smooth_graphs(true);
+    for ms in [0, 16, 100] {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(ms));
+        let now = rects();
+        for (b, n) in before.iter().zip(&now) {
+            assert!((b.2 - n.2).abs() < 1.0, "{ms} ms after turning smooth on: widths {before:?} became {now:?}");
+        }
+        let shot = ui.window().take_snapshot().expect("snapshot");
+        for &(x, y, w) in &now {
+            let p = shot.as_slice()[((y + 26.0).round() as u32 * shot.width() + (x + w - 4.0).round() as u32) as usize];
+            assert!(accent_tinted(p), "{ms} ms after turning smooth on, a tile is drawn: {p:?}");
+        }
+    }
+}

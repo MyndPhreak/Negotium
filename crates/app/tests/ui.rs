@@ -3349,6 +3349,34 @@ fn tiles_glide_to_their_new_widths_when_smooth_and_jump_when_not() {
     assert!((tile_width(&ui, 0) - start).abs() < 1.0, "without smoothing the tile jumps straight back");
 }
 
+/// Hidden to the tray or minimised (GraphClock.shown off), nothing glides: the tiles jump, as the
+/// graphs rest, and no timer steps a glide nobody sees.
+#[test]
+fn tiles_jump_while_the_window_is_not_on_screen() {
+    let ui = shown_window();
+    negotium::smooth::install(&ui, mocked_clock);
+    let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0), tile(1, 1.0)]));
+    ui.set_tiles(ModelRc::from(model.clone()));
+    settle(&ui, 1000);
+    ui.global::<GraphClock>().set_shown(false);
+    model.set_row_data(0, tile(0, 3.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    let early = tile_width(&ui, 0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    let end = tile_width(&ui, 0);
+    assert!((early - end).abs() < 1.0, "the tile is at its new width at once: {early} then {end}");
+    // Shown again, the tile stays put and then glides again.
+    ui.global::<GraphClock>().set_shown(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert!((tile_width(&ui, 0) - end).abs() < 1.0, "shown again, it stays where it was");
+    model.set_row_data(0, tile(0, 1.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
+    let mid = tile_width(&ui, 0);
+    assert!(mid < end - 1.0 && mid > 300.0, "and glides again: {mid} from {end}");
+}
+
 fn ids_of(model: &VecModel<negotium::TileData>) -> Vec<(i32, bool)> {
     model.iter().map(|t| (t.id, t.leaving)).collect()
 }
