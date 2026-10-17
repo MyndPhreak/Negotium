@@ -5,7 +5,7 @@ use crate::icons::{IconCache, IconPixels, RequestIcon};
 use crate::nav::{NavKey, NavOutcome, navigate};
 use crate::perf::{GraphView, PerfFrame};
 use crate::smooth::{self, Scroll};
-use crate::view::{Frame, RowKind, RowView, SECTION_APPS, Target, row_height, visible_rows};
+use crate::view::{Frame, RowKind, RowView, SECTION_APPS, Target, close_cards, row_height, visible_rows};
 use crate::worker::SharedHistory;
 use crate::{DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
 use negotium_actions::startup::StartupEntry;
@@ -239,6 +239,8 @@ pub fn row_top(rows: &[RowView], i: usize) -> (f32, f32) {
 /// Keeps `prev`'s ids at their indices, refreshing each from `fresh` (a heading's count is worked
 /// out there), else from `all`; ids missing from both become exited placeholders. New children of
 /// admitted apps go at the end of their app's block.
+/// Which process closes each card is then worked out again from this order (`close_cards`): the
+/// frame's flag belongs to the frame's order.
 fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i32>) -> Vec<RowView> {
     let live: HashMap<i32, &RowView> = all.iter().chain(fresh).map(|r| (r.id, r)).collect();
     let prev_ids: HashSet<i32> = prev.iter().map(|r| r.id).collect();
@@ -254,10 +256,9 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
                 name: p.name.clone(),
                 search_text: p.search_text.clone(),
                 icon: p.icon.clone(),
-                // Its card still draws (and closes) as it did.
+                // Its card still draws as it did.
                 expandable: p.expandable,
                 windows: p.windows,
-                last_in_card: p.last_in_card,
                 pid: p.pid.clone(),
                 exited: true,
                 actionable: false,
@@ -270,6 +271,7 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
             out.extend(fresh.iter().filter(|r| r.parent == owner && !prev_ids.contains(&r.id)).cloned());
         }
     }
+    close_cards(&mut out);
     out
 }
 
@@ -1210,6 +1212,34 @@ mod tests {
         assert!(held.iter().all(|r| r.exited));
         assert!(held[0].windows && held[0].expandable, "the held group still draws as the Windows card");
         assert!(held[1].last_in_card, "the held last process still closes its card");
+    }
+
+    /// While frozen, rows keep their places but take each frame's values: the card must still close
+    /// below its last shown process, never mid-card or twice.
+    #[test]
+    fn a_frozen_card_closes_once_below_its_last_shown_process() {
+        let proc = |id: i32, last: bool| RowView { kind: RowKind::Proc, last_in_card: last, ..child(id, 2) };
+        let closing = |layout: &RowLayout| layout.rows().iter().filter(|r| r.last_in_card).map(|r| r.id).collect::<Vec<_>>();
+        let first = vec![app(2, "1%"), proc(3, false), proc(4, true), app(5, "1%")];
+        let frozen = || {
+            let mut layout = RowLayout::default();
+            layout.on_frame(&first, first.clone());
+            layout.set_frozen(true, &first, first.clone());
+            layout
+        };
+        // The processes swap places in the next frame: the held order stands, and so must its end.
+        let mut layout = frozen();
+        let reordered = vec![app(2, "1%"), proc(4, false), proc(3, true), app(5, "1%")];
+        layout.on_frame(&reordered, reordered.clone());
+        assert_eq!(ids(layout.rows()), [2, 3, 4, 5]);
+        assert_eq!(closing(&layout), [4], "a frozen reorder");
+        // The last process exits: it stays in place, inert, and still closes the card alone.
+        let mut layout = frozen();
+        let exited = vec![app(2, "1%"), proc(3, true), app(5, "1%")];
+        layout.on_frame(&exited, exited.clone());
+        assert_eq!(ids(layout.rows()), [2, 3, 4, 5]);
+        assert!(layout.rows()[2].exited);
+        assert_eq!(closing(&layout), [4], "a frozen exit of the last process");
     }
 
     #[test]

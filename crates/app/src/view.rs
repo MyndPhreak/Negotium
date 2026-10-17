@@ -496,12 +496,19 @@ pub fn visible_rows(rows: &[RowView], expanded: &HashSet<i32>, collapsed: &HashS
             show.then(|| r.clone())
         })
         .collect();
-    for i in 0..out.len() {
-        if out[i].kind == RowKind::Proc {
-            out[i].last_in_card = out.get(i + 1).is_none_or(|n| n.depth == 0 || n.parent != out[i].parent);
+    close_cards(&mut out);
+    out
+}
+
+/// Marks the last process row of each card in `rows` as shown, and only that one: the card closes
+/// below it. Worked out from the order on screen, which a search or a frozen list (rows held in
+/// place, an exited one among them) makes differ from the order a frame was built in.
+pub fn close_cards(rows: &mut [RowView]) {
+    for i in 0..rows.len() {
+        if rows[i].kind == RowKind::Proc {
+            rows[i].last_in_card = rows.get(i + 1).is_none_or(|n| n.depth == 0 || n.parent != rows[i].parent);
         }
     }
-    out
 }
 
 #[cfg(test)]
