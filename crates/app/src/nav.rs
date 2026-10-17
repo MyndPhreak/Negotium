@@ -62,7 +62,8 @@ pub enum NavOutcome {
     Nothing,
 }
 
-pub fn navigate(rows: &[RowView], expanded: &HashSet<i32>, current: Option<i32>, key: NavKey) -> NavOutcome {
+/// `expanded` holds the open apps, `collapsed` the closed sections (by id).
+pub fn navigate(rows: &[RowView], expanded: &HashSet<i32>, collapsed: &HashSet<i32>, current: Option<i32>, key: NavKey) -> NavOutcome {
     let Some(first) = rows.first() else { return NavOutcome::Nothing };
     let Some(i) = current.and_then(|id| rows.iter().position(|r| r.id == id)) else {
         // No current row yet, or it went away: any key starts at the top.
@@ -78,14 +79,22 @@ pub fn navigate(rows: &[RowView], expanded: &HashSet<i32>, current: Option<i32>,
         NavKey::End => to(last),
         NavKey::PageUp => to(i.saturating_sub(PAGE_ROWS)),
         NavKey::PageDown => to((i + PAGE_ROWS).min(last)),
-        // A heading toggles its section and is never a target. It is open exactly when a card
-        // follows it (visible_rows drops a heading with nothing to show; a collapsed one shows
-        // alone).
-        _ if r.kind == RowKind::Section => match (key, rows.get(i + 1).filter(|n| n.kind != RowKind::Section)) {
-            (NavKey::Left, Some(_)) | (NavKey::Right, None) | (NavKey::Enter, _) => NavOutcome::Toggle(r.id),
-            (NavKey::Right, Some(card)) => NavOutcome::Move(card.id),
-            _ => NavOutcome::Nothing,
-        },
+        // A heading toggles its section and is never a target. Whether it is open comes from
+        // `collapsed`, not from the row after it: a frozen list may still hold a closed section's
+        // cards, or show an open heading before its cards are let in.
+        _ if r.kind == RowKind::Section => {
+            let open = !collapsed.contains(&r.id);
+            match key {
+                NavKey::Left if open => NavOutcome::Toggle(r.id),
+                NavKey::Right if !open => NavOutcome::Toggle(r.id),
+                NavKey::Enter => NavOutcome::Toggle(r.id),
+                NavKey::Right => match rows.get(i + 1) {
+                    Some(card) if card.kind != RowKind::Section => NavOutcome::Move(card.id),
+                    _ => NavOutcome::Nothing,
+                },
+                _ => NavOutcome::Nothing,
+            }
+        }
         NavKey::Right if r.expandable && !expanded.contains(&r.id) => NavOutcome::Toggle(r.id),
         NavKey::Right if r.expandable => match rows.get(i + 1) {
             Some(c) if c.parent == r.id => NavOutcome::Move(c.id),
@@ -123,15 +132,15 @@ mod tests {
     }
 
     fn go(current: i32, key: NavKey, expanded: &[i32]) -> NavOutcome {
-        navigate(&rows(), &expanded.iter().copied().collect(), Some(current), key)
+        navigate(&rows(), &expanded.iter().copied().collect(), &HashSet::new(), Some(current), key)
     }
 
     #[test]
     fn without_a_current_row_any_key_starts_at_the_top() {
         let none = HashSet::new();
-        assert_eq!(navigate(&rows(), &none, None, NavKey::Delete), NavOutcome::Move(1));
-        assert_eq!(navigate(&rows(), &none, Some(99), NavKey::Down), NavOutcome::Move(1), "the current row went away");
-        assert_eq!(navigate(&[], &none, None, NavKey::Down), NavOutcome::Nothing);
+        assert_eq!(navigate(&rows(), &none, &none, None, NavKey::Delete), NavOutcome::Move(1));
+        assert_eq!(navigate(&rows(), &none, &none, Some(99), NavKey::Down), NavOutcome::Move(1), "the current row went away");
+        assert_eq!(navigate(&[], &none, &none, None, NavKey::Down), NavOutcome::Nothing);
     }
 
     #[test]
@@ -179,8 +188,8 @@ mod tests {
     #[test]
     fn left_and_right_close_and_open_a_section() {
         use crate::view::{SECTION_APPS, SECTION_BACKGROUND};
-        let none = HashSet::new();
-        let go = |current: i32, key: NavKey| navigate(&sectioned(), &none, Some(current), key);
+        let (none, closed) = (HashSet::new(), HashSet::from([SECTION_BACKGROUND]));
+        let go = |current: i32, key: NavKey| navigate(&sectioned(), &none, &closed, Some(current), key);
         assert_eq!(go(SECTION_APPS, NavKey::Left), NavOutcome::Toggle(SECTION_APPS), "an open section closes");
         assert_eq!(go(SECTION_APPS, NavKey::Right), NavOutcome::Move(1), "into an open section");
         assert_eq!(go(SECTION_BACKGROUND, NavKey::Right), NavOutcome::Toggle(SECTION_BACKGROUND), "a closed section opens");
@@ -191,17 +200,32 @@ mod tests {
         assert_eq!(go(1, NavKey::Right), NavOutcome::Toggle(1), "apps under a heading expand as before");
     }
 
+    /// Whether a heading is open comes from the collapsed set, never from the row after it: a
+    /// frozen list can still hold a closed section's cards in place, or an open one's heading alone.
+    #[test]
+    fn a_headings_state_comes_from_the_collapsed_set() {
+        use crate::view::{SECTION_APPS, SECTION_BACKGROUND};
+        let none = HashSet::new();
+        let closed = HashSet::from([SECTION_APPS]);
+        // Apps closed, its cards still held below the heading.
+        assert_eq!(navigate(&sectioned(), &none, &closed, Some(SECTION_APPS), NavKey::Right), NavOutcome::Toggle(SECTION_APPS));
+        assert_eq!(navigate(&sectioned(), &none, &closed, Some(SECTION_APPS), NavKey::Left), NavOutcome::Nothing);
+        // Background open, nothing below it yet: Left closes it, Right has nowhere to go.
+        assert_eq!(navigate(&sectioned(), &none, &none, Some(SECTION_BACKGROUND), NavKey::Left), NavOutcome::Toggle(SECTION_BACKGROUND));
+        assert_eq!(navigate(&sectioned(), &none, &none, Some(SECTION_BACKGROUND), NavKey::Right), NavOutcome::Nothing);
+    }
+
     #[test]
     fn delete_on_a_section_does_nothing() {
         use crate::view::{SECTION_APPS, SECTION_BACKGROUND};
         let none = HashSet::new();
         for id in [SECTION_APPS, SECTION_BACKGROUND] {
-            assert_eq!(navigate(&sectioned(), &none, Some(id), NavKey::Delete), NavOutcome::Nothing);
+            assert_eq!(navigate(&sectioned(), &none, &none, Some(id), NavKey::Delete), NavOutcome::Nothing);
         }
         // Even a heading claiming to be actionable is never a target.
         let mut rows = sectioned();
         rows[0].actionable = true;
-        assert_eq!(navigate(&rows, &none, Some(SECTION_APPS), NavKey::Delete), NavOutcome::Nothing);
+        assert_eq!(navigate(&rows, &none, &none, Some(SECTION_APPS), NavKey::Delete), NavOutcome::Nothing);
     }
 
     #[test]

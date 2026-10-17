@@ -4,7 +4,7 @@ use crate::controls::{Controls, Page};
 use crate::nav::{NavKey, NavOutcome, navigate};
 use crate::perf::{GraphView, PerfFrame};
 use crate::smooth::{self, Scroll};
-use crate::view::{Frame, RowKind, RowView, Target, visible_rows};
+use crate::view::{Frame, RowKind, RowView, SECTION_APPS, Target, row_height, visible_rows};
 use crate::worker::SharedHistory;
 use crate::{DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
 use negotium_actions::startup::StartupEntry;
@@ -176,6 +176,54 @@ impl RowLayout {
         self.shown.retain(|r| r.parent != id);
         self.on_frame(all, fresh);
     }
+
+    /// The user closed section `id`: just its block (cards and their processes) goes. The list is
+    /// frozen whenever it has keyboard focus, so this is how a heading closes from the keyboard.
+    pub fn close_section(&mut self, id: i32, all: &[RowView], fresh: Vec<RowView>) {
+        if !self.frozen {
+            self.shown = fresh;
+            return;
+        }
+        if let Some(at) = self.shown.iter().position(|r| r.id == id) {
+            let end = section_end(&self.shown, at);
+            let gone: HashSet<i32> = self.shown.drain(at + 1..end).map(|r| r.id).collect();
+            self.admit.retain(|a| !gone.contains(a));
+        }
+        self.on_frame(all, fresh);
+    }
+
+    /// The user opened section `id`: its block as it would show unfrozen goes in right below the
+    /// heading; nothing else moves, and new apps elsewhere keep waiting.
+    pub fn open_section(&mut self, id: i32, all: &[RowView], fresh: Vec<RowView>) {
+        if !self.frozen {
+            self.shown = fresh;
+            return;
+        }
+        if let (Some(at), Some(from)) = (self.shown.iter().position(|r| r.id == id), fresh.iter().position(|r| r.id == id)) {
+            let end = section_end(&self.shown, at);
+            let have: HashSet<i32> = self.shown.iter().map(|r| r.id).collect();
+            let block: Vec<RowView> = fresh[from + 1..section_end(&fresh, from)].iter().filter(|r| !have.contains(&r.id)).cloned().collect();
+            self.shown.splice(end..end, block);
+        }
+        self.on_frame(all, fresh);
+    }
+}
+
+/// Where the block of the heading at `at` ends: the next heading, or the end of the list.
+fn section_end(rows: &[RowView], at: usize) -> usize {
+    rows[at + 1..].iter().position(|r| r.kind == RowKind::Section).map_or(rows.len(), |p| at + 1 + p)
+}
+
+/// Section heading ids sit at the top of the id range (crate::view::SECTION_APPS).
+fn is_section(id: i32) -> bool {
+    id >= SECTION_APPS
+}
+
+/// The y of row `i` within the list and its height, by its kind: rows differ in height (headings,
+/// cards, process rows), so neither is a multiple of one row height.
+pub fn row_top(rows: &[RowView], i: usize) -> (f32, f32) {
+    let y = rows.iter().take(i).map(|r| row_height(r.kind)).sum();
+    (y, rows.get(i).map_or(0.0, |r| row_height(r.kind)))
 }
 
 /// Keeps `prev`'s ids at their indices, refreshing each from `fresh` (a heading's count is worked
@@ -195,6 +243,10 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
                 kind: p.kind,
                 name: p.name.clone(),
                 search_text: p.search_text.clone(),
+                // Its card still draws (and closes) as it did.
+                expandable: p.expandable,
+                windows: p.windows,
+                last_in_card: p.last_in_card,
                 exited: true,
                 actionable: false,
                 ..Default::default()
@@ -222,6 +274,32 @@ fn auto_expand_hung_groups(rows: &[RowView], expanded: &mut HashSet<i32>, auto: 
         }
     }
     auto.retain(|id| rows.iter().any(|r| r.id == *id));
+    changed
+}
+
+/// Opens a closed section the first time one of its apps hangs, so that app's Force close is in
+/// view; the same rule as `auto_expand_hung_groups`: closed again by the user, it stays closed
+/// until the section has no hung app. Returns true if `collapsed` changed.
+pub fn reopen_hung_sections(rows: &[RowView], collapsed: &mut HashSet<i32>, reopened: &mut HashSet<i32>) -> bool {
+    let mut hung: HashMap<i32, bool> = HashMap::new();
+    let mut section = None;
+    for r in rows {
+        if r.kind == RowKind::Section {
+            section = Some(r.id);
+            hung.insert(r.id, false);
+        } else if let Some(s) = section.filter(|_| r.kind == RowKind::App && r.depth == 0 && !r.hung.is_empty()) {
+            hung.insert(s, true);
+        }
+    }
+    let mut changed = false;
+    for (&id, &h) in &hung {
+        if !h {
+            reopened.remove(&id);
+        } else if reopened.insert(id) {
+            changed |= collapsed.remove(&id);
+        }
+    }
+    reopened.retain(|id| hung.contains_key(id));
     changed
 }
 
@@ -258,6 +336,11 @@ pub struct Bridge {
     expanded: HashSet<i32>,
     /// Groups expanded automatically for their current hang (see `auto_expand_hung_groups`).
     auto_expanded: HashSet<i32>,
+    /// Sections the user closed. Never published to the worker: a closed section's apps are built
+    /// as usual, only not shown. Not saved: every section starts open.
+    collapsed: HashSet<i32>,
+    /// Sections opened automatically for their current hang (see `reopen_hung_sections`).
+    reopened: HashSet<i32>,
     search: String,
     last: Frame,
     layout: RowLayout,
@@ -303,6 +386,8 @@ impl Bridge {
             scroll: None,
             expanded: HashSet::new(),
             auto_expanded: HashSet::new(),
+            collapsed: HashSet::new(),
+            reopened: HashSet::new(),
             search: String::new(),
             last: Frame::default(),
             layout: RowLayout::default(),
@@ -563,7 +648,8 @@ impl Bridge {
         ui.set_show_admin_banner(frame.admin_banner && !self.banner_dismissed);
         self.scroll_to(ui, frame.graph_end_ms);
         self.last = frame;
-        // While frozen, newly shown children would be deferred anyway: expand on unfreeze instead.
+        // While frozen, newly shown children (or a reopened section's cards) would be deferred
+        // anyway: expand on unfreeze instead.
         if !self.layout.frozen() {
             self.auto_expand();
         }
@@ -575,6 +661,7 @@ impl Bridge {
     }
 
     fn auto_expand(&mut self) {
+        reopen_hung_sections(&self.last.rows, &mut self.collapsed, &mut self.reopened);
         if auto_expand_hung_groups(&self.last.rows, &mut self.expanded, &mut self.auto_expanded) {
             self.publish_child_rows();
         }
@@ -586,8 +673,7 @@ impl Bridge {
     }
 
     fn fresh(&self) -> Vec<RowView> {
-        // Sections can't be collapsed yet: every one is open.
-        visible_rows(&self.last.rows, &self.expanded, &HashSet::new(), &self.search)
+        visible_rows(&self.last.rows, &self.expanded, &self.collapsed, &self.search)
     }
 
     fn push_rows(&self) {
@@ -596,7 +682,7 @@ impl Bridge {
         sync_model(&*self.rows, self.layout.rows().iter().map(|r| RowData {
             id: r.id, depth: r.depth, name: r.name.clone().into(), count: r.count.clone().into(), cpu: r.cpu.clone().into(),
             mem: r.mem.clone().into(), disk: r.disk.clone().into(), gpu: r.gpu.clone().into(), net: r.net.clone().into(),
-            bar: r.bars[metric], hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.expanded.contains(&r.id),
+            bar: r.bars[metric], hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.is_open(r),
             actionable: r.actionable, exited: r.exited,
         }).collect());
         self.sync_current();
@@ -610,7 +696,27 @@ impl Bridge {
         self.push_rows();
     }
 
+    /// Whether a row shows open: a section unless closed, an app when expanded.
+    fn is_open(&self, r: &RowView) -> bool {
+        if r.kind == RowKind::Section { !self.collapsed.contains(&r.id) } else { self.expanded.contains(&r.id) }
+    }
+
+    /// Opens or closes a section heading, or expands or collapses an app.
     pub fn toggle(&mut self, id: i32) {
+        if is_section(id) {
+            let opening = self.collapsed.remove(&id);
+            if !opening {
+                self.collapsed.insert(id);
+            }
+            let fresh = self.fresh();
+            if opening {
+                self.layout.open_section(id, &self.last.rows, fresh);
+            } else {
+                self.layout.close_section(id, &self.last.rows, fresh);
+            }
+            self.push_rows();
+            return;
+        }
         let expanding = !self.expanded.remove(&id);
         if expanding {
             self.expanded.insert(id);
@@ -629,12 +735,18 @@ impl Bridge {
     pub fn open_tile(&mut self, id: i32) {
         self.search.clear(); // the box itself is emptied by main.slint in the same click
         self.expanded.insert(id);
+        // Its section opens too, or there would be nothing to show.
+        let rows = &self.last.rows;
+        if let Some(h) = rows.iter().position(|r| r.id == id).and_then(|at| rows[..at].iter().rfind(|r| r.kind == RowKind::Section)) {
+            self.collapsed.remove(&h.id);
+        }
         self.publish_child_rows();
         let fresh = self.fresh();
         self.layout.rebase(fresh);
         self.push_rows();
         if let (Some(i), Some(ui)) = (self.layout.rows().iter().position(|r| r.id == id), self.ui.upgrade()) {
-            ui.invoke_ensure_row_visible(i as i32);
+            let (y, h) = row_top(self.layout.rows(), i);
+            ui.invoke_ensure_row_visible(y, h);
         }
     }
 
@@ -699,7 +811,7 @@ impl Bridge {
         if reasserted {
             self.set_list_focus(true);
         }
-        let mut outcome = navigate(self.layout.rows(), &self.expanded, self.current, key);
+        let mut outcome = navigate(self.layout.rows(), &self.expanded, &self.collapsed, self.current, key);
         // The ring only appears with this key (and may have moved to another app if the current
         // one left meanwhile): never act on a row the user has not yet seen highlighted.
         if reasserted && matches!(outcome, NavOutcome::Action(..)) {
@@ -732,6 +844,10 @@ impl Bridge {
         let rows = self.layout.rows();
         let index = self.current_index();
         ui.set_current_row(index.map_or(-1, |i| i as i32));
+        // Where the keyboard menu anchors (and what it brings back into view first).
+        let (y, h) = index.map_or((0.0, 0.0), |i| row_top(rows, i));
+        ui.set_current_row_y(y);
+        ui.set_current_row_h(h);
         ui.set_current_id(self.current.unwrap_or(-1));
         ui.set_current_actionable(index.is_some_and(|i| rows[i].actionable && !rows[i].exited));
     }
@@ -739,7 +855,8 @@ impl Bridge {
     /// Scrolls the current row into view: only for the user's own keyboard moves (ruling PF1).
     fn reveal_current(&self) {
         if let (Some(i), Some(ui)) = (self.current_index(), self.ui.upgrade()) {
-            ui.invoke_ensure_row_visible(i as i32);
+            let (y, h) = row_top(self.layout.rows(), i);
+            ui.invoke_ensure_row_visible(y, h);
         }
     }
 
@@ -951,6 +1068,71 @@ mod tests {
         let mut hung_app = app(5, "1%");
         hung_app.hung = "Not responding · 3s".into();
         assert!(!auto_expand_hung_groups(&[hung_app], &mut expanded, &mut auto));
+    }
+
+    fn section(id: i32) -> RowView {
+        RowView { id, parent: -1, depth: 0, kind: RowKind::Section, expandable: true, ..Default::default() }
+    }
+
+    #[test]
+    fn a_hung_app_reopens_its_section_once() {
+        use crate::view::{SECTION_APPS, SECTION_BACKGROUND};
+        let rows = |hung: &str| vec![section(SECTION_APPS), app(1, "1%"), section(SECTION_BACKGROUND), RowView { hung: hung.into(), ..app(2, "1%") }];
+        let (mut collapsed, mut reopened) = (HashSet::from([SECTION_BACKGROUND]), HashSet::new());
+        assert!(!reopen_hung_sections(&rows(""), &mut collapsed, &mut reopened));
+        assert!(collapsed.contains(&SECTION_BACKGROUND), "no hang: the section stays closed");
+        assert!(reopen_hung_sections(&rows("Not responding · 9s"), &mut collapsed, &mut reopened));
+        assert!(!collapsed.contains(&SECTION_BACKGROUND), "the hang opens it");
+        collapsed.insert(SECTION_BACKGROUND); // the user closes it again
+        assert!(!reopen_hung_sections(&rows("Not responding · 10s"), &mut collapsed, &mut reopened));
+        assert!(collapsed.contains(&SECTION_BACKGROUND), "still the same hang: the user's close stands");
+        assert!(!reopen_hung_sections(&rows(""), &mut collapsed, &mut reopened));
+        assert!(reopen_hung_sections(&rows("Not responding · 1s"), &mut collapsed, &mut reopened), "a new hang opens it again");
+        assert!(collapsed.is_empty());
+    }
+
+    #[test]
+    fn ensure_visible_uses_real_row_tops() {
+        let proc = |id: i32| RowView { kind: RowKind::Proc, ..child(id, 3) };
+        let rows = [section(crate::view::SECTION_APPS), app(2, "1%"), app(3, "1%"), proc(4), proc(5), section(crate::view::SECTION_BACKGROUND)];
+        assert_eq!(row_top(&rows, 0), (0.0, 32.0));
+        assert_eq!(row_top(&rows, 2), (32.0 + 50.0, 50.0));
+        assert_eq!(row_top(&rows, 4), (32.0 + 50.0 + 50.0 + 30.0, 30.0));
+        assert_eq!(row_top(&rows, 5), (32.0 + 50.0 + 50.0 + 30.0 + 30.0, 32.0));
+    }
+
+    /// The list is frozen whenever it has keyboard focus, so a heading toggled from the keyboard
+    /// must still close and open its own block in place; nothing else moves.
+    #[test]
+    fn a_section_closes_and_opens_in_place_while_frozen() {
+        use crate::view::{SECTION_APPS, SECTION_BACKGROUND};
+        let all = vec![section(SECTION_APPS), app(1, "1%"), section(SECTION_BACKGROUND), app(2, "1%"), app(3, "1%")];
+        let mut layout = RowLayout::default();
+        layout.on_frame(&all, all.clone());
+        layout.set_frozen(true, &all, all.clone());
+        // A new app 9 arrives meanwhile in Apps: it must keep waiting.
+        let next = vec![section(SECTION_APPS), app(1, "1%"), app(9, "1%"), section(SECTION_BACKGROUND), app(2, "1%"), app(3, "1%")];
+        let closed = vec![section(SECTION_APPS), app(1, "1%"), app(9, "1%"), section(SECTION_BACKGROUND)];
+        layout.close_section(SECTION_BACKGROUND, &next, closed);
+        assert_eq!(ids(layout.rows()), [SECTION_APPS, 1, SECTION_BACKGROUND]);
+        layout.open_section(SECTION_BACKGROUND, &next, next.clone());
+        assert_eq!(ids(layout.rows()), [SECTION_APPS, 1, SECTION_BACKGROUND, 2, 3]);
+        layout.set_frozen(false, &next, next.clone());
+        assert_eq!(ids(layout.rows()), [SECTION_APPS, 1, 9, SECTION_BACKGROUND, 2, 3]);
+    }
+
+    #[test]
+    fn an_exited_placeholder_keeps_its_cards_shape() {
+        let mut last = child(3, 2);
+        last.kind = RowKind::Proc;
+        last.last_in_card = true;
+        let mut group = app(2, "1%");
+        (group.windows, group.expandable) = (true, true);
+        let prev = vec![group, last];
+        let held = hold(&prev, &[], &[], &HashSet::new());
+        assert!(held.iter().all(|r| r.exited));
+        assert!(held[0].windows && held[0].expandable, "the held group still draws as the Windows card");
+        assert!(held[1].last_in_card, "the held last process still closes its card");
     }
 
     #[test]

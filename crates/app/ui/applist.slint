@@ -63,11 +63,15 @@ export component AppList inherits VerticalLayout {
     in-out property <string> search-text;
     // Keyboard navigation (ruling P3-7): the current row's index and id, and whether it can be acted on.
     in property <int> current-row: -1;
+    // The current row's top within the list and its height (rows differ in height).
+    in property <length> current-row-y;
+    in property <length> current-row-h;
     in property <int> current-id: -1;
     in property <bool> current-actionable;
     out property <bool> hovered: area.has-hover;
     out property <length> scroll-y: lv.content-y;
-    // Every row's height; scrolling and the keyboard menu's anchor are computed from it.
+    // Every row's height as drawn, until rows draw per kind; scrolling and the keyboard menu's
+    // anchor use the real row tops from Rust (current-row-y, ensure-visible).
     private property <length> row-height: 32px;
     // The row a context menu was opened on. Captured when it opens; every menu item acts on it,
     // never on whatever row data sits at that index by the time an item is chosen.
@@ -90,15 +94,12 @@ export component AppList inherits VerticalLayout {
     callback park-focus();
     spacing: 6px;
 
-    // Scrolls so row `i` is fully visible.
-    public function ensure-visible(i: int) {
-        if (i < 0) {
-            return;
-        }
-        if (i * root.row-height < -lv.content-y) {
-            lv.content-y = -(i * root.row-height);
-        } else if ((i + 1) * root.row-height > -lv.content-y + lv.visible-height) {
-            lv.content-y = -((i + 1) * root.row-height - lv.visible-height);
+    // Scrolls so the row at `y` (its top in the list), `h` tall, is fully visible.
+    public function ensure-visible(y: length, h: length) {
+        if (y < -lv.content-y) {
+            lv.content-y = -y;
+        } else if (y + h > -lv.content-y + lv.visible-height) {
+            lv.content-y = -(y + h - lv.visible-height);
         }
     }
 
@@ -115,8 +116,8 @@ export component AppList inherits VerticalLayout {
             root.menu-target = root.current-id;
             root.menu-open(true);
             // A wheel may have scrolled the current row away: bring it back so the menu anchors on it.
-            root.ensure-visible(root.current-row);
-            key-menu.open(24px, (root.current-row + 1) * root.row-height + lv.content-y);
+            root.ensure-visible(root.current-row-y, root.current-row-h);
+            key-menu.open(24px, root.current-row-y + root.current-row-h + lv.content-y);
             root.menu-open(false);
         }
     }

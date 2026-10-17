@@ -95,6 +95,9 @@ export component MainWindow inherits Window {
     out property <int> menu-target: list.menu-target;
     // Keyboard navigation through the app list (ruling P3-7): set by the bridge.
     in property <int> current-row: -1;
+    // The current row's top and height in the list (crate::bridge::row_top): rows differ in height.
+    in property <length> current-row-y;
+    in property <length> current-row-h;
     in property <int> current-id: -1;
     in property <bool> current-actionable;
     out property <length> list-scroll-y: list.scroll-y;
@@ -167,9 +170,9 @@ export component MainWindow inherits Window {
         Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
     }
 
-    // Scrolls the app list so row `i` is fully visible.
-    public function ensure-row-visible(i: int) {
-        list.ensure-visible(i);
+    // Scrolls the app list so the row at `y` (its top in the list), `h` tall, is fully visible.
+    public function ensure-row-visible(y: length, h: length) {
+        list.ensure-visible(y, h);
     }
 
     // has-hover only re-evaluates on the next pointer event, so release the list freeze explicitly
@@ -277,6 +280,8 @@ export component MainWindow inherits Window {
                         row-focus(id, focused) => { root.row-key-focus(id, focused); }
                         search(text) => { root.search-changed(text); }
                         current-row: root.current-row;
+                        current-row-y: root.current-row-y;
+                        current-row-h: root.current-row-h;
                         current-id: root.current-id;
                         current-actionable: root.current-actionable;
                         list-focus(f) => { root.list-focus(f); }

@@ -1661,6 +1661,101 @@ fn the_current_row_reports_selected_only_while_the_list_has_focus() {
     assert_eq!(editor().accessible_item_selected(), Some(false), "not selected while the list is unfocused");
 }
 
+// ---- App list redesign Task 4: sections collapse, and the list scrolls by real row tops ----
+
+fn heading(id: i32, name: &str) -> RowView {
+    RowView { id, parent: -1, depth: 0, kind: negotium::view::RowKind::Section, name: name.into(), expandable: true, ..Default::default() }
+}
+
+fn shown_expanded(ui: &MainWindow, id: i32) -> bool {
+    use slint::Model;
+    ui.get_rows().iter().find(|r| r.id == id).is_some_and(|r| r.expanded)
+}
+
+#[test]
+fn collapsing_a_section_hides_its_cards_and_reopens_on_a_hang() {
+    use negotium::view::{SECTION_APPS, SECTION_BACKGROUND};
+    let (ui, controls, bridge) = bridged();
+    let rows = |hung: &str| frame(vec![
+        heading(SECTION_APPS, "Apps"), row_view(1, "Editor", ""),
+        heading(SECTION_BACKGROUND, "Background processes"), row_view(2, "Updater", hung), row_view(3, "Agent", ""),
+    ]);
+    let (open, closed) = ([SECTION_APPS, 1, SECTION_BACKGROUND, 2, 3], [SECTION_APPS, 1, SECTION_BACKGROUND]);
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, rows(""));
+    assert_eq!(shown_ids(&ui), open);
+    assert!(shown_expanded(&ui, SECTION_BACKGROUND), "sections start open");
+    b.toggle(SECTION_BACKGROUND);
+    assert_eq!(shown_ids(&ui), closed, "its cards go; the heading stays");
+    assert!(!shown_expanded(&ui, SECTION_BACKGROUND));
+    assert!(!controls.child_rows().0.contains(&SECTION_BACKGROUND), "a section is never published to the worker");
+    b.apply(&ui, rows(""));
+    assert_eq!(shown_ids(&ui), closed, "it stays closed across frames");
+    b.apply(&ui, rows(HUNG));
+    assert_eq!(shown_ids(&ui), open, "a hung app reopens its section");
+    b.toggle(SECTION_BACKGROUND);
+    b.apply(&ui, rows(HUNG));
+    assert_eq!(shown_ids(&ui), closed, "closed again during the same hang: it stays closed");
+    b.apply(&ui, rows(""));
+    b.apply(&ui, rows(HUNG));
+    assert_eq!(shown_ids(&ui), open, "a new hang reopens it");
+    b.toggle(SECTION_BACKGROUND);
+    b.open_tile(3);
+    assert_eq!(shown_ids(&ui), open, "opening a tile opens its app's section");
+}
+
+#[test]
+fn left_and_right_on_a_heading_close_and_open_its_section_while_the_list_has_focus() {
+    use negotium::view::{SECTION_APPS, SECTION_BACKGROUND};
+    use slint::platform::Key;
+    let (ui, controls, _bridge, _) = wired_list(vec![
+        heading(SECTION_APPS, "Apps"), row_view(1, "Editor", ""),
+        heading(SECTION_BACKGROUND, "Background processes"), row_view(2, "Updater", ""), row_view(3, "Agent", ""),
+    ]);
+    assert!(tab_until(&ui, || controls.frozen()));
+    assert_eq!(ui.get_current_id(), SECTION_APPS);
+    press_key(&ui, Key::DownArrow);
+    press_key(&ui, Key::DownArrow);
+    assert_eq!(ui.get_current_id(), SECTION_BACKGROUND);
+    press_key(&ui, Key::LeftArrow);
+    assert_eq!(shown_ids(&ui), [SECTION_APPS, 1, SECTION_BACKGROUND], "closed in place, though the list is frozen");
+    press_key(&ui, Key::RightArrow);
+    assert_eq!(shown_ids(&ui), [SECTION_APPS, 1, SECTION_BACKGROUND, 2, 3]);
+    press_key(&ui, Key::RightArrow);
+    assert_eq!(ui.get_current_id(), 2, "into the open section");
+}
+
+/// Rows still render at one height until the list draws cards (Task 6), so this checks the scroll
+/// position ensure-visible sets from the real row tops, not rendered rects.
+#[test]
+fn page_down_reveals_the_card_it_lands_on() {
+    use negotium::view::{RowKind, SECTION_APPS, visible_rows};
+    use slint::platform::Key;
+    use std::collections::HashSet;
+    let proc = |id: i32| RowView { id, parent: 2, depth: 1, kind: RowKind::Proc, name: format!("proc{id}"), actionable: true, ..Default::default() };
+    let mut rows = vec![heading(SECTION_APPS, "Apps")];
+    for i in 1..=40 {
+        rows.push(RowView { expandable: i == 2, ..row_view(i, &format!("App{i}"), "") });
+        if i == 2 {
+            rows.extend([proc(101), proc(102)]);
+        }
+    }
+    let (ui, controls, bridge, _) = wired_list(rows.clone());
+    bridge.borrow_mut().toggle(2);
+    assert!(tab_until(&ui, || controls.frozen()));
+    assert_eq!(ui.get_current_id(), SECTION_APPS);
+    press_key(&ui, Key::PageDown);
+    press_key(&ui, Key::PageDown);
+    let shown = visible_rows(&rows, &HashSet::from([2]), &HashSet::new(), "");
+    assert_eq!(ui.get_current_id(), shown[20].id);
+    let (y, h) = negotium::bridge::row_top(&shown, 20);
+    assert_eq!((y, h), (32.0 + 50.0 * 2.0 + 30.0 * 2.0 + 50.0 * 15.0, 50.0), "heading, two cards, two processes, fifteen cards");
+    assert_eq!(ui.get_current_row_y(), y);
+    let visible = rect_of(&El::find_by_element_id(&ui, "AppList::lv").next().expect("the list view")).3;
+    assert!(y + h > visible, "the target starts out of view");
+    assert_eq!(ui.get_list_scroll_y(), -(y + h - visible), "the card's bottom edge sits on the list's");
+}
+
 // ---- Plan 3b Task 0: the menu key with nothing focused ----
 
 fn shift_f10(ui: &MainWindow) {
