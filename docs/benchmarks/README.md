@@ -367,9 +367,17 @@ list redesign. CPU is the share of one core (`cpu_one_core_pct.mean`). Files:
 - Run-to-run spread on the same build is about 1.5 points of a core, larger than the 0.5-point
   budget, so the budget cannot be judged from single runs.
 - The cleaner comparison is smooth off, earlier run: 5.30 % against the baseline 5.32 %. It shows no
-  measurable cost from the feed under the network traffic at that time.
+  clear cost from the feed under the network traffic at that time.
 - Whether network traffic was heavy during the 6.84 % run is unknown.
-- The collector tick median was not measured: the bench has no field for it.
+- Frames per 60 s dropped about 30 % against the app-list baseline (smooth off 207 → 140 / 146,
+  smooth on about 545 → 471–480) at similar CPU, so each frame cost more on the network build. The
+  cause is unknown: the feed, other changes on the branch, or the machine at the time.
+- The collector tick median was not measured: the bench has no field for it. The ≤ 5 ms tick budget
+  is unchecked.
+- So the evidence is confounded (single runs, a spread larger than the budget, a different frame
+  count, unknown traffic), and this does not show that the +0.5 % CPU budget is met. The follow-up is
+  a same-build comparison with the feed on and off (same binary, back to back) and a tick-time
+  measurement.
 
 ### Elevated tests
 
@@ -383,4 +391,7 @@ list redesign. CPU is the share of one core (`cpu_one_core_pct.mean`). Files:
 3. The Network meter's top tiles.
 4. The network page hover shows the split on the newest sample, and "All adapters".
 5. A crash leaves no session after the next start: `logman query -ets` shows at most one
-   `Negotium-Net`, and none after Negotium exits.
+   `Negotium-Net-<session id>` (the logon session's id, e.g. `Negotium-Net-1`), and none after
+   Negotium exits. A session left by a crash survives an unelevated relaunch (which never touches
+   the trace) until the next elevated run replaces it, or a reboot. Meanwhile the provider's events
+   have no consumer and are dropped by Windows: a small cost, no growing buffers or files.
