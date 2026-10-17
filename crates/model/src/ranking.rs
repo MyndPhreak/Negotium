@@ -144,8 +144,8 @@ pub fn compare_rows(a: &AppRow, b: &AppRow, sort: Sort) -> Ordering {
         })
 }
 
-/// The same order for one app's process rows. A process has no network reading, so that column
-/// sorts as zero.
+/// The same order for one app's process rows. Network sorts by upload + download; a process
+/// without a reading (no per-process feed) sorts as zero.
 pub fn compare_procs(a: &ProcRow, b: &ProcRow, sort: Sort) -> Ordering {
     fn value(p: &ProcRow, m: Metric) -> f64 {
         match m {
@@ -153,7 +153,7 @@ pub fn compare_procs(a: &ProcRow, b: &ProcRow, sort: Sort) -> Ordering {
             Metric::Memory => p.private_bytes as f64,
             Metric::Disk => p.disk_bps,
             Metric::Gpu => p.gpu_pct.unwrap_or(0.0) as f64,
-            Metric::Network => 0.0,
+            Metric::Network => p.net.map_or(0.0, |n| n.total()),
         }
     }
     let key = match sort.column {
@@ -460,5 +460,19 @@ mod tests {
         let mut v = [p(4, "x", 1.0, false), p(3, "x", 1.0, false), p(2, "y", 9.0, false), p(1, "z", 0.0, true)];
         v.sort_by(|a, b| compare_procs(a, b, desc(Metric::Cpu)));
         assert_eq!(v.iter().map(|x| x.pid).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn expanded_processes_sort_by_their_network_rate() {
+        use negotium_snapshot::NetRate;
+        let p = |pid, sent: f64, recv: f64| ProcRow {
+            pid, parent_pid: 0, create_time: 0, name: "x".into(), cpu_pct: 0.0, private_bytes: 0,
+            disk_bps: 0.0, gpu_pct: None, net: Some(NetRate { sent_bps: sent, recv_bps: recv }), hung_for_ms: None,
+        };
+        let none = ProcRow { net: None, ..p(9, 0.0, 0.0) };
+        // Upload + download summed: 3 moves 700, 1 moves 500, 2 moves 50; no reading sorts as zero.
+        let mut v = [p(2, 50.0, 0.0), none, p(1, 100.0, 400.0), p(3, 600.0, 100.0)];
+        v.sort_by(|a, b| compare_procs(a, b, desc(Metric::Network)));
+        assert_eq!(v.iter().map(|x| x.pid).collect::<Vec<_>>(), [3, 1, 2, 9]);
     }
 }
