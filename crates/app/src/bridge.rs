@@ -258,6 +258,7 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
                 expandable: p.expandable,
                 windows: p.windows,
                 last_in_card: p.last_in_card,
+                pid: p.pid.clone(),
                 exited: true,
                 actionable: false,
                 ..Default::default()
@@ -736,7 +737,7 @@ impl Bridge {
             gpu: r.gpu.clone().into(), net: r.net.clone().into(), bars: self.bars_model(i, &r.bars),
             hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.is_open(r),
             actionable: r.actionable, exited: r.exited, has_icon: icon.is_some(),
-            icon: icon.unwrap_or_else(|| self.no_icon.clone()), windows: r.windows, last_in_card: r.last_in_card,
+            icon: icon.unwrap_or_else(|| self.no_icon.clone()), windows: r.windows, last_in_card: r.last_in_card, pid: r.pid.clone().into(),
         }).collect();
         sync_model(&*self.rows, rows);
         self.sync_current();

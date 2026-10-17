@@ -3559,3 +3559,51 @@ fn a_focused_end_task_keeps_the_list_frozen_until_its_card_hangs() {
     b.apply(&ui, frame(vec![row_view(2, "Browser", HUNG), row_view(1, "Editor", "")]));
     assert!(!controls.frozen(), "a vanished End task must not hold the list frozen");
 }
+
+// ---- Task 6 fix round 1 ----
+
+/// The × lives in a row built only while in view: scrolled away, it is destroyed without a
+/// focus-out, and the list must not stay frozen on it once the pointer leaves.
+#[test]
+fn a_focused_end_task_scrolled_out_of_view_does_not_hold_the_list_frozen() {
+    let rows: Vec<RowView> = (1..=40).map(|i| row_view(i, &format!("App{i}"), "")).collect();
+    let (ui, controls, _bridge, actions) = wired_list(rows);
+    let card = El::find_by_accessible_label(&ui, "App1, CPU 1.0%, memory ").next().expect("the first card");
+    let (x, y) = centre(&card);
+    move_pointer(&ui, x, y);
+    let end = El::find_by_accessible_label(&ui, "End task App1").next().expect("its End task on hover");
+    let (bx, by) = centre(&end);
+    move_pointer(&ui, bx, by);
+    press(&ui, bx, by, slint::platform::PointerEventButton::Left);
+    slint::platform::update_timers_and_animations();
+    slint::platform::update_timers_and_animations();
+    // Ending it failed (access denied): the app stays, its × keeps focus.
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 1)]);
+    assert!(controls.frozen());
+    ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(x, y), delta_x: 0.0, delta_y: -1500.0 });
+    slint::platform::update_timers_and_animations();
+    assert!(ui.get_list_scroll_y() < -500.0, "the card scrolled out of view");
+    assert!(El::find_by_accessible_label(&ui, "End task App1").next().is_none(), "its × is gone with it");
+    move_pointer(&ui, 5.0, 5.0);
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+    }
+    assert!(!controls.frozen(), "nothing focused is left to hold the list");
+}
+
+#[test]
+fn a_process_row_shows_its_pid_after_its_name() {
+    use negotium::view::RowKind;
+    let mut browser = row_view(9, "Browser", "");
+    browser.expandable = true;
+    let proc = RowView { id: 20, parent: 9, depth: 1, kind: RowKind::Proc, name: "helper.exe".into(), pid: "4242".into(), actionable: true, last_in_card: true, ..Default::default() };
+    let (ui, _controls, bridge, _) = wired_list(vec![browser, proc]);
+    bridge.borrow_mut().toggle(9);
+    let has_text = |row: &str, text: &str| {
+        let text = text.to_string();
+        El::find_by_accessible_label(&ui, row).next().unwrap_or_else(|| panic!("missing {row}"))
+            .query_descendants().match_predicate(move |e| e.accessible_label().is_some_and(|l| l == text.as_str())).find_first().is_some()
+    };
+    assert!(has_text("helper.exe, CPU , memory ", "4242"), "the PID beside the process name");
+    assert!(!has_text("Browser, CPU 1.0%, memory ", "4242"));
+}

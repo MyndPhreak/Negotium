@@ -68,6 +68,8 @@ pub struct RowView {
     pub windows: bool,
     /// The last process row of an expanded card: the card closes below it.
     pub last_in_card: bool,
+    /// A process row's PID, shown muted after its name; empty on cards and headings.
+    pub pid: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -348,7 +350,7 @@ pub fn build_frame(
             actionable: r.key != AppKey::Windows,
             exited: false,
             kind: RowKind::App, sub, bars: bars(r), icon: image_path.unwrap_or_default(),
-            windows: r.key == AppKey::Windows, last_in_card: false,
+            windows: r.key == AppKey::Windows, last_in_card: false, pid: String::new(),
         });
         // Child rows only where the UI can show them: expanded apps, everything while searching, and
         // a Windows group with a hung member (the group row itself is never actionable, so the hung
@@ -380,7 +382,7 @@ pub fn build_frame(
                     hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true,
                     exited: false, kind: RowKind::Proc, sub: String::new(), bars: [0.0; 5],
                     icon: image_of.get(&pid_key).map(|s| s.to_string()).unwrap_or_default(), windows: false,
-                    last_in_card: n == last,
+                    last_in_card: n == last, pid: p.pid.to_string(),
                 });
             }
         }
@@ -876,6 +878,17 @@ mod tests {
         assert_eq!(app_row("Chrome").count, "(131)", "kept for the accessible label");
         assert_eq!(app_row("Editor").sub, "1 process");
         assert_eq!(app_row("Frozen").sub, "Not responding · 14s");
+    }
+
+    #[test]
+    fn process_rows_carry_their_pid_and_cards_and_headings_none() {
+        let rows = vec![app(10, "Chrome", 1.0, vec![proc(10, 0, 1.0, "chrome.exe"), proc(4242, 10, 0.0, "helper.exe")], None)];
+        let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
+        let pids = |kind: RowKind| f.rows.iter().filter(|r| r.kind == kind).map(|r| r.pid.clone()).collect::<Vec<_>>();
+        let mut procs = pids(RowKind::Proc);
+        procs.sort();
+        assert_eq!(procs, ["10", "4242"]);
+        assert!(pids(RowKind::App).iter().chain(&pids(RowKind::Section)).all(String::is_empty), "only process rows show a PID");
     }
 
     #[test]

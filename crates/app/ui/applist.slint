@@ -22,6 +22,8 @@ export struct RowData {
     windows: bool,
     // The last process row of an expanded card: the card closes below it.
     last-in-card: bool,
+    // A process row's PID, shown muted after its name; empty on cards and headings.
+    pid: string,
 }
 
 // Column geometry shared by the header and every row, so each number sits under its header.
@@ -411,13 +413,26 @@ export component AppList inherits VerticalLayout {
                         width: lv.visible-width;
                         height: self.preferred-height;
                         for r[i] in root.rows : slot := Rectangle {
+                            // Set while this card's End task holds focus (it outlives the hover then).
+                            property <bool> end-focused;
+                            // Set while a control in this row (End task, Force close) holds focus.
+                            property <bool> control-focused;
+                            // In view: the row is built.
+                            property <bool> built: self.y + self.height > -lv.content-y && self.y < -lv.content-y + lv.visible-height;
+                            // Scrolled away, the row and its focused control are destroyed without a
+                            // focus-out: report one, or the list would stay frozen on a control that is gone.
+                            changed built => {
+                                if (!self.built && self.control-focused) {
+                                    self.control-focused = false;
+                                    self.end-focused = false;
+                                    root.row-focus(r.id, false);
+                                }
+                            }
                             height: r.kind == 0 ? root.section-height : (r.kind == 1 ? root.app-height : root.proc-height);
-                            if slot.y + slot.height > -lv.content-y && slot.y < -lv.content-y + lv.visible-height : row := Rectangle {
+                            if slot.built : row := Rectangle {
                                 // The keyboard-current row, while the list has focus.
                                 property <bool> current: i == root.current-row && list-keys.has-focus;
                                 property <bool> hovered: row-touch.has-hover;
-                                // Set while this card's End task holds focus (it outlives the hover then).
-                                property <bool> end-focused;
                                 // An app card whose process strip goes on below it.
                                 property <bool> open-below: r.kind == 1 && i + 1 < root.rows.length && root.rows[i + 1].kind == 2;
                                 // The first process row of a card: a hairline parts it from the card's head.
@@ -555,19 +570,23 @@ export component AppList inherits VerticalLayout {
                                                         text: "Force close";
                                                         enabled: root.interactive;
                                                         accessible-label: "Force close " + r.name;
-                                                        changed has-focus => { root.row-focus(r.id, self.has-focus); }
+                                                        changed has-focus => {
+                                                            slot.control-focused = self.has-focus;
+                                                            root.row-focus(r.id, self.has-focus);
+                                                        }
                                                         clicked => { root.action("force-close", r.id); }
                                                     }
                                                     // While the card is hovered, and for as long as the button holds focus
                                                     // (the list stays frozen meanwhile, so it stays this app's).
-                                                    if r.hung == "" && r.actionable && r.depth == 0 && (row.hovered || row.end-focused) : Rectangle {
+                                                    if r.hung == "" && r.actionable && r.depth == 0 && (row.hovered || slot.end-focused) : Rectangle {
                                                         width: 22px;
                                                         EndTaskButton {
                                                             y: (parent.height - self.height) / 2;
                                                             interactive: root.interactive;
                                                             accessible-label: "End task " + r.name;
                                                             changed focused => {
-                                                                row.end-focused = self.focused;
+                                                                slot.end-focused = self.focused;
+                                                                slot.control-focused = self.focused;
                                                                 root.row-focus(r.id, self.focused);
                                                             }
                                                             activated => { root.action("end-task", r.id); }
@@ -612,6 +631,7 @@ export component AppList inherits VerticalLayout {
                                                         alignment: start;
                                                         spacing: 6px;
                                                         Text { text: r.name; color: Theme.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+                                                        Text { text: r.pid; color: Theme.muted; font-size: 12.5px; vertical-alignment: center; }
                                                         if r.exited : Text { text: "Exited"; color: Theme.muted; font-size: 11.5px; vertical-alignment: center; }
                                                         if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11.5px; vertical-alignment: center; }
                                                     }
@@ -621,7 +641,10 @@ export component AppList inherits VerticalLayout {
                                                         text: "Force close";
                                                         enabled: root.interactive;
                                                         accessible-label: "Force close " + r.name;
-                                                        changed has-focus => { root.row-focus(r.id, self.has-focus); }
+                                                        changed has-focus => {
+                                                            slot.control-focused = self.has-focus;
+                                                            root.row-focus(r.id, self.has-focus);
+                                                        }
                                                         clicked => { root.action("force-close", r.id); }
                                                     }
                                                     NumCell { text: r.cpu; strong: root.metric == 0; size: 12.5px; }
