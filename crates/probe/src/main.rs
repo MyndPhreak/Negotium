@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use negotium_collector::Collector;
 use negotium_history::History;
-use negotium_model::{Metric, Model, Ranker};
+use negotium_model::{Metric, Model, Ranker, Sort, SortColumn};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
         tick_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         let rows = model.update(&snap);
         history.push(snap.taken_at_ms, &snap.totals, &rows);
-        let order = ranker.order(&rows, args.metric, snap.taken_at_ms, false);
+        let order = ranker.order(&rows, Sort::by(SortColumn::Metric(args.metric)), snap.taken_at_ms, false);
 
         let t = &snap.totals;
         println!(

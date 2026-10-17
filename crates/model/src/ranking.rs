@@ -1,8 +1,8 @@
 //! Stable ordering for the app list. Re-sorts at most every RESORT_INTERVAL_MS; never
-//! while frozen (pointer over the list) except on a metric change, which is an explicit
-//! user action; immediately on metric change; immediately when not frozen if the set of
-//! hung apps changes. Hung apps lead.
-use crate::{AppKey, AppRow};
+//! while frozen (pointer over the list) except on a sort change, which is an explicit
+//! user action; immediately on sort change; immediately when not frozen if the set of
+//! hung apps changes. Hung apps lead in every sort, either direction.
+use crate::{AppKey, AppRow, ProcRow};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -35,9 +35,45 @@ impl AppRow {
     }
 }
 
+/// A column the list can be sorted by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SortColumn {
+    Name,
+    Metric(Metric),
+}
+
+/// A column and a direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Sort {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Sort::by(SortColumn::Metric(Metric::Cpu))
+    }
+}
+
+impl Sort {
+    /// The column's starting direction: the biggest first for a metric, A to Z for the name.
+    pub fn by(column: SortColumn) -> Sort {
+        Sort { column, descending: matches!(column, SortColumn::Metric(_)) }
+    }
+
+    pub fn flipped(self) -> Sort {
+        Sort { descending: !self.descending, ..self }
+    }
+}
+
+/// Applies the direction to a comparison.
+fn by_key(sort: Sort, ord: Ordering) -> Ordering {
+    if sort.descending { ord.reverse() } else { ord }
+}
+
 #[derive(Default)]
 pub struct Ranker {
-    metric: Option<Metric>,
+    sort: Option<Sort>,
     order: Vec<AppKey>,
     hung: Vec<AppKey>,
     last_sort_ms: u64,
@@ -48,28 +84,28 @@ impl Ranker {
         Self::default()
     }
 
-    pub fn order(&mut self, rows: &[AppRow], metric: Metric, now_ms: u64, frozen: bool) -> Vec<usize> {
+    pub fn order(&mut self, rows: &[AppRow], sort: Sort, now_ms: u64, frozen: bool) -> Vec<usize> {
         let mut hung: Vec<AppKey> = rows.iter().filter(|r| r.hung_for_ms.is_some()).map(|r| r.key.clone()).collect();
         hung.sort();
         let due = now_ms.saturating_sub(self.last_sort_ms) >= RESORT_INTERVAL_MS;
-        let resort = self.metric != Some(metric)
+        let resort = self.sort != Some(sort)
             || self.order.is_empty()
             || (!frozen && (due || hung != self.hung));
 
         let index: HashMap<&AppKey, usize> = rows.iter().enumerate().map(|(i, r)| (&r.key, i)).collect();
         let result: Vec<usize> = if resort {
             let mut all: Vec<usize> = (0..rows.len()).collect();
-            all.sort_by(|&a, &b| compare(&rows[a], &rows[b], metric));
+            all.sort_by(|&a, &b| compare_rows(&rows[a], &rows[b], sort));
             self.last_sort_ms = now_ms;
             all
         } else {
             let mut kept: Vec<usize> = self.order.iter().filter_map(|k| index.get(k).copied()).collect();
             let mut fresh: Vec<usize> = (0..rows.len()).filter(|i| !self.order.contains(&rows[*i].key)).collect();
-            fresh.sort_by(|&a, &b| compare(&rows[a], &rows[b], metric));
+            fresh.sort_by(|&a, &b| compare_rows(&rows[a], &rows[b], sort));
             kept.extend(fresh);
             kept
         };
-        self.metric = Some(metric);
+        self.sort = Some(sort);
         self.order = result.iter().map(|&i| rows[i].key.clone()).collect();
         if resort {
             self.hung = hung;
@@ -78,12 +114,45 @@ impl Ranker {
     }
 }
 
-fn compare(a: &AppRow, b: &AppRow, metric: Metric) -> Ordering {
-    b.hung_for_ms
-        .is_some()
-        .cmp(&a.hung_for_ms.is_some())
-        .then_with(|| b.value(metric).total_cmp(&a.value(metric)))
-        .then_with(|| a.name.cmp(&b.name))
+/// Hung apps first, then the sort key, then the exact name and the key, so equal rows never
+/// swap between sorts.
+pub fn compare_rows(a: &AppRow, b: &AppRow, sort: Sort) -> Ordering {
+    let key = match sort.column {
+        SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortColumn::Metric(m) => a.value(m).total_cmp(&b.value(m)),
+    };
+    b.hung_for_ms.is_some().cmp(&a.hung_for_ms.is_some())
+        .then_with(|| match sort.column {
+            // Equal names flip with the sort so a flipped name sort is the exact reverse.
+            SortColumn::Name => by_key(sort, key.then_with(|| a.name.cmp(&b.name)).then_with(|| a.key.cmp(&b.key))),
+            // Equal readings keep a steady A to Z order whichever way the numbers run.
+            SortColumn::Metric(_) => by_key(sort, key).then_with(|| a.name.cmp(&b.name)).then_with(|| a.key.cmp(&b.key)),
+        })
+}
+
+/// The same order for one app's process rows. A process has no network reading, so that column
+/// sorts as zero.
+pub fn compare_procs(a: &ProcRow, b: &ProcRow, sort: Sort) -> Ordering {
+    fn value(p: &ProcRow, m: Metric) -> f64 {
+        match m {
+            Metric::Cpu => p.cpu_pct as f64,
+            Metric::Memory => p.private_bytes as f64,
+            Metric::Disk => p.disk_bps,
+            Metric::Gpu => p.gpu_pct.unwrap_or(0.0) as f64,
+            Metric::Network => 0.0,
+        }
+    }
+    let key = match sort.column {
+        SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortColumn::Metric(m) => value(a, m).total_cmp(&value(b, m)),
+    };
+    b.hung_for_ms.is_some().cmp(&a.hung_for_ms.is_some())
+        .then_with(|| match sort.column {
+            // Equal names flip with the sort so a flipped name sort is the exact reverse.
+            SortColumn::Name => by_key(sort, key.then_with(|| a.name.cmp(&b.name)).then_with(|| a.pid.cmp(&b.pid))),
+            // Equal readings keep a steady A to Z order whichever way the numbers run.
+            SortColumn::Metric(_) => by_key(sort, key).then_with(|| a.name.cmp(&b.name)).then_with(|| a.pid.cmp(&b.pid)),
+        })
 }
 
 /// Largest `n` rows with a positive value for `metric`.
@@ -187,6 +256,9 @@ mod tests {
             hung_for_ms: hung.then_some(5000),
         }
     }
+    fn desc(m: Metric) -> Sort {
+        Sort::by(SortColumn::Metric(m))
+    }
     fn names(rows: &[AppRow], order: &[usize]) -> Vec<String> {
         order.iter().map(|&i| rows[i].name.clone()).collect()
     }
@@ -195,17 +267,17 @@ mod tests {
     fn sorts_by_metric_desc_then_name() {
         let rows = vec![row(1, "b", 10.0, false), row(2, "a", 10.0, false), row(3, "c", 50.0, false)];
         let mut r = Ranker::new();
-        assert_eq!(names(&rows, &r.order(&rows, Metric::Cpu, 0, false)), ["c", "a", "b"]);
+        assert_eq!(names(&rows, &r.order(&rows, desc(Metric::Cpu), 0, false)), ["c", "a", "b"]);
     }
 
     #[test]
     fn holds_order_between_resorts_then_resorts() {
         let mut r = Ranker::new();
         let rows = vec![row(1, "a", 50.0, false), row(2, "b", 10.0, false)];
-        r.order(&rows, Metric::Cpu, 0, false);
+        r.order(&rows, desc(Metric::Cpu), 0, false);
         let changed = vec![row(1, "a", 5.0, false), row(2, "b", 60.0, false)];
-        assert_eq!(names(&changed, &r.order(&changed, Metric::Cpu, 1000, false)), ["a", "b"]);
-        assert_eq!(names(&changed, &r.order(&changed, Metric::Cpu, 2000, false)), ["b", "a"]);
+        assert_eq!(names(&changed, &r.order(&changed, desc(Metric::Cpu), 1000, false)), ["a", "b"]);
+        assert_eq!(names(&changed, &r.order(&changed, desc(Metric::Cpu), 2000, false)), ["b", "a"]);
     }
 
     #[test]
@@ -213,8 +285,8 @@ mod tests {
         let mut r = Ranker::new();
         let mut rows = vec![row(1, "a", 50.0, false), row(2, "b", 10.0, false)];
         rows[1].private_bytes = 999;
-        r.order(&rows, Metric::Cpu, 0, false);
-        assert_eq!(names(&rows, &r.order(&rows, Metric::Memory, 10, false)), ["b", "a"]);
+        r.order(&rows, desc(Metric::Cpu), 0, false);
+        assert_eq!(names(&rows, &r.order(&rows, desc(Metric::Memory), 10, false)), ["b", "a"]);
     }
 
     #[test]
@@ -222,26 +294,26 @@ mod tests {
         let mut r = Ranker::new();
         let mut rows = vec![row(1, "a", 50.0, false), row(2, "b", 10.0, false)];
         rows[1].private_bytes = 999;
-        assert_eq!(names(&rows, &r.order(&rows, Metric::Cpu, 0, false)), ["a", "b"]);
-        assert_eq!(names(&rows, &r.order(&rows, Metric::Memory, 10, true)), ["b", "a"]);
+        assert_eq!(names(&rows, &r.order(&rows, desc(Metric::Cpu), 0, false)), ["a", "b"]);
+        assert_eq!(names(&rows, &r.order(&rows, desc(Metric::Memory), 10, true)), ["b", "a"]);
     }
 
     #[test]
     fn frozen_keeps_order_appends_new_and_drops_gone() {
         let mut r = Ranker::new();
         let rows = vec![row(1, "a", 50.0, false), row(2, "b", 10.0, false)];
-        r.order(&rows, Metric::Cpu, 0, false);
+        r.order(&rows, desc(Metric::Cpu), 0, false);
         let next = vec![row(2, "b", 90.0, false), row(3, "new", 99.0, false)];
-        assert_eq!(names(&next, &r.order(&next, Metric::Cpu, 10_000, true)), ["b", "new"]);
+        assert_eq!(names(&next, &r.order(&next, desc(Metric::Cpu), 10_000, true)), ["b", "new"]);
     }
 
     #[test]
     fn hung_apps_pin_to_top_and_trigger_resort() {
         let mut r = Ranker::new();
         let rows = vec![row(1, "a", 50.0, false), row(2, "b", 1.0, false)];
-        r.order(&rows, Metric::Cpu, 0, false);
+        r.order(&rows, desc(Metric::Cpu), 0, false);
         let next = vec![row(1, "a", 50.0, false), row(2, "b", 1.0, true)];
-        assert_eq!(names(&next, &r.order(&next, Metric::Cpu, 500, false)), ["b", "a"]);
+        assert_eq!(names(&next, &r.order(&next, desc(Metric::Cpu), 500, false)), ["b", "a"]);
     }
 
     #[test]
@@ -301,5 +373,53 @@ mod tests {
         assert_eq!(picked(&mut p, &rows, 0, 1), ["a"]);
         let mem: Vec<String> = p.pick(&rows, Metric::Memory, 500, 1).iter().map(|k| rows[k.index].name.clone()).collect();
         assert_eq!(mem, ["b"], "no margin or average carried over from CPU");
+    }
+
+    #[test]
+    fn name_sort_is_case_insensitive_and_stable() {
+        let rows = vec![row(1, "beta", 0.0, false), row(2, "Alpha", 0.0, false), row(3, "alpha", 0.0, false)];
+        let by_name = Sort::by(SortColumn::Name);
+        let mut r = Ranker::new();
+        assert_eq!(names(&rows, &r.order(&rows, by_name, 0, false)), ["Alpha", "alpha", "beta"]);
+        assert_eq!(names(&rows, &r.order(&rows, by_name, 2000, false)), ["Alpha", "alpha", "beta"]);
+        assert_eq!(names(&rows, &r.order(&rows, by_name.flipped(), 2010, false)), ["beta", "alpha", "Alpha"]);
+    }
+
+    #[test]
+    fn ascending_metric_sort_puts_the_smallest_first_and_hung_still_leads() {
+        let rows = vec![row(1, "a", 5.0, false), row(2, "b", 1.0, false), row(3, "c", 9.0, true)];
+        let asc = Sort { column: SortColumn::Metric(Metric::Cpu), descending: false };
+        let mut r = Ranker::new();
+        assert_eq!(names(&rows, &r.order(&rows, asc, 0, false)), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn a_sort_change_resorts_at_once_even_while_frozen() {
+        let rows = vec![row(1, "a", 5.0, false), row(2, "b", 9.0, false)];
+        let mut r = Ranker::new();
+        assert_eq!(names(&rows, &r.order(&rows, desc(Metric::Cpu), 0, false)), ["b", "a"]);
+        let asc = desc(Metric::Cpu).flipped();
+        assert_eq!(names(&rows, &r.order(&rows, asc, 0, true)), ["a", "b"]);
+    }
+
+    #[test]
+    fn sort_by_starts_metrics_descending_and_name_ascending() {
+        for m in Metric::ALL {
+            assert!(Sort::by(SortColumn::Metric(m)).descending);
+        }
+        assert!(!Sort::by(SortColumn::Name).descending);
+        assert_eq!(Sort::default(), desc(Metric::Cpu));
+        assert!(!Sort::default().flipped().descending);
+    }
+
+    #[test]
+    fn compare_procs_leads_with_hung_then_sorts_and_ties_by_name_then_pid() {
+        let p = |pid, name: &str, cpu, hung: bool| ProcRow {
+            pid, parent_pid: 0, create_time: 0, name: name.into(), cpu_pct: cpu, private_bytes: 0,
+            disk_bps: 0.0, gpu_pct: None, hung_for_ms: hung.then_some(1),
+        };
+        let mut v = [p(4, "x", 1.0, false), p(3, "x", 1.0, false), p(2, "y", 9.0, false), p(1, "z", 0.0, true)];
+        v.sort_by(|a, b| compare_procs(a, b, desc(Metric::Cpu)));
+        assert_eq!(v.iter().map(|x| x.pid).collect::<Vec<_>>(), [1, 2, 3, 4]);
     }
 }

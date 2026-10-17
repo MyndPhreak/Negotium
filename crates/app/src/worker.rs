@@ -6,7 +6,7 @@ use crate::tray::TraySample;
 use crate::view::{Frame, FrameOptions, IdMap, IdSeed, TOP_TILES, build_frame};
 use negotium_collector::{Collector, SystemInfo};
 use negotium_history::History;
-use negotium_model::{Model, Ranker, TopPicker};
+use negotium_model::{Model, Ranker, Sort, SortColumn, TopPicker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -180,7 +180,7 @@ impl Source for LiveSource {
         match controls.page() {
             Page::Overview => {
                 let metric = controls.metric();
-                let order = self.ranker.order(&rows, metric, snap.taken_at_ms, controls.frozen());
+                let order = self.ranker.order(&rows, Sort { column: SortColumn::Metric(metric), descending: true }, snap.taken_at_ms, controls.frozen());
                 let top = self.top.pick(&rows, metric, snap.taken_at_ms, TOP_TILES);
                 let (expanded, all_children) = controls.child_rows();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children };
