@@ -38,36 +38,47 @@ global Columns {
 }
 
 // One number in a row, right-aligned (Segoe UI's figures are tabular by default), with an app
-// card's bar under it (`bar` < 0: none).
-component NumCell inherits VerticalLayout {
+// card's bar under it (`bar` < 0: none). Flat, its geometry worked out here rather than by a nested
+// layout: five of these in every card on screen are drawn again with each frame. The number and
+// its bar, 4 px apart, are centred together.
+component NumCell inherits Rectangle {
     in property <string> text;
     in property <bool> strong;
     in property <length> size: 13px;
     in property <float> bar: -1;
+    property <bool> has-bar: root.bar >= 0;
+    property <length> bar-height: 3px;
+    property <length> bar-gap: 4px;
     width: Columns.number;
-    alignment: center;
-    spacing: 4px;
-    Text {
+    number := Text {
+        x: 0;
+        y: (root.height - self.height - (root.has-bar ? root.bar-gap + root.bar-height : 0px)) / 2;
+        width: root.width;
+        height: self.preferred-height;
         text: root.text;
         horizontal-alignment: right;
         font-size: root.size;
         color: Theme.text;
         font-weight: root.strong ? 600 : 400;
     }
-    if root.bar >= 0 : Rectangle {
-        height: 3px;
-        Rectangle {
-            x: parent.width - Columns.bar;
-            width: Columns.bar;
-            border-radius: 1.5px;
-            background: Theme.card-border;
-            Rectangle {
-                x: 0;
-                width: parent.width * clamp(root.bar, 0, 1);
-                border-radius: 1.5px;
-                background: Theme.accent;
-            }
-        }
+    // The bar's track and its fill, right-aligned under the number.
+    Rectangle {
+        visible: root.has-bar;
+        x: root.width - Columns.bar;
+        y: number.y + number.height + root.bar-gap;
+        width: Columns.bar;
+        height: root.bar-height;
+        border-radius: 1.5px;
+        background: Theme.card-border;
+    }
+    Rectangle {
+        visible: root.has-bar;
+        x: root.width - Columns.bar;
+        y: number.y + number.height + root.bar-gap;
+        width: Columns.bar * clamp(root.bar, 0, 1);
+        height: root.bar-height;
+        border-radius: 1.5px;
+        background: Theme.accent;
     }
 }
 
@@ -133,19 +144,26 @@ component RowIcon inherits Rectangle {
 // One horizontal slice of a card: a whole card, the head of an expanded one, a process strip, or
 // the strip that closes it. Where the card goes on past an edge (`open-top`, `open-bottom`) that
 // edge has no border and no rounding: the outline is drawn past it and clipped, so only the sides
-// show.
+// show. A closed slice (a plain card: every card on screen while none is expanded) is just this
+// one rectangle, with no clip and no inner ones, as each is drawn again with every frame.
 component CardSlice inherits Rectangle {
     in property <bool> open-top;
     in property <bool> open-bottom;
     in property <brush> fill;
     in property <brush> edge;
-    // Laid over the fill inside the border (the process strip's darker shade).
-    in property <brush> tint: transparent;
+    // Laid over the fill inside the border while `tinted` (the process strip's darker shade).
+    in property <brush> tint;
+    in property <bool> tinted;
+    property <bool> open: root.open-top || root.open-bottom;
     property <length> past: 2px;
     property <length> top-radius: root.open-top ? 0px : Theme.radius;
     property <length> bottom-radius: root.open-bottom ? 0px : Theme.radius;
-    clip: true;
-    Rectangle {
+    background: root.open ? transparent : root.fill;
+    border-width: root.open ? 0px : 1px;
+    border-color: root.edge;
+    border-radius: root.open ? 0px : Theme.radius;
+    clip: root.open;
+    if root.open : Rectangle {
         y: root.open-top ? -root.past : 0px;
         height: root.height + (root.open-top ? root.past : 0px) + (root.open-bottom ? root.past : 0px);
         background: root.fill;
@@ -155,7 +173,7 @@ component CardSlice inherits Rectangle {
         border-top-right-radius: root.top-radius;
         border-bottom-left-radius: root.bottom-radius;
         border-bottom-right-radius: root.bottom-radius;
-        Rectangle {
+        if root.tinted : Rectangle {
             x: 1px;
             y: 1px;
             width: parent.width - 2px;
@@ -166,6 +184,14 @@ component CardSlice inherits Rectangle {
             border-bottom-left-radius: max(0px, root.bottom-radius - 1px);
             border-bottom-right-radius: max(0px, root.bottom-radius - 1px);
         }
+    }
+    if !root.open && root.tinted : Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        background: root.tint;
+        border-radius: max(0px, Theme.radius - 1px);
     }
     @children
 }
@@ -607,7 +633,8 @@ export component AppList inherits VerticalLayout {
                                                 open-bottom: !r.last-in-card;
                                                 fill: row.fill;
                                                 edge: Theme.card-border;
-                                                tint: r.hung != "" ? transparent : Theme.card-inset;
+                                                tint: Theme.card-inset;
+                                                tinted: r.hung == "";
                                                 if row.first-in-card : Rectangle {
                                                     x: 1px;
                                                     y: 0;
