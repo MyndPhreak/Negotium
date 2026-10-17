@@ -16,6 +16,8 @@ pub struct Collector {
     info: SystemInfo,
     net: crate::net::NetTable,
     gpu_temps: crate::gpu::GpuTemps,
+    /// Per-process network: the kernel network trace, only while elevated.
+    net_by_pid: crate::netetw::PerPidNet<crate::netetw::NetFeed>,
 }
 
 impl Default for Collector {
@@ -42,6 +44,13 @@ impl Collector {
             gpu_temps: crate::gpu::GpuTemps::open(&info.gpus),
             info,
             net: crate::net::NetTable::new(),
+            // A restarted worker drops the old Collector (stopping its session) before building
+            // this one; `start` also replaces any leftover session of the name.
+            net_by_pid: crate::netetw::PerPidNet::new(
+                crate::netetw::is_elevated(),
+                || crate::netetw::NetFeed::start(crate::netetw::SESSION_NAME),
+                Instant::now(),
+            ),
         }
     }
 
@@ -88,6 +97,7 @@ impl Collector {
             local_time_ms: local_time_ms(),
             ..Default::default()
         };
+        totals.net_by_pid = self.net_by_pid.step(Instant::now(), &processes, &mut source_errors);
         if totals.memory.is_none() {
             source_errors.push("memory: GlobalMemoryStatusEx failed".into());
         }

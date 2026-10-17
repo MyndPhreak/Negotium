@@ -3,6 +3,7 @@ pub mod gpu;
 pub mod identity;
 pub mod memory;
 pub mod net;
+pub mod netetw;
 pub mod pdh;
 pub mod processes;
 pub mod sysinfo;
@@ -20,3 +21,4 @@ pub use pdh::{PdhReadings, PdhSources};
 mod collector;
 
 pub use collector::Collector;
+pub use netetw::{NetBytes, NetFeed, NetFeedError};
