@@ -8,6 +8,9 @@ export struct RowData {
     bar: float, hung: string, expandable: bool, expanded: bool, actionable: bool,
     // The app or process went away while the list was frozen: shown in place, dimmed, inert.
     exited: bool,
+    // The program's icon, extracted off the UI thread; has-icon is false until it arrives (and for
+    // the Windows group, headings and images without one).
+    icon: image, has-icon: bool,
 }
 
 component Cell inherits Text {

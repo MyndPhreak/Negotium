@@ -1,6 +1,7 @@
 //! UI-thread glue: applies worker Frames to Slint models in place and keeps
 //! expand/search state local so they react instantly. No Windows calls here.
 use crate::controls::{Controls, Page};
+use crate::icons::{IconCache, IconPixels, RequestIcon};
 use crate::nav::{NavKey, NavOutcome, navigate};
 use crate::perf::{GraphView, PerfFrame};
 use crate::smooth::{self, Scroll};
@@ -243,6 +244,7 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
                 kind: p.kind,
                 name: p.name.clone(),
                 search_text: p.search_text.clone(),
+                icon: p.icon.clone(),
                 // Its card still draws (and closes) as it did.
                 expandable: p.expandable,
                 windows: p.windows,
@@ -360,6 +362,13 @@ pub struct Bridge {
     /// The startup entries as last listed; a Startup row's id indexes them.
     startup: Vec<StartupEntry>,
     startup_rows: Rc<VecModel<StartupData>>,
+    /// Program icons by image path, and where the ones not yet seen are requested (none in
+    /// tests that don't set one: rows then show no icons).
+    icons: IconCache,
+    icon_loader: Option<Box<dyn RequestIcon>>,
+    /// What a row without an icon carries: one image shared by every such row, because Slint's
+    /// empty image never equals itself and would make `sync_model` rewrite those rows every frame.
+    no_icon: slint::Image,
     pub controls: Arc<Controls>,
     ui: slint::Weak<MainWindow>,
 }
@@ -401,6 +410,9 @@ impl Bridge {
             banner_dismissed: false,
             startup: Vec::new(),
             startup_rows: Rc::new(VecModel::default()),
+            icons: IconCache::default(),
+            icon_loader: None,
+            no_icon: slint::Image::from_rgba8(slint::SharedPixelBuffer::new(1, 1)),
             controls,
             ui: ui.as_weak(),
         };
@@ -676,14 +688,40 @@ impl Bridge {
         visible_rows(&self.last.rows, &self.expanded, &self.collapsed, &self.search)
     }
 
-    fn push_rows(&self) {
+    /// Where rows' icons come from (crate::icons::IconLoader in the app).
+    pub fn set_icon_loader(&mut self, loader: impl RequestIcon + 'static) {
+        self.icon_loader = Some(Box::new(loader));
+    }
+
+    /// An icon came back from the loader: rows showing that image get it (only they change).
+    pub fn put_icon(&mut self, path: String, px: Option<IconPixels>) {
+        let shown = self.layout.rows().iter().any(|r| r.icon == path);
+        self.icons.put(path, px);
+        if shown {
+            self.push_rows();
+        }
+    }
+
+    /// The icon a row shows, if it has arrived; asks for it the first time its image is seen. The
+    /// Windows group draws its own glyph and asks for none.
+    fn icon_of(icons: &mut IconCache, loader: Option<&dyn RequestIcon>, r: &RowView) -> Option<slint::Image> {
+        match loader {
+            Some(loader) if !r.windows && !r.icon.is_empty() => icons.get(&r.icon, loader),
+            _ => None,
+        }
+    }
+
+    fn push_rows(&mut self) {
         // The list still draws one bar: the selected meter's.
         let metric = self.controls.metric() as usize;
-        sync_model(&*self.rows, self.layout.rows().iter().map(|r| RowData {
+        let loader = self.icon_loader.as_deref();
+        let icons: Vec<Option<slint::Image>> = self.layout.rows().iter().map(|r| Self::icon_of(&mut self.icons, loader, r)).collect();
+        sync_model(&*self.rows, self.layout.rows().iter().zip(icons).map(|(r, icon)| RowData {
             id: r.id, depth: r.depth, name: r.name.clone().into(), count: r.count.clone().into(), cpu: r.cpu.clone().into(),
             mem: r.mem.clone().into(), disk: r.disk.clone().into(), gpu: r.gpu.clone().into(), net: r.net.clone().into(),
             bar: r.bars[metric], hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.is_open(r),
-            actionable: r.actionable, exited: r.exited,
+            actionable: r.actionable, exited: r.exited, has_icon: icon.is_some(),
+            icon: icon.unwrap_or_else(|| self.no_icon.clone()),
         }).collect());
         self.sync_current();
     }

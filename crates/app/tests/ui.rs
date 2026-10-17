@@ -21,15 +21,15 @@ fn window() -> MainWindow {
     ui.set_rows(ModelRc::new(VecModel::from(vec![RowData {
         id: 7, depth: 0, name: "Editor".into(), count: "".into(), cpu: "1.0%".into(), mem: "1.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.5, hung: "Not responding · 9s".into(),
-        expandable: false, expanded: false, actionable: true, exited: false,
+        expandable: false, expanded: false, actionable: true, exited: false, ..Default::default()
     }, RowData {
         id: 9, depth: 0, name: "Browser".into(), count: "(3)".into(), cpu: "2.0%".into(), mem: "2.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.2, hung: "".into(),
-        expandable: true, expanded: false, actionable: true, exited: false,
+        expandable: true, expanded: false, actionable: true, exited: false, ..Default::default()
     }, RowData {
         id: 11, depth: 0, name: "Windows".into(), count: "(90)".into(), cpu: "3.0%".into(), mem: "3.0 MB".into(),
         disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.1, hung: "".into(),
-        expandable: true, expanded: false, actionable: false, exited: false,
+        expandable: true, expanded: false, actionable: false, exited: false, ..Default::default()
     }])));
     ui
 }
@@ -356,6 +356,54 @@ fn a_hung_windows_group_auto_expands_only_while_the_list_is_not_frozen() {
     b.set_hover(false);
     assert!(ui.get_rows().row_data(0).unwrap().expanded, "applied as soon as the list unfreezes");
     assert_eq!(shown_ids(&ui), [5, 6]);
+}
+
+/// Records what the bridge asks the icon loader for (the real one extracts on its own thread).
+struct AskedIcons(Rc<RefCell<Vec<String>>>);
+
+impl negotium::icons::RequestIcon for AskedIcons {
+    fn request(&self, path: &str) {
+        self.0.borrow_mut().push(path.to_string());
+    }
+}
+
+#[test]
+fn rows_ask_for_their_icon_once_and_show_it_when_it_arrives() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let mut b = bridge.borrow_mut();
+    b.set_icon_loader(AskedIcons(asked.clone()));
+    let editor = RowView { icon: r"C:\editor.exe".into(), ..row_view(1, "Editor", "") };
+    // The Windows group draws its own glyph; a row without an image path has nothing to ask for.
+    let group = RowView { icon: r"C:\Windows\explorer.exe".into(), windows: true, actionable: false, ..row_view(2, "Windows", "") };
+    let rows = vec![editor, group, row_view(3, "Unknown", "")];
+    b.apply(&ui, frame(rows.clone()));
+    b.apply(&ui, frame(rows.clone()));
+    assert_eq!(*asked.borrow(), [r"C:\editor.exe"], "one request, only for a real program image");
+    assert!(!ui.get_rows().row_data(0).unwrap().has_icon, "not here yet");
+    b.put_icon(r"C:\editor.exe".into(), Some(slint::SharedPixelBuffer::new(negotium::icons::ICON_PX, negotium::icons::ICON_PX)));
+    let shown = ui.get_rows().row_data(0).unwrap();
+    assert!(shown.has_icon, "the row updates as soon as its icon lands");
+    let size = shown.icon.size();
+    assert_eq!((size.width, size.height), (32, 32));
+    assert!(ui.get_rows().iter().skip(1).all(|r| !r.has_icon));
+    b.apply(&ui, frame(rows));
+    assert_eq!(asked.borrow().len(), 1, "never asked for again");
+}
+
+/// Slint's empty image never equals itself, which would make every iconless row look changed on
+/// every frame: rows without an icon must still compare equal, so `sync_model` leaves them be.
+#[test]
+fn a_row_without_an_icon_is_unchanged_by_an_identical_frame() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    let rows = vec![row_view(1, "Editor", "")];
+    b.apply(&ui, frame(rows.clone()));
+    let before = ui.get_rows().row_data(0).unwrap();
+    b.apply(&ui, frame(rows));
+    assert_eq!(ui.get_rows().row_data(0).unwrap(), before);
 }
 
 #[test]
