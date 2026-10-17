@@ -20,15 +20,15 @@ fn window() -> MainWindow {
     ui.set_meters(ModelRc::new(VecModel::from(meters)));
     ui.set_rows(ModelRc::new(VecModel::from(vec![RowData {
         id: 7, depth: 0, name: "Editor".into(), count: "".into(), cpu: "1.0%".into(), mem: "1.0 MB".into(),
-        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.5, hung: "Not responding · 9s".into(),
+        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), kind: 1, hung: "Not responding · 9s".into(),
         expandable: false, expanded: false, actionable: true, exited: false, ..Default::default()
     }, RowData {
         id: 9, depth: 0, name: "Browser".into(), count: "(3)".into(), cpu: "2.0%".into(), mem: "2.0 MB".into(),
-        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.2, hung: "".into(),
+        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), kind: 1, hung: "".into(),
         expandable: true, expanded: false, actionable: true, exited: false, ..Default::default()
     }, RowData {
         id: 11, depth: 0, name: "Windows".into(), count: "(90)".into(), cpu: "3.0%".into(), mem: "3.0 MB".into(),
-        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), bar: 0.1, hung: "".into(),
+        disk: "0 B/s".into(), gpu: "—".into(), net: "—".into(), kind: 1, hung: "".into(),
         expandable: true, expanded: false, actionable: false, exited: false, ..Default::default()
     }])));
     ui
@@ -1773,8 +1773,7 @@ fn left_and_right_on_a_heading_close_and_open_its_section_while_the_list_has_foc
     assert_eq!(ui.get_current_id(), 2, "into the open section");
 }
 
-/// Rows still render at one height until the list draws cards (Task 6), so this checks the scroll
-/// position ensure-visible sets from the real row tops, not rendered rects.
+/// The scroll position ensure-visible sets from the real row tops, and the card as drawn there.
 #[test]
 fn page_down_reveals_the_card_it_lands_on() {
     use negotium::view::{RowKind, SECTION_APPS, visible_rows};
@@ -1802,6 +1801,11 @@ fn page_down_reveals_the_card_it_lands_on() {
     let visible = rect_of(&El::find_by_element_id(&ui, "AppList::lv").next().expect("the list view")).3;
     assert!(y + h > visible, "the target starts out of view");
     assert_eq!(ui.get_list_scroll_y(), -(y + h - visible), "the card's bottom edge sits on the list's");
+    // Drawn where Rust summed it: the whole card inside the list's visible rect, flush with its bottom.
+    let list = rect_of(&El::find_by_element_id(&ui, "AppList::lv").next().unwrap());
+    let card = rect(&ui, &format!("{}, CPU 1.0%, memory ", shown[20].name));
+    assert!(card.1 >= list.1 - 0.5 && card.1 + card.3 <= list.1 + list.3 + 0.5, "the card {card:?} lies within the list {list:?}");
+    assert!((card.1 + card.3 - (list.1 + list.3)).abs() <= 1.0, "its bottom edge on the list's: {card:?} in {list:?}");
 }
 
 // ---- Plan 3b Task 0: the menu key with nothing focused ----
@@ -3378,4 +3382,180 @@ fn a_new_tile_grows_in_from_nothing_when_smooth() {
     assert!(early < settled * 0.6, "it starts narrow: {early} vs {settled}");
     let first = tile_width(&ui, 0);
     assert!((settled - first).abs() <= 2.0, "and ends as wide as its equal: {settled} vs {first}");
+}
+
+// ---- App list redesign Task 6: the card list ----
+
+#[test]
+fn the_sorted_header_is_checked_and_clicking_another_sorts_by_it() {
+    let dir = Scratch::new("sortheader");
+    let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    ui.set_page(0);
+    let header = |label: &str| El::find_by_accessible_label(&ui, label).next().unwrap_or_else(|| panic!("missing {label}"));
+    for label in ["Sort by Name", "Sort by CPU", "Sort by Memory", "Sort by Disk", "Sort by GPU", "Sort by Network"] {
+        assert_eq!(header(label).accessible_role(), Some(i_slint_backend_testing::AccessibleRole::Button), "{label}");
+        assert_eq!(header(label).accessible_checkable(), Some(true), "{label}");
+    }
+    assert_eq!(header("Sort by CPU").accessible_checked(), Some(true), "sorted by CPU at first");
+    assert_eq!(header("Sort by Memory").accessible_checked(), Some(false));
+    header("Sort by Memory").invoke_accessible_default_action();
+    assert_eq!(ui.get_sort_column(), 1);
+    assert_eq!(header("Sort by Memory").accessible_checked(), Some(true));
+    assert_eq!(header("Sort by CPU").accessible_checked(), Some(false));
+    // A real click on the Name header sorts by name.
+    let (x, y) = centre(&header("Sort by Name"));
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    assert_eq!(ui.get_sort_column(), -1);
+    assert_eq!(header("Sort by Name").accessible_checked(), Some(true));
+}
+
+#[test]
+fn the_end_task_icon_shows_on_hover_and_ends_that_app() {
+    let ui = shown_window();
+    let actions: Actions = Default::default();
+    let a = actions.clone();
+    ui.on_row_action(move |name, id| a.borrow_mut().push((name.to_string(), id)));
+    let focus: FocusLog = Default::default();
+    let f = focus.clone();
+    ui.on_row_key_focus(move |id, has| f.borrow_mut().push((id, has)));
+    let end = || El::find_by_accessible_label(&ui, "End task Browser").next();
+    assert!(end().is_none(), "hidden until the card is hovered");
+    let (rx, ry) = centre(&El::find_by_accessible_label(&ui, BROWSER_ROW).next().expect("browser card"));
+    move_pointer(&ui, rx, ry);
+    let button = end().expect("shown while the card is hovered");
+    assert_eq!(button.accessible_role(), Some(i_slint_backend_testing::AccessibleRole::Button));
+    let size = button.size();
+    assert!((size.width - 22.0).abs() <= 1.0 && (size.height - 22.0).abs() <= 1.0, "a 22 px square: {size:?}");
+    assert!(El::find_by_accessible_label(&ui, "End task Editor").next().is_none(), "only on the hovered card");
+    let (bx, by) = centre(&button);
+    move_pointer(&ui, bx, by);
+    press(&ui, bx, by, slint::platform::PointerEventButton::Left);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 9)], "ends that app");
+    assert_eq!(focus.borrow().last(), Some(&(9, true)), "its focus freezes the list like the old button: {:?}", focus.borrow());
+    // The pointer leaves, the button keeps keyboard focus: it stays.
+    move_pointer(&ui, 5.0, 5.0);
+    assert!(end().is_some(), "shown while it holds focus");
+}
+
+#[test]
+fn cards_sections_and_process_rows_have_their_heights() {
+    use negotium::view::{RowKind, SECTION_APPS};
+    let mut browser = row_view(9, "Browser", "");
+    browser.expandable = true;
+    let proc = |id: i32, last: bool| RowView { id, parent: 9, depth: 1, kind: RowKind::Proc, name: format!("proc{id}"), actionable: true, last_in_card: last, ..Default::default() };
+    let (ui, _controls, bridge, _) = wired_list(vec![heading(SECTION_APPS, "Apps"), browser, proc(20, false), proc(21, true), row_view(11, "Tool", "")]);
+    bridge.borrow_mut().toggle(9);
+    let section = rect(&ui, "Apps section, expanded");
+    let card = rect(&ui, "Browser, CPU 1.0%, memory ");
+    let first = rect(&ui, "proc20, CPU , memory ");
+    let last = rect(&ui, "proc21, CPU , memory ");
+    let tool = rect(&ui, "Tool, CPU 1.0%, memory ");
+    for (what, r, h) in [("section", section, 32.0), ("card", card, 50.0), ("process", first, 30.0), ("last process", last, 30.0), ("card", tool, 50.0)] {
+        assert!((r.3 - h).abs() <= 1.0, "{what} is {h} px tall: {r:?}");
+    }
+    for (a, b) in [(section, card), (card, first), (first, last), (last, tool)] {
+        assert!((a.1 + a.3 - b.1).abs() <= 1.0, "rows follow each other with no gap: {a:?} then {b:?}");
+    }
+}
+
+#[test]
+fn a_section_heading_click_collapses_it() {
+    use negotium::view::{SECTION_APPS, SECTION_BACKGROUND};
+    let (ui, _controls, bridge, _) = wired_list(vec![
+        heading(SECTION_APPS, "Apps"), row_view(1, "Editor", ""),
+        heading(SECTION_BACKGROUND, "Background processes"), row_view(2, "Updater", ""),
+    ]);
+    let b = bridge.clone();
+    ui.on_toggle_row(move |id| b.borrow_mut().toggle(id));
+    let heading = El::find_by_accessible_label(&ui, "Apps section, expanded").next().expect("an open heading");
+    let (x, y) = centre(&heading);
+    move_pointer(&ui, x, y);
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    assert_eq!(shown_ids(&ui), [SECTION_APPS, SECTION_BACKGROUND, 2], "its cards go");
+    assert!(El::find_by_accessible_label(&ui, "Apps section, collapsed").next().is_some());
+    assert!(El::find_by_accessible_label(&ui, "Background processes section, expanded").next().is_some());
+    // The screen reader's default action toggles it too.
+    El::find_by_accessible_label(&ui, "Apps section, collapsed").next().unwrap().invoke_accessible_default_action();
+    assert_eq!(shown_ids(&ui), [SECTION_APPS, 1, SECTION_BACKGROUND, 2]);
+}
+
+#[test]
+fn an_icon_row_draws_its_image_and_one_without_draws_the_glyph() {
+    use slint::Model;
+    let ui = window();
+    let rows = ui.get_rows();
+    let mut browser = rows.row_data(1).unwrap();
+    browser.has_icon = true;
+    browser.icon = slint::Image::from_rgba8(slint::SharedPixelBuffer::new(32, 32));
+    rows.set_row_data(1, browser);
+    let mut windows = rows.row_data(2).unwrap();
+    windows.windows = true;
+    rows.set_row_data(2, windows);
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.show().unwrap();
+    let row = |label: &str| El::find_by_accessible_label(&ui, label).next().unwrap_or_else(|| panic!("missing {label}"));
+    let has = |label: &str, id: &str| row(label).query_descendants().match_id(id).find_first().is_some();
+    assert!(has(BROWSER_ROW, "RowIcon::icon-image"), "its icon");
+    assert!(!has(BROWSER_ROW, "RowIcon::generic-glyph"));
+    let image = row(BROWSER_ROW).query_descendants().match_id("RowIcon::icon-image").find_first().unwrap();
+    assert!((image.size().width - 24.0).abs() <= 0.5, "a 24 px icon: {:?}", image.size());
+    let editor = "Editor, Not responding · 9s, CPU 1.0%, memory 1.0 MB";
+    assert!(!has(editor, "RowIcon::icon-image"), "no image without an icon");
+    assert!(has(editor, "RowIcon::generic-glyph"), "the generic program glyph instead");
+    let group = "Windows, CPU 3.0%, memory 3.0 MB";
+    assert!(has(group, "RowIcon::windows-glyph") && !has(group, "RowIcon::generic-glyph"), "the Windows group draws the Windows glyph");
+}
+
+/// Ruling (Task 6): a dead app can't be opened, but a held open card can still be closed.
+#[test]
+fn an_exited_row_never_expands_but_can_collapse() {
+    let (ui, _controls, bridge) = bridged();
+    let card = |id: i32, name: &str| RowView { expandable: true, ..row_view(id, name, "") };
+    let child = |id: i32, parent: i32| RowView { id, parent, depth: 1, kind: negotium::view::RowKind::Proc, name: format!("proc{id}"), actionable: true, ..Default::default() };
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, frame(vec![card(1, "Editor"), card(2, "Browser"), child(20, 2), child(21, 2)]));
+    b.toggle(2);
+    assert_eq!(shown_ids(&ui), [1, 2, 20, 21]);
+    b.set_hover(true);
+    b.apply(&ui, frame(vec![]));
+    assert_eq!(shown_ids(&ui), [1, 2, 20, 21], "held in place, exited");
+    b.toggle(1);
+    assert!(!shown_expanded(&ui, 1), "an exited app does not expand");
+    assert_eq!(shown_ids(&ui), [1, 2, 20, 21]);
+    b.toggle(2);
+    assert!(!shown_expanded(&ui, 2), "a held open card still collapses");
+    assert_eq!(shown_ids(&ui), [1, 2]);
+}
+
+/// The bars travel as a model, which compares by identity: an unchanged row must keep its bars
+/// model, or every card would be rewritten every frame.
+#[test]
+fn a_rows_bars_are_unchanged_by_an_identical_frame() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    let rows = vec![RowView { bars: [0.5, 0.25, 0.0, 1.0, 0.1], ..row_view(1, "Editor", "") }];
+    b.apply(&ui, frame(rows.clone()));
+    let before = ui.get_rows().row_data(0).unwrap();
+    assert_eq!(before.bars.iter().collect::<Vec<_>>(), [0.5, 0.25, 0.0, 1.0, 0.1]);
+    assert_eq!(before.kind, 1, "an app card");
+    b.apply(&ui, frame(rows));
+    assert_eq!(ui.get_rows().row_data(0).unwrap(), before);
+}
+
+#[test]
+fn a_focused_end_task_keeps_the_list_frozen_until_its_card_hangs() {
+    let (ui, controls, bridge) = bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, frame(vec![row_view(1, "Editor", ""), row_view(2, "Browser", "")]));
+    b.set_hover(true);
+    b.set_key_focus(2, true); // Browser's End task, reached while the card is hovered
+    b.set_hover(false);
+    b.apply(&ui, frame(vec![row_view(2, "Browser", ""), row_view(1, "Editor", "")]));
+    assert!(controls.frozen(), "the button stays while it holds focus, and so does the freeze");
+    assert_eq!(shown_ids(&ui), [1, 2]);
+    // Browser hangs: its End task gives way to Force close, which never had focus.
+    b.apply(&ui, frame(vec![row_view(2, "Browser", HUNG), row_view(1, "Editor", "")]));
+    assert!(!controls.frozen(), "a vanished End task must not hold the list frozen");
 }

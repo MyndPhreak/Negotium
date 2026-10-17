@@ -620,3 +620,31 @@ fn no_slint_source_reads_the_animation_tick() {
         }
     }
 }
+
+/// An icon is drawn as straight alpha on either theme (icons::extract hands it over that way):
+/// a uniform grey at 25% shows as a quarter of the grey over the card, not the grey added to it.
+#[test]
+fn an_icons_soft_pixels_blend_as_straight_alpha_on_dark_and_light() {
+    software_backend();
+    for dark in [true, false] {
+        let ui = MainWindow::new().unwrap();
+        ui.invoke_set_dark(dark);
+        let mut px = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(32, 32);
+        px.make_mut_slice().fill(slint::Rgba8Pixel { r: 200, g: 200, b: 200, a: 64 });
+        let row = negotium::RowData {
+            id: 1, kind: 1, name: "App".into(), actionable: true, has_icon: true, icon: slint::Image::from_rgba8(px),
+            ..Default::default()
+        };
+        ui.set_rows(ModelRc::new(VecModel::from(vec![row])));
+        ui.window().set_size(PhysicalSize::new(1000, 720));
+        ui.show().unwrap();
+        let icon = ElementHandle::find_by_element_id(&ui, "RowIcon::icon-image").next().expect("the icon");
+        let (p, s) = (icon.absolute_position(), icon.size());
+        let shot = ui.window().take_snapshot().expect("snapshot");
+        let at = |x: f32, y: f32| shot.as_slice()[(y.round() as u32 * shot.width() + x.round() as u32) as usize];
+        let (inside, beside) = (at(p.x + s.width / 2.0, p.y + s.height / 2.0), at(p.x - 3.0, p.y + s.height / 2.0));
+        let straight = (200.0 * 0.25 + beside.r as f32 * 0.75).round() as i32;
+        assert!((inside.r as i32 - straight).abs() <= 4, "dark {dark}: {inside:?} over {beside:?}, straight would be {straight}");
+        ui.hide().unwrap();
+    }
+}

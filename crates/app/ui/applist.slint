@@ -1,33 +1,234 @@
-import { ListView, LineEdit, Button } from "std-widgets.slint";
+import { LineEdit, Button, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { ScrollIndicator } from "scrollindicator.slint";
+import { FocusButton } from "focusbutton.slint";
 
+// One row of the list: `kind` 0 a section heading, 1 an app's card, 2 a process row inside an
+// expanded card (crate::view::RowKind).
 export struct RowData {
-    id: int, depth: int, name: string, count: string,
+    id: int, kind: int, depth: int, name: string, count: string,
+    // An app card's second line: its process count, or its hang.
+    sub: string,
     cpu: string, mem: string, disk: string, gpu: string, net: string,
-    bar: float, hung: string, expandable: bool, expanded: bool, actionable: bool,
+    // Each column's bar under an app card's number, 0..1, in column order.
+    bars: [float],
+    hung: string, expandable: bool, expanded: bool, actionable: bool,
     // The app or process went away while the list was frozen: shown in place, dimmed, inert.
     exited: bool,
     // The program's icon, extracted off the UI thread; has-icon is false until it arrives (and for
     // the Windows group, headings and images without one).
     icon: image, has-icon: bool,
+    // The Windows group: the Windows glyph instead of a program icon.
+    windows: bool,
+    // The last process row of an expanded card: the card closes below it.
+    last-in-card: bool,
 }
 
-component Cell inherits Text {
+// Column geometry shared by the header and every row, so each number sits under its header.
+global Columns {
+    out property <length> number: 86px;
+    out property <length> gap: 8px;
+    // The track each app card's bar fills, right-aligned under its number.
+    out property <length> bar: 70px;
+    // A row's content inset from the card's left edge, and from its right edge.
+    out property <length> left: 10px;
+    out property <length> right: 12px;
+}
+
+// One number in a row, right-aligned (Segoe UI's figures are tabular by default), with an app
+// card's bar under it (`bar` < 0: none).
+component NumCell inherits VerticalLayout {
+    in property <string> text;
     in property <bool> strong;
-    width: 84px;
-    horizontal-alignment: right;
-    vertical-alignment: center;
-    font-size: 12px;
-    color: Theme.text;
-    font-weight: strong ? 600 : 400;
+    in property <length> size: 13px;
+    in property <float> bar: -1;
+    width: Columns.number;
+    alignment: center;
+    spacing: 4px;
+    Text {
+        text: root.text;
+        horizontal-alignment: right;
+        font-size: root.size;
+        color: Theme.text;
+        font-weight: root.strong ? 600 : 400;
+    }
+    if root.bar >= 0 : Rectangle {
+        height: 3px;
+        Rectangle {
+            x: parent.width - Columns.bar;
+            width: Columns.bar;
+            border-radius: 1.5px;
+            background: Theme.card-border;
+            Rectangle {
+                x: 0;
+                width: parent.width * clamp(root.bar, 0, 1);
+                border-radius: 1.5px;
+                background: Theme.accent;
+            }
+        }
+    }
 }
 
-component HeaderCell inherits Text {
-    width: 84px;
-    horizontal-alignment: right;
-    font-size: 11px;
-    color: Theme.muted;
+// Drawn, not a glyph: Segoe UI Variable lacks U+25B8/U+25BE, which rendered as tofu.
+component Chevron inherits Rectangle {
+    in property <bool> open;
+    width: 14px;
+    Path {
+        width: 8px;
+        height: 8px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 8;
+        viewbox-height: 8;
+        commands: root.open ? "M 0 2 L 4 6 L 8 2" : "M 2 0 L 6 4 L 2 8";
+        stroke: Theme.muted;
+        stroke-width: 1.5px;
+        fill: transparent;
+    }
+}
+
+// A row's program icon; the Windows group's glyph; or, for anything without an icon (none yet, a
+// monochrome one, none at all), a generic program window.
+component RowIcon inherits Rectangle {
+    in property <image> source;
+    in property <bool> has-icon;
+    in property <bool> windows;
+    in property <length> size: 24px;
+    // As tall as its row; the icon is centred in it.
+    width: root.size;
+    if root.windows : windows-glyph := Path {
+        width: root.size * 0.75;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 0 0 L 7.4 0 L 7.4 7.4 L 0 7.4 Z M 8.6 0 L 16 0 L 16 7.4 L 8.6 7.4 Z M 0 8.6 L 7.4 8.6 L 7.4 16 L 0 16 Z M 8.6 8.6 L 16 8.6 L 16 16 L 8.6 16 Z";
+        fill: Theme.accent;
+    }
+    if !root.windows && root.has-icon : icon-image := Image {
+        y: (parent.height - self.height) / 2;
+        width: root.size;
+        height: root.size;
+        source: root.source;
+        image-fit: contain;
+    }
+    if !root.windows && !root.has-icon : generic-glyph := Path {
+        width: root.size * 0.75;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        // A window: its frame and its title bar.
+        commands: "M 1.5 2.5 L 14.5 2.5 L 14.5 13.5 L 1.5 13.5 Z M 1.5 5.5 L 14.5 5.5";
+        stroke: Theme.muted;
+        stroke-width: 1.2px;
+        fill: transparent;
+    }
+}
+
+// One horizontal slice of a card: a whole card, the head of an expanded one, a process strip, or
+// the strip that closes it. Where the card goes on past an edge (`open-top`, `open-bottom`) that
+// edge has no border and no rounding: the outline is drawn past it and clipped, so only the sides
+// show.
+component CardSlice inherits Rectangle {
+    in property <bool> open-top;
+    in property <bool> open-bottom;
+    in property <brush> fill;
+    in property <brush> edge;
+    // Laid over the fill inside the border (the process strip's darker shade).
+    in property <brush> tint: transparent;
+    property <length> past: 2px;
+    property <length> top-radius: root.open-top ? 0px : Theme.radius;
+    property <length> bottom-radius: root.open-bottom ? 0px : Theme.radius;
+    clip: true;
+    Rectangle {
+        y: root.open-top ? -root.past : 0px;
+        height: root.height + (root.open-top ? root.past : 0px) + (root.open-bottom ? root.past : 0px);
+        background: root.fill;
+        border-width: 1px;
+        border-color: root.edge;
+        border-top-left-radius: root.top-radius;
+        border-top-right-radius: root.top-radius;
+        border-bottom-left-radius: root.bottom-radius;
+        border-bottom-right-radius: root.bottom-radius;
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            background: root.tint;
+            border-top-left-radius: max(0px, root.top-radius - 1px);
+            border-top-right-radius: max(0px, root.top-radius - 1px);
+            border-bottom-left-radius: max(0px, root.bottom-radius - 1px);
+            border-bottom-right-radius: max(0px, root.bottom-radius - 1px);
+        }
+    }
+    @children
+}
+
+// End task as a small ×, at the end of a card's name area (the context menu and Delete do the
+// same). Red under the pointer.
+component EndTaskButton inherits FocusButton {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    background: root.hovered ? Theme.danger : transparent;
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.text;
+    Path {
+        width: 10px;
+        height: 10px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: "M 1 1 L 9 9 M 9 1 L 1 9";
+        stroke: root.hovered ? Theme.on-danger : Theme.muted;
+        stroke-width: 1.5px;
+        fill: transparent;
+    }
+}
+
+// A column header: sorts the list by its column (again: flips the direction). The sorted one is
+// in the accent colour with ▾ (descending) or ▴ (ascending), drawn.
+component SortHeader inherits FocusButton {
+    in property <string> label;
+    in property <bool> sorted;
+    in property <bool> descending;
+    in property <bool> left;
+    border-radius: 4px;
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.text;
+    accessible-label: "Sort by " + root.label;
+    accessible-checkable: true;
+    accessible-checked: root.sorted;
+    HorizontalLayout {
+        alignment: root.left ? LayoutAlignment.start : LayoutAlignment.end;
+        padding-left: 2px;
+        padding-right: 2px;
+        spacing: 4px;
+        Text {
+            text: root.label.to-uppercase();
+            font-size: 11.5px;
+            letter-spacing: 0.5px;
+            vertical-alignment: center;
+            color: root.sorted ? Theme.accent : (root.hovered ? Theme.text : Theme.muted);
+        }
+        if root.sorted : Rectangle {
+            width: 8px;
+            Path {
+                y: (parent.height - self.height) / 2;
+                width: 8px;
+                height: 5px;
+                viewbox-width: 8;
+                viewbox-height: 5;
+                commands: root.descending ? "M 0 0 L 8 0 L 4 5 Z" : "M 0 5 L 8 5 L 4 0 Z";
+                fill: Theme.accent;
+            }
+        }
+    }
 }
 
 // The one row menu, shared by each row (right-click, Menu key on a focused row control) and by the
@@ -64,6 +265,9 @@ export component AppList inherits VerticalLayout {
     in property <int> metric;
     in property <bool> interactive: true;
     in-out property <string> search-text;
+    // The list's sort (crate::controls): -1 the name column, 0..4 a metric's index.
+    in property <int> sort-column;
+    in property <bool> sort-descending;
     // Keyboard navigation (ruling P3-7): the current row's index and id, and whether it can be acted on.
     in property <int> current-row: -1;
     // The current row's top within the list and its height (rows differ in height).
@@ -73,15 +277,21 @@ export component AppList inherits VerticalLayout {
     in property <bool> current-actionable;
     out property <bool> hovered: area.has-hover;
     out property <length> scroll-y: lv.content-y;
-    // Every row's height as drawn, until rows draw per kind; scrolling and the keyboard menu's
-    // anchor use the real row tops from Rust (current-row-y, ensure-visible).
-    private property <length> row-height: 32px;
+    // Row heights by kind, mirrored from crate::view::ROW_H_* (a test keeps them equal): Rust sums
+    // them for scrolling to a row and for the keyboard menu's anchor.
+    private property <length> section-height: 32px;
+    private property <length> app-height: 50px;
+    private property <length> proc-height: 30px;
+    // An app card itself; the rest of its row is the gap below it.
+    private property <length> card-height: 46px;
     // The row a context menu was opened on. Captured when it opens; every menu item acts on it,
     // never on whatever row data sits at that index by the time an item is chosen.
     out property <int> menu-target: -1;
     callback toggle(int);
     callback action(string, int);
     callback hover(bool);
+    // A column header was clicked: -1 Name, 0..4 a metric.
+    callback sort-clicked(int);
     // True when a row's context menu opens, false once it has closed: the list stays frozen meanwhile.
     callback menu-open(bool);
     // Keyboard focus entered (true) or left (false) a control inside row `id`: the list stays
@@ -133,15 +343,27 @@ export component AppList inherits VerticalLayout {
         edited(text) => { root.search(text); }
     }
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 8px;
-        Text { text: "Name"; font-size: 11px; color: Theme.muted; horizontal-stretch: 1; }
-        HeaderCell { text: "CPU"; }
-        HeaderCell { text: "Memory"; }
-        HeaderCell { text: "Disk"; }
-        HeaderCell { text: "GPU"; }
-        HeaderCell { text: "Network"; }
+        padding-left: Columns.left;
+        padding-right: Columns.right;
+        spacing: Columns.gap;
+        height: 24px;
+        SortHeader {
+            label: "Name";
+            left: true;
+            horizontal-stretch: 1;
+            sorted: root.sort-column == -1;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(-1); }
+        }
+        for label[c] in ["CPU", "Memory", "Disk", "GPU", "Network"] : SortHeader {
+            label: label;
+            width: Columns.number;
+            sorted: root.sort-column == c;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(c); }
+        }
     }
     list-keys := FocusScope {
         vertical-stretch: 1;
@@ -172,128 +394,252 @@ export component AppList inherits VerticalLayout {
             area := TouchArea {
                 enabled: root.interactive;
                 changed has-hover => { root.hover(self.has-hover); }
-                lv := ListView {
+                // Not a ListView: its virtual layout places rows by their average height, so with
+                // headings, cards and process rows mixed a row was drawn away from the top Rust sums
+                // (crate::bridge::row_top) and keyboard scrolling missed it. Here every row is an empty
+                // slot at its exact height in one column; only the slots in view build their row.
+                lv := ScrollView {
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-                    for r[i] in root.rows : Rectangle {
-                        height: root.row-height;
-                        background: r.hung != "" ? Theme.danger-bg : (row-touch.has-hover ? Theme.card : transparent);
-                        border-radius: 4px;
-                        // The keyboard-current row, while the list has focus.
-                        border-width: (i == root.current-row && list-keys.has-focus) ? 2px : 0px;
-                        border-color: Theme.text;
-                        opacity: r.exited ? 0.5 : 1.0;
-                        accessible-role: list-item;
-                        accessible-item-selectable: true;
-                        // Selected like the ring: the current row, while the list has focus.
-                        accessible-item-selected: i == root.current-row && list-keys.has-focus;
-                        accessible-label: r.exited ? r.name + ", exited"
-                            : r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
-                        // The only way this row's menu opens: capture the row first, keep the list frozen
-                        // while it is open. The native Windows menu (muda, TrackPopupMenu) is modal: show()
-                        // returns only once it has closed. Slint's popup fallback (no native menus) returns at
-                        // once; there the captured menu-target alone keeps the action on the right row.
-                        function open-menu(x: length, y: length) {
-                            if (r.actionable && root.interactive) {
-                                root.menu-target = r.id;
-                                root.menu-open(true);
-                                menu.open(x, y);
-                                root.menu-open(false);
-                            }
-                        }
-                        menu := RowMenu {
-                            actionable: r.actionable;
-                            action(name) => { root.action(name, root.menu-target); }
-                            // Never takes focus itself; key presses a focused control in this row rejects
-                            // (the Buttons take only Space and Return) bubble up here.
-                            row-keys := FocusScope {
-                                enabled: false;
-                                // Any key pressed while focus is inside this row (re)asserts the freeze, so a
-                                // missed focus edge can't leave Space acting on an unfrozen list.
-                                capture-key-pressed(e) => {
-                                    root.row-focus(r.id, true);
-                                    return reject;
-                                }
-                                key-pressed(e) => {
-                                    if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
-                                        open-menu(8px, root.row-height);
-                                        return accept;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    content-width: self.visible-width;
+                    content-height: column.preferred-height;
+                    // Rows that went (a collapse, a search) never leave the view scrolled past the end.
+                    changed content-height => {
+                        self.content-y = max(self.content-y, min(0px, self.visible-height - self.content-height));
+                    }
+                    column := VerticalLayout {
+                        width: lv.visible-width;
+                        height: self.preferred-height;
+                        for r[i] in root.rows : slot := Rectangle {
+                            height: r.kind == 0 ? root.section-height : (r.kind == 1 ? root.app-height : root.proc-height);
+                            if slot.y + slot.height > -lv.content-y && slot.y < -lv.content-y + lv.visible-height : row := Rectangle {
+                                // The keyboard-current row, while the list has focus.
+                                property <bool> current: i == root.current-row && list-keys.has-focus;
+                                property <bool> hovered: row-touch.has-hover;
+                                // Set while this card's End task holds focus (it outlives the hover then).
+                                property <bool> end-focused;
+                                // An app card whose process strip goes on below it.
+                                property <bool> open-below: r.kind == 1 && i + 1 < root.rows.length && root.rows[i + 1].kind == 2;
+                                // The first process row of a card: a hairline parts it from the card's head.
+                                property <bool> first-in-card: r.kind == 2 && i > 0 && root.rows[i - 1].kind != 2;
+                                // How much of the row the card (or strip) covers; the rest is the gap below it.
+                                property <length> body: r.kind == 1 ? (self.open-below ? self.height : root.card-height)
+                                    : r.kind == 2 && r.last-in-card ? self.height - (root.app-height - root.card-height) : self.height;
+                                property <brush> fill: r.hung != "" ? Theme.danger-bg : (self.hovered ? Theme.card-hover : Theme.card);
+                                opacity: r.exited ? 0.5 : 1.0;
+                                accessible-role: list-item;
+                                accessible-item-selectable: true;
+                                // Selected like the ring: the current row, while the list has focus.
+                                accessible-item-selected: self.current;
+                                accessible-label: r.kind == 0 ? r.name + " section, " + (r.expanded ? "expanded" : "collapsed")
+                                    : r.exited ? r.name + ", exited"
+                                    : r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
+                                // A heading opens and closes its section (Enter does too, through the list).
+                                accessible-action-default => {
+                                    if (r.kind == 0 && root.interactive) {
+                                        root.toggle(r.id);
                                     }
-                                    return reject;
                                 }
-                                row-touch := TouchArea {
-                                    enabled: root.interactive;
-                                    double-clicked => { if (r.expandable) { root.toggle(r.id); } }
-                                    pointer-event(e) => {
-                                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
-                                            open-menu(self.mouse-x, self.mouse-y);
-                                        }
+                                // The only way this row's menu opens: capture the row first, keep the list frozen
+                                // while it is open. The native Windows menu (muda, TrackPopupMenu) is modal: show()
+                                // returns only once it has closed. Slint's popup fallback (no native menus) returns at
+                                // once; there the captured menu-target alone keeps the action on the right row.
+                                function open-menu(x: length, y: length) {
+                                    if (r.actionable && root.interactive) {
+                                        root.menu-target = r.id;
+                                        root.menu-open(true);
+                                        menu.open(x, y);
+                                        root.menu-open(false);
                                     }
-                                    HorizontalLayout {
-                                        padding-left: 8px + r.depth * 20px;
-                                        padding-right: 8px;
-                                        spacing: 8px;
-                                        if r.expandable : Rectangle {
-                                            width: 14px;
-                                            // Drawn, not a glyph: Segoe UI Variable lacks U+25B8/U+25BE, which rendered as tofu.
-                                            Path {
-                                                width: 8px;
-                                                height: 8px;
-                                                x: (parent.width - self.width) / 2;
-                                                y: (parent.height - self.height) / 2;
-                                                viewbox-width: 8;
-                                                viewbox-height: 8;
-                                                commands: r.expanded ? "M 0 2 L 4 6 L 8 2" : "M 2 0 L 6 4 L 2 8";
-                                                stroke: Theme.muted;
-                                                stroke-width: 1.5px;
-                                                fill: transparent;
+                                }
+                                // Expanding needs a live app: an exited one has nothing left to show.
+                                function toggle-card() {
+                                    if (r.expandable && !r.exited) {
+                                        root.toggle(r.id);
+                                    }
+                                }
+                                menu := RowMenu {
+                                    actionable: r.actionable;
+                                    action(name) => { root.action(name, root.menu-target); }
+                                    // Never takes focus itself; key presses a focused control in this row rejects
+                                    // (the buttons take only Space and Return) bubble up here.
+                                    row-keys := FocusScope {
+                                        enabled: false;
+                                        // Any key pressed while focus is inside this row (re)asserts the freeze, so a
+                                        // missed focus edge can't leave Space acting on an unfrozen list.
+                                        capture-key-pressed(e) => {
+                                            root.row-focus(r.id, true);
+                                            return reject;
+                                        }
+                                        key-pressed(e) => {
+                                            if (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) {
+                                                open-menu(8px, row.body);
+                                                return accept;
                                             }
-                                            accessible-role: button;
-                                            accessible-label: (r.expanded ? "Collapse " : "Expand ") + r.name;
-                                            accessible-action-default => { root.toggle(r.id); }
-                                            TouchArea {
-                                                enabled: root.interactive;
-                                                clicked => { root.toggle(r.id); }
+                                            return reject;
+                                        }
+                                        row-touch := TouchArea {
+                                            enabled: root.interactive;
+                                            clicked => {
+                                                if (r.kind == 0) {
+                                                    root.toggle(r.id);
+                                                }
+                                            }
+                                            double-clicked => {
+                                                if (r.kind != 0) {
+                                                    toggle-card();
+                                                }
+                                            }
+                                            pointer-event(e) => {
+                                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                                    open-menu(self.mouse-x, self.mouse-y);
+                                                }
+                                            }
+                                            // A section heading: chevron, name and count.
+                                            if r.kind == 0 : HorizontalLayout {
+                                                padding-left: Columns.left;
+                                                padding-right: Columns.right;
+                                                spacing: Columns.gap;
+                                                Chevron { open: r.expanded; }
+                                                HorizontalLayout {
+                                                    horizontal-stretch: 1;
+                                                    alignment: start;
+                                                    spacing: 6px;
+                                                    Text { text: r.name; color: Theme.muted; font-size: 12px; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                                                    Text { text: r.count; color: Theme.muted; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                                                }
+                                            }
+                                            // An app's card; open at the bottom while its processes show below it.
+                                            if r.kind == 1 : CardSlice {
+                                                y: 0;
+                                                height: row.body;
+                                                open-bottom: row.open-below;
+                                                fill: row.fill;
+                                                edge: row.hovered ? Theme.muted.with-alpha(0.3) : Theme.card-border;
+                                                HorizontalLayout {
+                                                    y: 0;
+                                                    height: root.card-height;
+                                                    padding-left: Columns.left;
+                                                    padding-right: Columns.right;
+                                                    spacing: Columns.gap;
+                                                    if r.expandable : Chevron {
+                                                        open: r.expanded;
+                                                        accessible-role: button;
+                                                        accessible-label: (r.expanded ? "Collapse " : "Expand ") + r.name;
+                                                        accessible-action-default => { toggle-card(); }
+                                                        TouchArea {
+                                                            enabled: root.interactive;
+                                                            clicked => { toggle-card(); }
+                                                        }
+                                                    }
+                                                    if !r.expandable : Rectangle { width: 14px; }
+                                                    RowIcon {
+                                                        size: 24px;
+                                                        source: r.icon;
+                                                        has-icon: r.has-icon;
+                                                        windows: r.windows;
+                                                    }
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        alignment: center;
+                                                        spacing: 1px;
+                                                        Text { text: r.name; color: Theme.text; font-size: 13.5px; overflow: elide; }
+                                                        Text {
+                                                            text: r.exited ? "Exited" : r.sub;
+                                                            color: r.hung != "" ? Theme.danger-text : Theme.muted;
+                                                            font-size: 11.5px;
+                                                            overflow: elide;
+                                                        }
+                                                    }
+                                                    if r.hung != "" && r.actionable : Button {
+                                                        text: "Force close";
+                                                        enabled: root.interactive;
+                                                        accessible-label: "Force close " + r.name;
+                                                        changed has-focus => { root.row-focus(r.id, self.has-focus); }
+                                                        clicked => { root.action("force-close", r.id); }
+                                                    }
+                                                    // While the card is hovered, and for as long as the button holds focus
+                                                    // (the list stays frozen meanwhile, so it stays this app's).
+                                                    if r.hung == "" && r.actionable && r.depth == 0 && (row.hovered || row.end-focused) : Rectangle {
+                                                        width: 22px;
+                                                        EndTaskButton {
+                                                            y: (parent.height - self.height) / 2;
+                                                            interactive: root.interactive;
+                                                            accessible-label: "End task " + r.name;
+                                                            changed focused => {
+                                                                row.end-focused = self.focused;
+                                                                root.row-focus(r.id, self.focused);
+                                                            }
+                                                            activated => { root.action("end-task", r.id); }
+                                                        }
+                                                    }
+                                                    NumCell { text: r.cpu; strong: root.metric == 0; size: 13px; bar: r.bars[0]; }
+                                                    NumCell { text: r.mem; strong: root.metric == 1; size: 13px; bar: r.bars[1]; }
+                                                    NumCell { text: r.disk; strong: root.metric == 2; size: 13px; bar: r.bars[2]; }
+                                                    NumCell { text: r.gpu; strong: root.metric == 3; size: 13px; bar: r.bars[3]; }
+                                                    NumCell { text: r.net; strong: root.metric == 4; size: 13px; bar: r.bars[4]; }
+                                                }
+                                            }
+                                            // A process row inside its card, on the card's darker strip; the last closes it.
+                                            if r.kind == 2 : CardSlice {
+                                                y: 0;
+                                                height: row.body;
+                                                open-top: true;
+                                                open-bottom: !r.last-in-card;
+                                                fill: row.fill;
+                                                edge: Theme.card-border;
+                                                tint: r.hung != "" ? transparent : Theme.card-inset;
+                                                if row.first-in-card : Rectangle {
+                                                    x: 1px;
+                                                    y: 0;
+                                                    width: parent.width - 2px;
+                                                    height: 1px;
+                                                    background: Theme.card-border;
+                                                }
+                                                HorizontalLayout {
+                                                    // Its icon centred under the card's.
+                                                    padding-left: Columns.left + 14px + Columns.gap + 4px;
+                                                    padding-right: Columns.right;
+                                                    spacing: Columns.gap;
+                                                    RowIcon {
+                                                        size: 16px;
+                                                        source: r.icon;
+                                                        has-icon: r.has-icon;
+                                                        windows: r.windows;
+                                                    }
+                                                    HorizontalLayout {
+                                                        horizontal-stretch: 1;
+                                                        alignment: start;
+                                                        spacing: 6px;
+                                                        Text { text: r.name; color: Theme.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+                                                        if r.exited : Text { text: "Exited"; color: Theme.muted; font-size: 11.5px; vertical-alignment: center; }
+                                                        if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11.5px; vertical-alignment: center; }
+                                                    }
+                                                    if r.hung != "" && r.actionable : Button {
+                                                        // Inside the strip's 30 px.
+                                                        height: 24px;
+                                                        text: "Force close";
+                                                        enabled: root.interactive;
+                                                        accessible-label: "Force close " + r.name;
+                                                        changed has-focus => { root.row-focus(r.id, self.has-focus); }
+                                                        clicked => { root.action("force-close", r.id); }
+                                                    }
+                                                    NumCell { text: r.cpu; strong: root.metric == 0; size: 12.5px; }
+                                                    NumCell { text: r.mem; strong: root.metric == 1; size: 12.5px; }
+                                                    NumCell { text: r.disk; strong: root.metric == 2; size: 12.5px; }
+                                                    NumCell { text: r.gpu; strong: root.metric == 3; size: 12.5px; }
+                                                    NumCell { text: r.net; strong: root.metric == 4; size: 12.5px; }
+                                                }
+                                            }
+                                            // The keyboard-current row's ring, over the card or heading (not the gap).
+                                            if row.current : Rectangle {
+                                                y: 0;
+                                                height: row.body;
+                                                border-width: 2px;
+                                                border-color: Theme.text;
+                                                border-radius: r.kind == 1 ? Theme.radius : 4px;
                                             }
                                         }
-                                        if !r.expandable : Rectangle { width: 14px; }
-                                        HorizontalLayout {
-                                            horizontal-stretch: 1;
-                                            alignment: start;
-                                            spacing: 6px;
-                                            Text { text: r.name; color: Theme.text; font-size: 12px; vertical-alignment: center; overflow: elide; }
-                                            Text { text: r.count; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
-                                            if r.exited : Text { text: "Exited"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
-                                            if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11px; vertical-alignment: center; }
-                                            if r.hung != "" && r.actionable : Button {
-                                                text: "Force close";
-                                                enabled: root.interactive;
-                                                accessible-label: "Force close " + r.name;
-                                                changed has-focus => { root.row-focus(r.id, self.has-focus); }
-                                                clicked => { root.action("force-close", r.id); }
-                                            }
-                                            if r.hung == "" && r.actionable && row-touch.has-hover && r.depth == 0 : Button {
-                                                text: "End task";
-                                                enabled: root.interactive;
-                                                accessible-label: "End task " + r.name;
-                                                changed has-focus => { root.row-focus(r.id, self.has-focus); }
-                                                clicked => { root.action("end-task", r.id); }
-                                            }
-                                        }
-                                        Rectangle {
-                                            width: 60px;
-                                            Rectangle {
-                                                x: 0;
-                                                width: parent.width * r.bar;
-                                                height: 6px;
-                                                border-radius: 3px;
-                                                background: Theme.accent;
-                                            }
-                                        }
-                                        Cell { text: r.cpu; strong: root.metric == 0; }
-                                        Cell { text: r.mem; strong: root.metric == 1; }
-                                        Cell { text: r.disk; strong: root.metric == 2; }
-                                        Cell { text: r.gpu; strong: root.metric == 3; }
-                                        Cell { text: r.net; strong: root.metric == 4; }
                                     }
                                 }
                             }

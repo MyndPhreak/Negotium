@@ -7,10 +7,17 @@ export global Theme {
     out property <brush> window-bg: mica ? transparent : (dark ? #202020 : #f3f3f3);
     out property <color> card: dark ? #ffffff0f : #ffffffb3;
     out property <color> card-border: dark ? #ffffff14 : #0000000f;
+    // A hovered card: a step lighter than `card`.
+    out property <color> card-hover: dark ? #ffffff17 : #ffffffff;
+    // Laid over `card` for the process strip inside an expanded card: a shade darker.
+    out property <color> card-inset: dark ? #0000002e : #00000008;
     out property <color> text: dark ? #ffffff : #1a1a1a;
     out property <color> muted: dark ? #ffffffa0 : #00000099;
     out property <color> danger-text: dark ? #ff99a4 : #c42b1c;
     out property <color> danger-bg: dark ? #442726 : #fde7e9;
+    // A destructive control's fill under the pointer (the End task ×), and what is drawn on it.
+    out property <color> danger: dark ? #c42b1c : #d13438;
+    out property <color> on-danger: #ffffff;
     // Text drawn on an accent fill: dark on a light accent, white otherwise (perceived luminance).
     out property <color> on-accent: (accent.red * 0.299 + accent.green * 0.587 + accent.blue * 0.114) > 150 ? #000000 : #ffffff;
     out property <length> radius: 8px;

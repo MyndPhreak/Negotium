@@ -34,6 +34,15 @@ impl<T: Clone + 'static> RowStore<T> for VecModel<T> {
     fn pop(&self) { let n = self.row_count(); if n > 0 { self.remove(n - 1); } }
 }
 
+/// RowData's `kind` (applist.slint): 0 a section heading, 1 an app's card, 2 a process row.
+fn kind_index(kind: RowKind) -> i32 {
+    match kind {
+        RowKind::Section => 0,
+        RowKind::App => 1,
+        RowKind::Proc => 2,
+    }
+}
+
 pub fn sync_model<T: Clone + PartialEq, S: RowStore<T>>(store: &S, items: Vec<T>) {
     let common = store.len().min(items.len());
     for (i, item) in items.iter().enumerate().take(common) {
@@ -350,6 +359,9 @@ pub struct Bridge {
     menu_open: bool,
     /// The row whose control (Force close, End task) has keyboard focus.
     key_focus: Option<i32>,
+    /// Whether that row was hung when its control took focus: the control is its Force close,
+    /// not its End task.
+    key_focus_hung: bool,
     /// Bumped by every focus change; a deferred focus-out applies only if nothing came after it.
     focus_generation: u64,
     /// The keyboard-current row (by id). Kept while focus is elsewhere, so Tab back resumes there.
@@ -369,6 +381,8 @@ pub struct Bridge {
     /// What a row without an icon carries: one image shared by every such row, because Slint's
     /// empty image never equals itself and would make `sync_model` rewrite those rows every frame.
     no_icon: slint::Image,
+    /// The bars of every row without any (see `bars_model`).
+    no_bars: ModelRc<f32>,
     pub controls: Arc<Controls>,
     ui: slint::Weak<MainWindow>,
 }
@@ -403,6 +417,7 @@ impl Bridge {
             hover: false,
             menu_open: false,
             key_focus: None,
+            key_focus_hung: false,
             focus_generation: 0,
             current: None,
             list_focused: false,
@@ -413,6 +428,7 @@ impl Bridge {
             icons: IconCache::default(),
             icon_loader: None,
             no_icon: slint::Image::from_rgba8(slint::SharedPixelBuffer::new(1, 1)),
+            no_bars: ModelRc::new(VecModel::from(vec![0.0; 5])),
             controls,
             ui: ui.as_weak(),
         };
@@ -712,18 +728,31 @@ impl Bridge {
     }
 
     fn push_rows(&mut self) {
-        // The list still draws one bar: the selected meter's.
-        let metric = self.controls.metric() as usize;
         let loader = self.icon_loader.as_deref();
         let icons: Vec<Option<slint::Image>> = self.layout.rows().iter().map(|r| Self::icon_of(&mut self.icons, loader, r)).collect();
-        sync_model(&*self.rows, self.layout.rows().iter().zip(icons).map(|(r, icon)| RowData {
-            id: r.id, depth: r.depth, name: r.name.clone().into(), count: r.count.clone().into(), cpu: r.cpu.clone().into(),
-            mem: r.mem.clone().into(), disk: r.disk.clone().into(), gpu: r.gpu.clone().into(), net: r.net.clone().into(),
-            bar: r.bars[metric], hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.is_open(r),
+        let rows = self.layout.rows().iter().zip(icons).enumerate().map(|(i, (r, icon))| RowData {
+            id: r.id, kind: kind_index(r.kind), depth: r.depth, name: r.name.clone().into(), count: r.count.clone().into(),
+            sub: r.sub.clone().into(), cpu: r.cpu.clone().into(), mem: r.mem.clone().into(), disk: r.disk.clone().into(),
+            gpu: r.gpu.clone().into(), net: r.net.clone().into(), bars: self.bars_model(i, &r.bars),
+            hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.is_open(r),
             actionable: r.actionable, exited: r.exited, has_icon: icon.is_some(),
-            icon: icon.unwrap_or_else(|| self.no_icon.clone()),
-        }).collect());
+            icon: icon.unwrap_or_else(|| self.no_icon.clone()), windows: r.windows, last_in_card: r.last_in_card,
+        }).collect();
+        sync_model(&*self.rows, rows);
         self.sync_current();
+    }
+
+    /// A row's bars as the model Slint reads. A model compares by identity, so the row shown at
+    /// `i` keeps its own while the values are the same, and every all-zero row (headings, process
+    /// rows) shares one: otherwise `sync_model` would see every card changed on every frame.
+    fn bars_model(&self, i: usize, bars: &[f32; 5]) -> ModelRc<f32> {
+        if bars.iter().all(|b| *b == 0.0) {
+            return self.no_bars.clone();
+        }
+        match self.rows.row_data(i) {
+            Some(shown) if shown.bars.iter().eq(bars.iter().copied()) => shown.bars,
+            _ => ModelRc::new(VecModel::from(bars.to_vec())),
+        }
     }
 
     pub fn set_search(&mut self, text: &str) {
@@ -753,6 +782,10 @@ impl Bridge {
                 self.layout.close_section(id, &self.last.rows, fresh);
             }
             self.push_rows();
+            return;
+        }
+        // An exited app has no processes left to show: it never opens (a held open one still closes).
+        if !self.expanded.contains(&id) && self.layout.rows().iter().any(|r| r.id == id && r.exited) {
             return;
         }
         let expanding = !self.expanded.remove(&id);
@@ -798,19 +831,24 @@ impl Bridge {
     pub fn set_key_focus(&mut self, id: i32, focused: bool) {
         if focused {
             self.key_focus = Some(id);
+            // A row has one such control at a time: Force close while hung, End task otherwise.
+            self.key_focus_hung = self.layout.rows().iter().any(|r| r.id == id && !r.hung.is_empty());
         } else if self.key_focus == Some(id) {
             self.key_focus = None;
         }
         self.update_frozen();
     }
 
-    /// Whether the focused control still exists. Force close shows on every hung actionable row;
-    /// End task only on the hovered one. A control destroyed while focused sends no focus-out,
-    /// so this check is what releases the freeze then.
+    /// Whether the focused control still exists. Force close shows on every hung actionable row,
+    /// so it goes when the row recovers; a card's End task shows while the card is hovered or the
+    /// button itself holds focus, so a focused one goes only when the card turns hung. Either
+    /// goes when its row exits or can no longer be acted on. A control destroyed while focused
+    /// sends no focus-out, so this check is what releases the freeze then.
     fn key_focus_holds(&self) -> bool {
         let Some(id) = self.key_focus else { return false };
         self.layout.rows().iter().any(|r| {
-            r.id == id && r.actionable && !r.exited && (!r.hung.is_empty() || (self.hover && r.kind == RowKind::App && r.depth == 0))
+            r.id == id && r.actionable && !r.exited
+                && if self.key_focus_hung { !r.hung.is_empty() } else { r.hung.is_empty() && r.kind == RowKind::App && r.depth == 0 }
         })
     }
 

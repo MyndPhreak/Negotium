@@ -268,6 +268,12 @@ mod tests {
         let px = extract(r"C:\Windows\System32\notepad.exe").expect("notepad has an icon");
         assert_eq!((px.width(), px.height()), (ICON_PX, ICON_PX));
         assert!(px.as_slice().iter().any(|p| p.a > 0), "some of it is visible");
+        // Slint draws `Image::from_rgba8` as straight alpha. Premultiplied pixels never have a
+        // channel above their alpha; a real icon's soft edge, kept straight, does. (In this one
+        // test: two extractions at once on test threads sometimes come back empty.)
+        let soft: Vec<_> = px.as_slice().iter().filter(|p| p.a > 0 && p.a < 255).collect();
+        assert!(!soft.is_empty(), "a soft edge to look at");
+        assert!(soft.iter().any(|p| p.r.max(p.g).max(p.b) > p.a), "straight alpha, not premultiplied: {} soft pixels", soft.len());
     }
 
     #[test]

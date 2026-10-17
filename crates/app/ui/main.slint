@@ -271,6 +271,9 @@ export component MainWindow inherits Window {
                         vertical-stretch: 1;
                         rows: root.rows;
                         metric: root.selected-metric;
+                        sort-column: root.sort-column;
+                        sort-descending: root.sort-descending;
+                        sort-clicked(c) => { root.sort-clicked(c); }
                         search-text <=> root.search-text;
                         interactive: !root.modal-open;
                         toggle(id) => { root.toggle-row(id); }

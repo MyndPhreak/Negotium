@@ -942,7 +942,6 @@ mod tests {
 
     /// The Slint list mirrors the Rust row heights (ensure-visible and the menu anchor sum them).
     #[test]
-    #[ignore = "applist.slint declares section-height / app-height / proc-height in Task 6"]
     fn row_heights_match_the_list() {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/applist.slint")).unwrap();
         for (name, h) in [("section-height", ROW_H_SECTION), ("app-height", ROW_H_APP), ("proc-height", ROW_H_PROC)] {
