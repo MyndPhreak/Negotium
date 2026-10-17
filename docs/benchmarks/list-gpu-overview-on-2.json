@@ -1,0 +1,177 @@
+{
+  "target": "C:\\Users\\mynd\\DEV\\Negotium\\target\\release\\negotium.exe",
+  "logical_cpus": 32,
+  "warmup_secs": 5,
+  "startup_ms": [
+    629.3156
+  ],
+  "startup": {
+    "median": 629.3156,
+    "p95": 629.3156,
+    "max": 629.3156,
+    "mean": 629.3156
+  },
+  "cpu_pct": {
+    "median": 0.1899123979383426,
+    "p95": 0.28504090724674624,
+    "max": 0.4271451925634012,
+    "mean": 0.2019083449164238
+  },
+  "private_working_set_mb": {
+    "median": 83.19921875,
+    "p95": 83.2109375,
+    "max": 83.2109375,
+    "mean": 83.18286546610169
+  },
+  "responsiveness_ms": {
+    "median": 0.09509999999999999,
+    "p95": 0.8576,
+    "max": 24.2741,
+    "mean": 0.3532869851729819
+  },
+  "responsiveness_timeouts": 0,
+  "frame_stats": {
+    "first_frame_ms": 8.2476,
+    "frames": 544,
+    "over_16ms": 13,
+    "render_ms": {
+      "max": 393.0855,
+      "mean": 4.700509760589319,
+      "median": 2.1134,
+      "p95": 12.4277
+    }
+  },
+  "run": {
+    "renderer": "gpu",
+    "smooth_graphs": true,
+    "tray_cpu": true,
+    "page": null,
+    "hidden": false
+  },
+  "renderer_used": "gpu",
+  "cpu_one_core_pct": {
+    "median": 6.0771967340269635,
+    "p95": 9.12130903189588,
+    "max": 13.668646162028839,
+    "mean": 6.461067037325561
+  },
+  "gpu_pct": {
+    "median": 0.3874935507774353,
+    "p95": 0.5941442847251892,
+    "max": 0.7528018355369568,
+    "mean": 0.39744793649377497
+  },
+  "memory": {
+    "working_set_mb": 141.24609375,
+    "private_working_set_mb": 83.1484375,
+    "by_kind": [
+      [
+        "image",
+        {
+          "resident_mb": 58.40234375,
+          "private_mb": 5.0703125
+        }
+      ],
+      [
+        "mapped",
+        {
+          "resident_mb": 4.7578125,
+          "private_mb": 0.0
+        }
+      ],
+      [
+        "private",
+        {
+          "resident_mb": 78.58203125,
+          "private_mb": 78.57421875
+        }
+      ]
+    ],
+    "top": [
+      [
+        "private (heaps, stacks, driver allocations)",
+        {
+          "resident_mb": 78.58203125,
+          "private_mb": 78.57421875
+        }
+      ],
+      [
+        "nvwgf2umx.dll",
+        {
+          "resident_mb": 7.30078125,
+          "private_mb": 0.6171875
+        }
+      ],
+      [
+        "nvoglv64.dll",
+        {
+          "resident_mb": 6.79296875,
+          "private_mb": 0.9296875
+        }
+      ],
+      [
+        "negotium.exe",
+        {
+          "resident_mb": 6.2109375,
+          "private_mb": 0.01171875
+        }
+      ],
+      [
+        "nvgpucomp64.dll",
+        {
+          "resident_mb": 5.625,
+          "private_mb": 1.02734375
+        }
+      ],
+      [
+        "unnamed (mapped)",
+        {
+          "resident_mb": 2.921875,
+          "private_mb": 0.0
+        }
+      ],
+      [
+        "windows.storage.dll",
+        {
+          "resident_mb": 2.17578125,
+          "private_mb": 0.06640625
+        }
+      ],
+      [
+        "ntdll.dll",
+        {
+          "resident_mb": 1.93359375,
+          "private_mb": 0.05078125
+        }
+      ],
+      [
+        "combase.dll",
+        {
+          "resident_mb": 1.91015625,
+          "private_mb": 0.0390625
+        }
+      ],
+      [
+        "KernelBase.dll",
+        {
+          "resident_mb": 1.2109375,
+          "private_mb": 0.05078125
+        }
+      ],
+      [
+        "d3d11.dll",
+        {
+          "resident_mb": 0.96484375,
+          "private_mb": 0.0234375
+        }
+      ],
+      [
+        "shell32.dll",
+        {
+          "resident_mb": 0.93359375,
+          "private_mb": 0.0703125
+        }
+      ]
+    ]
+  }
+}

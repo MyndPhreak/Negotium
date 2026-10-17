@@ -287,3 +287,53 @@ The top lists dominate. A typical machine (16 logical processors, 2 disks, 2 ada
 7. Settings → Show CPU in tray icon off: the app icon returns at once; on again: the graph returns within a second or two. Survives a restart.
 8. Restart Explorer (Task Manager → Windows Explorer → Restart) with the CPU icon on: the icon comes back as a graph.
 9. The app list and the Performance details show a thin scroll indicator only while the content overflows; it follows the wheel and can be dragged.
+
+## App list redesign
+
+Measured with `.superpowers/run-list-bench.ps1` (`negotium-bench`, release, elevated terminal), GPU
+renderer, Overview, 60 s, 32 logical CPUs, same method as Plan 3c. CPU is the share of one core
+(`cpu_pct` mean × 32; the files also carry `cpu_one_core_pct`). Files:
+`docs/benchmarks/list-gpu-overview-off.json` (smooth off), `list-gpu-overview-on.json` and
+`list-gpu-overview-on-2.json` (smooth on, two runs).
+
+| Run | Smooth graphs | CPU % of one core | Frames / 60 s |
+|---|---|---|---|
+| Plan 3c (`3c-gpu-overview-off.json`) | off | 3.13 | 119 |
+| Plan 3c (`3c-gpu-overview-on.json`) | on | 3.74 | 455 |
+| App list redesign, final | off | 5.32 | 207 |
+| App list redesign, final | on | 7.46 | 549 |
+| App list redesign, final (second run) | on | 6.46 | 544 |
+
+Memory: about 81–83 MB private working set, against about 68–70 MB in Plan 3c.
+
+### Smooth-on regression and its fixes
+
+The first smooth-on run was far over: 30.6 % of a core and about 6,660 frames. History, each step
+measured with the same bench (commits 71cf40a, 947f1c4, bb64d5f, 4096b18):
+
+1. The top tiles' 450 ms `animate` drew at display rate after every frame, because the averaged
+   weights change each frame: 30.6 %, about 6,660 frames.
+2. The tiles glide in a timer-driven redraw per pixel; the timer took up to 28 steps, and Slint
+   1.18.1's winit backend presents each lone redraw twice: 20 %, about 3,650 frames.
+3. The glide capped at 8 steps, sized by how far the edges move: 12 %, about 1,446 frames.
+4. Final (user's choice): the tiles glide only on the graph clock's own redraws, adding no frames of
+   their own: 6.5–7.5 %, about 545 frames.
+
+### Budget outcome
+
+Frames are back near Plan 3c (207 against 119 with smooth off, about 545 against 455 with smooth
+on). The remaining cost, about +2.2 % of a core with smooth off and about +3 % with smooth on, is the
+per-update work of the new card list (rows, cards, icons and layout of every row slot). Recorded as
+a follow-up: cut that per-update work.
+
+## Manual checks: App list redesign
+
+1. Sort by each header, both directions; Name A–Z and Z–A.
+2. The meter and the header stay in step.
+3. Collapse each section; a hung app reopens its section.
+4. Icons for Store apps, for elevated processes (not elevated: the generic glyph) and for the Windows glyph.
+5. Light theme.
+6. Keyboard: Tab, arrows across sections, Left/Right on a section, the Menu key on a card.
+7. Tiles slide in a few steps with the graphs, never stuck part-way.
+8. Icons look right (straight alpha) on light and dark.
+9. A focused row control scrolled out of view does not freeze the list.
