@@ -122,11 +122,17 @@ impl Ranker {
     }
 }
 
+/// Compares names ignoring case, as `to_lowercase` on both would, without allocating two strings
+/// per comparison (a name sort makes thousands of them).
+fn caseless(a: &str, b: &str) -> Ordering {
+    a.chars().flat_map(char::to_lowercase).cmp(b.chars().flat_map(char::to_lowercase))
+}
+
 /// Hung apps first, then the sort key, then the exact name and the key, so equal rows never
 /// swap between sorts.
 pub fn compare_rows(a: &AppRow, b: &AppRow, sort: Sort) -> Ordering {
     let key = match sort.column {
-        SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortColumn::Name => caseless(&a.name, &b.name),
         SortColumn::Metric(m) => a.value(m).total_cmp(&b.value(m)),
     };
     b.hung_for_ms.is_some().cmp(&a.hung_for_ms.is_some())
@@ -151,7 +157,7 @@ pub fn compare_procs(a: &ProcRow, b: &ProcRow, sort: Sort) -> Ordering {
         }
     }
     let key = match sort.column {
-        SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortColumn::Name => caseless(&a.name, &b.name),
         SortColumn::Metric(m) => value(a, m).total_cmp(&value(b, m)),
     };
     b.hung_for_ms.is_some().cmp(&a.hung_for_ms.is_some())
@@ -406,6 +412,16 @@ mod tests {
         assert_eq!(names(&rows, &r.order(&rows, by_name, 0, false)), ["Alpha", "alpha", "beta"]);
         assert_eq!(names(&rows, &r.order(&rows, by_name, 2000, false)), ["Alpha", "alpha", "beta"]);
         assert_eq!(names(&rows, &r.order(&rows, by_name.flipped(), 2010, false)), ["beta", "alpha", "Alpha"]);
+    }
+
+    #[test]
+    fn caseless_compares_like_lowercasing_both() {
+        let names = ["Alpha", "alpha", "ALPHA2", "beta", "Émile", "émile", "Zoë", "zoe", "İstanbul", "istanbul", "", "a"];
+        for a in names {
+            for b in names {
+                assert_eq!(caseless(a, b), a.to_lowercase().cmp(&b.to_lowercase()), "{a} vs {b}");
+            }
+        }
     }
 
     #[test]
