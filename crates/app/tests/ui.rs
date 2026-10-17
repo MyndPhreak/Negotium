@@ -1773,6 +1773,29 @@ fn left_and_right_on_a_heading_close_and_open_its_section_while_the_list_has_foc
     assert_eq!(ui.get_current_id(), 2, "into the open section");
 }
 
+/// Closing a section with the mouse while the keyboard-current row is a card inside it: the
+/// current row moves to that heading rather than being lost with the card.
+#[test]
+fn closing_a_section_with_the_mouse_moves_the_current_row_out_of_it_to_its_heading() {
+    use negotium::view::{SECTION_APPS, SECTION_BACKGROUND};
+    use slint::platform::Key;
+    let (ui, controls, bridge, _) = wired_list(vec![
+        heading(SECTION_APPS, "Apps"), row_view(1, "Editor", ""),
+        heading(SECTION_BACKGROUND, "Background processes"), row_view(2, "Updater", ""), row_view(3, "Agent", ""),
+    ]);
+    assert!(tab_until(&ui, || controls.frozen()));
+    for _ in 0..4 {
+        press_key(&ui, Key::DownArrow);
+    }
+    assert_eq!(ui.get_current_id(), 3);
+    bridge.borrow_mut().toggle(SECTION_BACKGROUND); // a click on the heading
+    assert_eq!(shown_ids(&ui), [SECTION_APPS, 1, SECTION_BACKGROUND]);
+    assert_eq!((ui.get_current_row(), ui.get_current_id()), (2, SECTION_BACKGROUND), "the heading is current now");
+    // Closing another section leaves the current row where it is.
+    bridge.borrow_mut().toggle(SECTION_APPS);
+    assert_eq!(ui.get_current_id(), SECTION_BACKGROUND);
+}
+
 /// The scroll position ensure-visible sets from the real row tops, and the card as drawn there.
 #[test]
 fn page_down_reveals_the_card_it_lands_on() {

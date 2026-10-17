@@ -778,6 +778,15 @@ impl Bridge {
             if !opening {
                 self.collapsed.insert(id);
             }
+            // Closed with the mouse while the keyboard-current row is inside it: the current row
+            // moves to the heading instead of going with its card.
+            let rows = self.layout.rows();
+            if !opening
+                && let (Some(at), Some(cur)) = (rows.iter().position(|r| r.id == id), self.current_index())
+                && (at + 1..section_end(rows, at)).contains(&cur)
+            {
+                self.current = Some(id);
+            }
             let fresh = self.fresh();
             if opening {
                 self.layout.open_section(id, &self.last.rows, fresh);
