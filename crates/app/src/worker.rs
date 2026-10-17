@@ -190,7 +190,8 @@ impl Source for LiveSource {
                 let order = self.ranker.order(&rows, sort, snap.taken_at_ms, controls.frozen());
                 let top = self.top.pick(&rows, metric, snap.taken_at_ms, TOP_TILES);
                 let (expanded, all_children) = controls.child_rows();
-                let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped() };
+                let resorted = self.ranker.resorted();
+                let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped(), resorted };
                 let ids = &mut self.ids;
                 Some(read_history(&self.history, |h| build_frame(ids, &snap, &rows, &order, &top, h, &opts)))
             }

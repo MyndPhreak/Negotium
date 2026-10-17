@@ -77,11 +77,18 @@ pub struct Ranker {
     order: Vec<AppKey>,
     hung: Vec<AppKey>,
     last_sort_ms: u64,
+    resorted: bool,
 }
 
 impl Ranker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the last `order` re-sorted (rather than held the order it had): an expanded card's
+    /// processes re-sort with it, so they keep the same calm rules (the app view's ProcOrder).
+    pub fn resorted(&self) -> bool {
+        self.resorted
     }
 
     pub fn order(&mut self, rows: &[AppRow], sort: Sort, now_ms: u64, frozen: bool) -> Vec<usize> {
@@ -106,6 +113,7 @@ impl Ranker {
             kept
         };
         self.sort = Some(sort);
+        self.resorted = resort;
         self.order = result.iter().map(|&i| rows[i].key.clone()).collect();
         if resort {
             self.hung = hung;
@@ -305,6 +313,21 @@ mod tests {
         r.order(&rows, desc(Metric::Cpu), 0, false);
         let next = vec![row(2, "b", 90.0, false), row(3, "new", 99.0, false)];
         assert_eq!(names(&next, &r.order(&next, desc(Metric::Cpu), 10_000, true)), ["b", "new"]);
+    }
+
+    #[test]
+    fn reports_whether_it_resorted() {
+        let mut r = Ranker::new();
+        let rows = vec![row(1, "a", 50.0, false), row(2, "b", 10.0, false)];
+        let mut resorted = |sort: Sort, now: u64, frozen: bool| {
+            r.order(&rows, sort, now, frozen);
+            r.resorted()
+        };
+        assert!(resorted(desc(Metric::Cpu), 0, false), "the first order is a sort");
+        assert!(!resorted(desc(Metric::Cpu), 1000, false), "held between re-sorts");
+        assert!(resorted(desc(Metric::Cpu), 2000, false), "due");
+        assert!(!resorted(desc(Metric::Cpu), 9000, true), "never while frozen");
+        assert!(resorted(desc(Metric::Cpu).flipped(), 9010, true), "a sort change, even frozen");
     }
 
     #[test]

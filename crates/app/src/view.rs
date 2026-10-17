@@ -113,11 +113,13 @@ enum RowKey {
 pub type IdSeed = std::sync::Arc<std::sync::atomic::AtomicI32>;
 
 /// Stable small ids for rows across frames; ids of rows not seen in a frame are released (and
-/// never handed out again: see [`IdSeed`]).
+/// never handed out again: see [`IdSeed`]). Also what else `build_frame` keeps about rows from one
+/// frame to the next: the order of each expanded card's processes.
 #[derive(Default)]
 pub struct IdMap {
     ids: HashMap<RowKey, i32>,
     next: IdSeed,
+    procs: ProcOrder,
 }
 
 impl IdMap {
@@ -126,7 +128,7 @@ impl IdMap {
     }
     /// A map drawing its ids from `seed`, shared with the maps before and after it.
     pub fn with_seed(seed: IdSeed) -> Self {
-        Self { ids: HashMap::new(), next: seed }
+        Self { ids: HashMap::new(), next: seed, procs: ProcOrder::default() }
     }
     fn id(&mut self, key: RowKey, seen: &mut HashSet<RowKey>) -> i32 {
         seen.insert(key.clone());
@@ -245,6 +247,46 @@ pub struct FrameOptions {
     /// The list's sort and whether it is grouped under type headings (Controls).
     pub sort: Sort,
     pub grouped: bool,
+    /// The apps were re-sorted for this frame (`Ranker::resorted`): processes inside expanded
+    /// cards re-sort with them, and otherwise hold their order (`ProcOrder`).
+    pub resorted: bool,
+}
+
+/// The order of the processes inside each expanded card, kept across frames under the Ranker's
+/// calm rules: they re-sort only when the apps do (at most every RESORT_INTERVAL_MS, never while
+/// frozen, at once on a sort change) or when the card is newly shown; otherwise each keeps its
+/// place and new processes go at the end, sorted among themselves, as new apps do while frozen.
+#[derive(Default)]
+struct ProcOrder {
+    /// Each app's process order as last shown, by (pid, create_time).
+    held: HashMap<AppKey, Vec<(u32, i64)>>,
+    /// This frame's, becoming `held` at its end; apps whose processes were not built drop out, so
+    /// a card opened again sorts afresh.
+    next: HashMap<AppKey, Vec<(u32, i64)>>,
+}
+
+impl ProcOrder {
+    fn order<'a>(&mut self, app: &AppKey, procs: &'a [ProcRow], sort: Sort, resort: bool) -> Vec<&'a ProcRow> {
+        let mut sorted: Vec<&ProcRow> = procs.iter().collect();
+        sorted.sort_by(|a, b| compare_procs(a, b, sort));
+        let out = match self.held.get(app) {
+            Some(held) if !resort => {
+                let at: HashMap<(u32, i64), usize> = held.iter().enumerate().map(|(i, &k)| (k, i)).collect();
+                // Held ones in their place; new ones (sorted) after them.
+                let (mut kept, fresh): (Vec<&ProcRow>, Vec<&ProcRow>) = sorted.into_iter().partition(|p| at.contains_key(&(p.pid, p.create_time)));
+                kept.sort_by_key(|p| at[&(p.pid, p.create_time)]);
+                kept.extend(fresh);
+                kept
+            }
+            _ => sorted,
+        };
+        self.next.insert(app.clone(), out.iter().map(|p| (p.pid, p.create_time)).collect());
+        out
+    }
+
+    fn finish(&mut self) {
+        self.held = std::mem::take(&mut self.next);
+    }
 }
 
 /// `top` is the top tiles, picked by a TopPicker (negotium_model) that lasts across frames.
@@ -359,9 +401,8 @@ pub fn build_frame(
             || opts.expanded.contains(&id)
             || (r.key == AppKey::Windows && r.hung_for_ms.is_some());
         if r.processes.len() > 1 && children {
-            // Inside the card, processes follow the list's sort too.
-            let mut sorted: Vec<&ProcRow> = r.processes.iter().collect();
-            sorted.sort_by(|a, b| compare_procs(a, b, opts.sort));
+            // Inside the card, processes follow the list's sort too, as calmly as the apps.
+            let sorted = ids.procs.order(&r.key, &r.processes, opts.sort, opts.resorted);
             let last = sorted.len() - 1;
             for (n, p) in sorted.into_iter().enumerate() {
                 let pid_key = (p.pid, p.create_time);
@@ -388,6 +429,7 @@ pub fn build_frame(
         }
     }
     ids.retain(&seen);
+    ids.procs.finish();
 
     // Sized by the average that ranks them; the text is the live reading, as in the list.
     let tiles = top
@@ -487,7 +529,7 @@ mod tests {
     }
     /// Every app's child rows built (as while searching), so tests see the whole tree.
     fn opts(metric: Metric, elevated: bool) -> FrameOptions {
-        FrameOptions { metric, elevated, expanded: HashSet::new(), all_children: true, sort: Sort::default(), grouped: true }
+        FrameOptions { metric, elevated, expanded: HashSet::new(), all_children: true, sort: Sort::default(), grouped: true, resorted: true }
     }
     fn snap(cpu: Option<f32>) -> Snapshot {
         Snapshot {
@@ -661,7 +703,7 @@ mod tests {
             app(3, "Code", 5.0, vec![proc(3, 0, 5.0, "code.exe"), proc(4, 3, 0.0, "helper.exe")], None),
         ];
         let mut ids = IdMap::new();
-        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true };
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true, resorted: true };
         let f = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &collapsed);
         assert!(f.rows.iter().all(|r| r.depth == 0), "no child rows for collapsed apps");
         assert_eq!(f.targets.len(), 2, "and no child targets");
@@ -683,7 +725,7 @@ mod tests {
         let mut win = app(4, "Windows", 1.0, vec![proc(5, 4, 1.0, "StartMenuExperienceHost.exe"), hung_child], Some(9_000));
         win.key = AppKey::Windows;
         win.kind = AppKind::Windows;
-        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true };
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true, resorted: true };
         let mut ids = IdMap::new();
         let f = test_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(), &collapsed);
         let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").expect("built so it can be shown and force-closed");
@@ -905,6 +947,43 @@ mod tests {
         assert_eq!(procs(Sort::by(SortColumn::Name)), [p("a.exe", false), p("b.exe", false), p("c.exe", true)], "Name, A to Z");
         let up = Sort { descending: false, ..Sort::default() };
         assert_eq!(procs(up), [p("b.exe", false), p("a.exe", false), p("c.exe", true)], "CPU, low to high");
+    }
+
+    /// An expanded card's processes keep the Ranker's calm rules: between re-sorts each keeps its
+    /// place and a new one goes at the end; a re-sort (due, or a sort change) puts them in order.
+    #[test]
+    fn process_rows_hold_their_order_between_resorts() {
+        use negotium_model::SortColumn;
+        let chrome = |procs: Vec<ProcRow>| vec![app(1, "Chrome", 35.0, procs, None)];
+        let mut ids = IdMap::new();
+        let mut procs = |rows: &[AppRow], sort: Sort, resorted: bool| {
+            let o = FrameOptions { sort, resorted, ..opts(Metric::Cpu, true) };
+            let top = TopPicker::new().pick(rows, o.metric, 0, TOP_TILES);
+            let f = build_frame(&mut ids, &snap(Some(1.0)), rows, &[0], &top, &History::new(), &o);
+            f.rows.iter().filter(|r| r.kind == RowKind::Proc).map(|r| r.name.clone()).collect::<Vec<_>>()
+        };
+        let first = chrome(vec![proc(1, 0, 5.0, "b.exe"), proc(2, 1, 20.0, "c.exe"), proc(3, 1, 10.0, "a.exe")]);
+        assert_eq!(procs(&first, Sort::default(), true), ["c.exe", "a.exe", "b.exe"]);
+        // b now leads and d is new, but the apps were not re-sorted: the order holds, d goes last.
+        let busy = chrome(vec![proc(1, 0, 50.0, "b.exe"), proc(2, 1, 1.0, "c.exe"), proc(3, 1, 10.0, "a.exe"), proc(4, 1, 99.0, "d.exe")]);
+        assert_eq!(procs(&busy, Sort::default(), false), ["c.exe", "a.exe", "b.exe", "d.exe"], "held between re-sorts");
+        assert_eq!(procs(&busy, Sort::default(), true), ["d.exe", "b.exe", "a.exe", "c.exe"], "a re-sort orders them");
+        assert_eq!(procs(&busy, Sort::by(SortColumn::Name), true), ["a.exe", "b.exe", "c.exe", "d.exe"], "a sort change orders them at once");
+    }
+
+    #[test]
+    fn a_card_opened_again_sorts_its_processes_afresh() {
+        let rows = vec![app(1, "Chrome", 35.0, vec![proc(1, 0, 5.0, "b.exe"), proc(2, 1, 20.0, "c.exe")], None)];
+        let mut ids = IdMap::new();
+        let mut frame = |rows: &[AppRow], all_children: bool| {
+            let o = FrameOptions { all_children, resorted: false, ..opts(Metric::Cpu, true) };
+            let f = build_frame(&mut ids, &snap(Some(1.0)), rows, &[0], &[], &History::new(), &o);
+            f.rows.iter().filter(|r| r.kind == RowKind::Proc).map(|r| r.name.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(frame(&rows, true), ["c.exe", "b.exe"], "newly shown: sorted, though the apps were not re-sorted");
+        assert!(frame(&rows, false).is_empty(), "closed");
+        let swapped = vec![app(1, "Chrome", 35.0, vec![proc(1, 0, 50.0, "b.exe"), proc(2, 1, 20.0, "c.exe")], None)];
+        assert_eq!(frame(&swapped, true), ["b.exe", "c.exe"], "opened again: sorted afresh");
     }
 
     #[test]
