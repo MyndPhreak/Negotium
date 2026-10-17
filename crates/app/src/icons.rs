@@ -65,6 +65,10 @@ impl RequestIcon for IconLoader {
 
 /// The icons the UI thread has, by image path. A path is requested the first time it is seen and
 /// never again: a failure is kept as `None`, so it is not re-extracted every frame.
+///
+/// Unbounded by design: it holds one entry per distinct program image seen this run, a few hundred
+/// paths on a busy machine, each an ICON_PX-square RGBA image of about 4 KB (a megabyte or two in
+/// all). Evicting would only bring re-extraction (shell calls) and icons flickering back in.
 #[derive(Default)]
 pub struct IconCache {
     loaded: HashMap<String, Option<Image>>,
