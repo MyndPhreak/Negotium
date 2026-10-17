@@ -249,8 +249,20 @@ pub struct PerfFrame {
     /// Network pages: the newest sample's busiest apps (as many as the history keeps per moment)
     /// with upload and download apart, for the scrub on that sample; empty on other pages.
     pub net_split: Vec<(String, NetRate)>,
-    /// Network pages: whether the per-process network feed runs (it needs admin rights).
-    pub net_feed: bool,
+    /// Network pages: whether the per-process network feed runs, and if not, why.
+    pub net_feed: NetFeedState,
+}
+
+/// Whether the per-process network feed runs (network pages), and if not, why: the scrub says
+/// "needs admin rights" only when admin rights would help.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetFeedState {
+    /// Not elevated: the feed never starts.
+    #[default]
+    NeedsAdmin,
+    /// Elevated, but the trace failed to start or stopped (the collector retries it).
+    Unavailable,
+    On,
 }
 
 pub struct PerfInput<'a> {
@@ -264,6 +276,9 @@ pub struct PerfInput<'a> {
     /// The requested device as last seen (see [`LastSeen::track`]): keeps its page through a
     /// brief absence.
     pub last_seen: Option<&'a LastSeen>,
+    /// Whether the app runs elevated: tells "needs admin rights" from "unavailable" when the
+    /// per-process network feed is off.
+    pub elevated: bool,
 }
 
 /// How long a selected device's page outlives the device: a counter that misses a tick or
@@ -589,7 +604,11 @@ fn net_page(f: &mut PerfFrame, input: &PerfInput, a: &AdapterSample) {
     f.subtitle = a.description.clone().unwrap_or_else(|| name.to_string());
     f.scrub_metric = Metric::Network;
     f.scrub_series = Some(Series::NetRecv(name.into()));
-    f.net_feed = input.snap.totals.net_by_pid.is_some();
+    f.net_feed = match (input.snap.totals.net_by_pid.is_some(), input.elevated) {
+        (true, _) => NetFeedState::On,
+        (false, true) => NetFeedState::Unavailable,
+        (false, false) => NetFeedState::NeedsAdmin,
+    };
     f.net_split = top_n(input.apps, Metric::Network, TOP_PER_METRIC)
         .into_iter()
         .filter_map(|i| input.apps[i].net.map(|net| (input.apps[i].name.clone(), net)))
@@ -717,7 +736,7 @@ pub(crate) mod tests {
     pub(crate) fn build_with(s: &Snapshot, info: &SystemInfo, device: &str, range: Range) -> PerfFrame {
         let mut h = History::new();
         h.push(s.taken_at_ms, &s.totals, &[]);
-        build_perf(&PerfInput { snap: s, history: &h, info, apps: &[], device, range, last_seen: None })
+        build_perf(&PerfInput { snap: s, history: &h, info, apps: &[], device, range, last_seen: None, elevated: false })
     }
 
     fn build(s: &Snapshot, device: &str) -> PerfFrame {
@@ -967,9 +986,9 @@ pub(crate) mod tests {
         let mut h = History::new();
         h.push(s.taken_at_ms, &s.totals, &apps);
         let info = devices_info();
-        let input = |snap, device| PerfInput { snap, history: &h, info: &info, apps: &apps, device, range: Range::Minute, last_seen: None };
+        let input = |snap, device| PerfInput { snap, history: &h, info: &info, apps: &apps, device, range: Range::Minute, last_seen: None, elevated: true };
         let f = build_perf(&input(&s, "net:Intel[R] Ethernet"));
-        assert!(f.net_feed);
+        assert_eq!(f.net_feed, NetFeedState::On);
         assert_eq!(f.net_split, vec![
             ("big".to_string(), NetRate { sent_bps: 100.0, recv_bps: 900.0 }),
             ("small".to_string(), NetRate { sent_bps: 10.0, recv_bps: 20.0 }),
@@ -981,7 +1000,9 @@ pub(crate) mod tests {
         let mut feedless = s.clone();
         feedless.totals.net_by_pid = None;
         let f = build_perf(&input(&feedless, "net:Intel[R] Ethernet"));
-        assert!(!f.net_feed);
+        assert_eq!(f.net_feed, NetFeedState::Unavailable, "elevated, yet no feed: the trace failed or stopped");
+        let unelevated = PerfInput { elevated: false, ..input(&feedless, "net:Intel[R] Ethernet") };
+        assert_eq!(build_perf(&unelevated).net_feed, NetFeedState::NeedsAdmin);
     }
 
     #[test]
@@ -1060,7 +1081,7 @@ pub(crate) mod tests {
         for s in snaps {
             h.push(s.taken_at_ms, &s.totals, &[]);
             seen = LastSeen::track(seen, s, device);
-            last = Some(build_perf(&PerfInput { snap: s, history: &h, info: &info, apps: &[], device, range: Range::Minute, last_seen: seen.as_ref() }));
+            last = Some(build_perf(&PerfInput { snap: s, history: &h, info: &info, apps: &[], device, range: Range::Minute, last_seen: seen.as_ref(), elevated: false }));
         }
         last.expect("at least one snapshot")
     }
@@ -1139,7 +1160,7 @@ pub(crate) mod tests {
         gone.totals.memory = None;
         h.push(2_000, &gone.totals, &[]);
         let info = info();
-        let f = build_perf(&PerfInput { snap: &gone, history: &h, info: &info, apps: &[], device: "memory", range: Range::Minute, last_seen: None });
+        let f = build_perf(&PerfInput { snap: &gone, history: &h, info: &info, apps: &[], device: "memory", range: Range::Minute, last_seen: None, elevated: false });
         assert_eq!((f.graphs[0].line.as_str(), f.graphs[0].area.as_str()), (EMPTY_PATH, EMPTY_PATH));
         assert_eq!(f.devices[1].spark, EMPTY_PATH);
         assert_eq!(f.devices[1].value, "—");
@@ -1167,7 +1188,7 @@ pub(crate) mod tests {
         }
         let s = snapshot(60_000);
         let info = info();
-        let input = PerfInput { snap: &s, history: &h, info: &info, apps: &[], device: "cpu", range: Range::Minute, last_seen: None };
+        let input = PerfInput { snap: &s, history: &h, info: &info, apps: &[], device: "cpu", range: Range::Minute, last_seen: None, elevated: false };
         assert_eq!(input.max_over(&Series::GpuUtil("k".into()), 30_000), 3.0);
         assert_eq!(input.max_over(&Series::GpuUtil("none".into()), 30_000), 0.0);
     }
@@ -1189,7 +1210,7 @@ pub(crate) mod tests {
         let s = snapshot(60_500);
         assert!(!h.push(s.taken_at_ms, &s.totals, &[]), "too soon after the last sample: not kept");
         let info = info();
-        let f = build_perf(&PerfInput { snap: &s, history: &h, info: &info, apps: &[], device: "cpu", range: Range::Minute, last_seen: None });
+        let f = build_perf(&PerfInput { snap: &s, history: &h, info: &info, apps: &[], device: "cpu", range: Range::Minute, last_seen: None, elevated: false });
         let main = path_xs(&f.graphs[0].line);
         assert_eq!(main.last(), Some(&1000.0), "the line ends on the right edge: {}", f.graphs[0].line);
         assert!(main[0] <= 0.0, "and starts on the left edge: {}", &f.graphs[0].line[..30]);

@@ -1219,7 +1219,7 @@ fn the_network_scrub_card_notes_all_adapters() {
     bridge.borrow_mut().set_history(scrub_history());
     let mut net = scrub_frame(60_000, TWO_PM);
     let p = net.perf.as_mut().unwrap();
-    (p.scrub_metric, p.net_feed) = (negotium_model::Metric::Network, true);
+    (p.scrub_metric, p.net_feed) = (negotium_model::Metric::Network, negotium::perf::NetFeedState::On);
     bridge.borrow_mut().apply(&ui, net);
     bridge.borrow_mut().scrub(&ui, 0.5);
     assert_eq!(ui.get_scrub_note(), "All adapters");
