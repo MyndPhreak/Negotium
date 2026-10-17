@@ -417,7 +417,8 @@ pub fn build_frame(
                 out_rows.push(RowView {
                     id: cid, parent: id, depth: 1, name: p.name.clone(), search_text: p.name.to_lowercase(), count: String::new(),
                     cpu: format::pct1(p.cpu_pct), mem: format::bytes(p.private_bytes as f64), disk: format::byte_rate(p.disk_bps),
-                    gpu: p.gpu_pct.map(format::pct1).unwrap_or_else(|| "—".into()), net: "—".into(),
+                    gpu: p.gpu_pct.map(format::pct1).unwrap_or_else(|| "—".into()),
+                    net: p.net.map(|n| format::bit_rate(n.total())).unwrap_or_else(|| "—".into()),
                     // Its own hung text, so Force close shows on (and targets) this process even
                     // when its app row is the never-actionable Windows group.
                     hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true,
@@ -522,15 +523,15 @@ mod tests {
         build_frame(ids, snap, rows, order, &top, history, opts)
     }
     use negotium_model::{AppKind, ProcRow};
-    use negotium_snapshot::{MemoryTotals, SystemTotals};
+    use negotium_snapshot::{MemoryTotals, NetRate, SystemTotals};
 
     fn proc(pid: u32, parent: u32, cpu: f32, name: &str) -> ProcRow {
-        ProcRow { pid, create_time: pid as i64, parent_pid: parent, name: name.into(), cpu_pct: cpu, private_bytes: 1024, disk_bps: 0.0, gpu_pct: None, hung_for_ms: None }
+        ProcRow { pid, create_time: pid as i64, parent_pid: parent, name: name.into(), cpu_pct: cpu, private_bytes: 1024, disk_bps: 0.0, gpu_pct: None, net: None, hung_for_ms: None }
     }
     fn app(pid: u32, name: &str, cpu: f32, procs: Vec<ProcRow>, hung: Option<u64>) -> AppRow {
         AppRow {
             key: AppKey::Window { pid, create_time: pid as i64 }, name: name.into(), kind: AppKind::App,
-            cpu_pct: cpu, private_bytes: procs.len() as u64 * 1024, disk_bps: 0.0, gpu_pct: None, net_bps: None,
+            cpu_pct: cpu, private_bytes: procs.len() as u64 * 1024, disk_bps: 0.0, gpu_pct: None, net_bps: None, net: None,
             hung_for_ms: hung, processes: procs,
         }
     }
@@ -885,6 +886,24 @@ mod tests {
             (Section, "Apps"), (Section, "Background processes"), (App, "Updater"), (Section, "Windows processes"), (App, "Windows"),
         ]);
         assert_eq!(shown[0].count, "(2)", "the heading still counts its apps");
+    }
+
+    #[test]
+    fn network_cells_show_the_rate_or_a_dash() {
+        let mut with = proc(2, 1, 0.0, "a2.exe");
+        with.net = Some(NetRate { sent_bps: 1000.0, recv_bps: 3000.0 });
+        let mut idle = proc(3, 1, 0.0, "a3.exe");
+        idle.net = Some(NetRate::default());
+        let mut a = app(1, "A", 1.0, vec![with, idle, proc(4, 1, 0.0, "a4.exe")], None);
+        a.net_bps = Some(4000.0);
+        let b = app(5, "B", 1.0, vec![proc(5, 0, 0.0, "b.exe")], None);
+        let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &[a, b], &[0, 1], &History::new(), &opts(Metric::Cpu, true));
+        let net = |name: &str| f.rows.iter().find(|r| r.name == name).unwrap().net.to_string();
+        assert_eq!(net("A"), format::bit_rate(4000.0));
+        assert_eq!(net("a2.exe"), format::bit_rate(4000.0));
+        assert_eq!(net("a3.exe"), "0 b/s");
+        assert_eq!(net("a4.exe"), "—", "no feed for that process: a dash");
+        assert_eq!(net("B"), "—");
     }
 
     #[test]

@@ -1176,7 +1176,7 @@ fn scrub_history() -> SharedHistory {
     for s in 1..=61u64 {
         let chrome = AppRow {
             key: AppKey::Background { pid: 1, create_time: 0 }, name: "chrome".into(), kind: AppKind::Background,
-            processes: vec![], cpu_pct: s as f32, private_bytes: 0, disk_bps: 0.0, gpu_pct: None, net_bps: None, hung_for_ms: None,
+            processes: vec![], cpu_pct: s as f32, private_bytes: 0, disk_bps: 0.0, gpu_pct: None, net_bps: None, net: None, hung_for_ms: None,
         };
         history.lock().unwrap().push(s * 1_000, &Default::default(), &[chrome]);
     }

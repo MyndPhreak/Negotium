@@ -545,7 +545,7 @@ mod tests {
         AppRow {
             key: AppKey::Background { pid, create_time: 0 }, name: name.into(), kind: AppKind::Background,
             processes: vec![], cpu_pct: v, private_bytes: (v * 1e6) as u64, disk_bps: v as f64 * 1e3,
-            gpu_pct: Some(v), net_bps: Some(v as f64), hung_for_ms: None,
+            gpu_pct: Some(v), net_bps: Some(v as f64), net: None, hung_for_ms: None,
         }
     }
     fn totals(cpu: f32, cores: usize) -> SystemTotals {

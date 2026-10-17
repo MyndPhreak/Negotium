@@ -120,6 +120,21 @@ pub struct GpuSample {
     pub temp_c: Option<f32>,
 }
 
+/// One process's network traffic. Same unit as `SystemTotals::net_bps` (bytes per second, despite
+/// the name; `format::bit_rate` turns it into bits), so a meter and a row compare directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetRate {
+    pub sent_bps: f64,
+    pub recv_bps: f64,
+}
+
+impl NetRate {
+    /// Upload plus download: what the list, tiles, sorting and history use.
+    pub fn total(&self) -> f64 {
+        self.sent_bps + self.recv_bps
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SystemTotals {
     pub logical_cpus: u32,
@@ -146,6 +161,10 @@ pub struct SystemTotals {
     pub net_bps: Option<f64>,
     #[serde(default)]
     pub adapters: Option<Vec<AdapterSample>>,
+    /// Traffic of each process with any, across all adapters. `None` = no per-process feed (not
+    /// elevated, or the trace session failed); a running feed omits idle processes.
+    #[serde(default)]
+    pub net_by_pid: Option<BTreeMap<u32, NetRate>>,
 }
 
 impl SystemTotals {
@@ -189,6 +208,20 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snap);
+    }
+
+    #[test]
+    fn per_process_network_survives_json_and_old_json_still_loads() {
+        let mut net = BTreeMap::new();
+        net.insert(42, NetRate { sent_bps: 1000.0, recv_bps: 3000.0 });
+        let t = SystemTotals { logical_cpus: 2, net_by_pid: Some(net), ..Default::default() };
+        let back: SystemTotals = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.net_by_pid.unwrap()[&42].total(), 4000.0);
+        let mut old = serde_json::to_value(SystemTotals::default()).unwrap();
+        old.as_object_mut().unwrap().remove("net_by_pid");
+        let loaded: SystemTotals = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.net_by_pid, None);
     }
 
     #[test]

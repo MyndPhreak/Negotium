@@ -11,7 +11,7 @@ pub use ranking::{Metric, Pick, RESORT_INTERVAL_MS, Ranker, Sort, SortColumn, TO
 pub use rates::{ProcRates, RateTracker};
 pub use tree::descendants_deepest_first;
 
-use negotium_snapshot::Snapshot;
+use negotium_snapshot::{NetRate, Snapshot};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -24,6 +24,8 @@ pub struct ProcRow {
     pub private_bytes: u64,
     pub disk_bps: f64,
     pub gpu_pct: Option<f32>,
+    /// `None` without a per-process network feed.
+    pub net: Option<NetRate>,
     /// How long this process has had a hung window; `None` while it responds.
     pub hung_for_ms: Option<u64>,
 }
@@ -38,8 +40,11 @@ pub struct AppRow {
     pub private_bytes: u64,
     pub disk_bps: f64,
     pub gpu_pct: Option<f32>,
-    /// Per-app network needs the SRUM source (Plan 4); `None` until then.
+    /// Upload plus download of the app's processes; `None` without a per-process network feed,
+    /// `Some(0.0)` for an app with no traffic while the feed runs.
     pub net_bps: Option<f64>,
+    /// The same, split into upload and download (for the hover list).
+    pub net: Option<NetRate>,
     pub hung_for_ms: Option<u64>,
 }
 
@@ -90,6 +95,7 @@ impl Model {
         }
         self.sticky.retain(|k, _| alive.contains(k));
         let gpu = snap.totals.gpu_pct_by_pid.as_ref();
+        let net = snap.totals.net_by_pid.as_ref();
         let hung = self.hung.update(&snap.windows, snap.taken_at_ms);
 
         let mut rows: BTreeMap<AppKey, AppRow> = BTreeMap::new();
@@ -97,6 +103,7 @@ impl Model {
             let Some(key) = groups.get(&(p.pid, p.create_time)) else { continue };
             let r = rates.get(&(p.pid, p.create_time)).copied().unwrap_or_default();
             let proc_gpu = gpu.map(|m| m.get(&p.pid).copied().unwrap_or(0.0));
+            let proc_net = net.map(|m| m.get(&p.pid).copied().unwrap_or_default());
             let row = rows.entry(key.clone()).or_insert_with(|| AppRow {
                 key: key.clone(),
                 name: display_name(key, &snap.processes),
@@ -106,7 +113,8 @@ impl Model {
                 private_bytes: 0,
                 disk_bps: 0.0,
                 gpu_pct: gpu.map(|_| 0.0),
-                net_bps: None,
+                net_bps: net.map(|_| 0.0),
+                net: net.map(|_| NetRate::default()),
                 hung_for_ms: None,
             });
             row.cpu_pct = (row.cpu_pct + r.cpu_pct).min(100.0);
@@ -114,6 +122,11 @@ impl Model {
             row.disk_bps += r.disk_bps;
             if let (Some(total), Some(g)) = (row.gpu_pct.as_mut(), proc_gpu) {
                 *total = (*total + g).min(100.0);
+            }
+            if let (Some(total), Some(n)) = (row.net.as_mut(), proc_net) {
+                total.sent_bps += n.sent_bps;
+                total.recv_bps += n.recv_bps;
+                row.net_bps = Some(total.total());
             }
             row.processes.push(ProcRow {
                 pid: p.pid,
@@ -124,6 +137,7 @@ impl Model {
                 private_bytes: p.private_working_set,
                 disk_bps: r.disk_bps,
                 gpu_pct: proc_gpu,
+                net: proc_net,
                 hung_for_ms: hung.get(&p.pid).copied(),
             });
             if let Some(&ms) = hung.get(&p.pid) {
@@ -137,7 +151,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use negotium_snapshot::{ProcessSample, Snapshot, SystemTotals, WindowSample};
+    use negotium_snapshot::{NetRate, ProcessSample, Snapshot, SystemTotals, WindowSample};
     use std::collections::BTreeMap;
 
     fn p(pid: u32, parent: u32, cpu: u64, mem: u64) -> ProcessSample {
@@ -171,6 +185,49 @@ mod tests {
         assert_eq!(row.private_bytes, 150);
         assert_eq!(row.gpu_pct, Some(80.0));
         assert_eq!(row.net_bps, None);
+    }
+
+    fn net_snap(net: Option<BTreeMap<u32, NetRate>>) -> Snapshot {
+        Snapshot {
+            taken_at_ms: 1000,
+            processes: vec![p(2, 1, 0, 100), p(3, 2, 0, 50), p(9, 1, 0, 10)],
+            windows: vec![WindowSample { pid: 2, hung: false, title: "App".into() }],
+            totals: SystemTotals { logical_cpus: 1, net_by_pid: net, ..Default::default() },
+            source_errors: vec![],
+        }
+    }
+
+    #[test]
+    fn apps_sum_their_processes_network() {
+        let mut m = Model::with_system_root(r"C:\Windows");
+        let net = BTreeMap::from([
+            (2, NetRate { sent_bps: 1000.0, recv_bps: 0.0 }),
+            (3, NetRate { sent_bps: 0.0, recv_bps: 3000.0 }),
+        ]);
+        let rows = m.update(&net_snap(Some(net)));
+        let app = rows.iter().find(|r| r.processes.iter().any(|p| p.pid == 2)).unwrap();
+        assert_eq!(app.processes.len(), 2);
+        assert_eq!(app.net_bps, Some(4000.0));
+        assert_eq!(app.net, Some(NetRate { sent_bps: 1000.0, recv_bps: 3000.0 }));
+        let p3 = app.processes.iter().find(|p| p.pid == 3).unwrap();
+        assert_eq!(p3.net, Some(NetRate { sent_bps: 0.0, recv_bps: 3000.0 }));
+    }
+
+    #[test]
+    fn no_feed_means_dash_not_zero() {
+        let mut m = Model::with_system_root(r"C:\Windows");
+        let rows = m.update(&net_snap(None));
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|r| r.net_bps.is_none() && r.net.is_none()));
+        assert!(rows.iter().flat_map(|r| &r.processes).all(|p| p.net.is_none()));
+    }
+
+    #[test]
+    fn an_app_without_traffic_shows_zero_when_the_feed_runs() {
+        let mut m = Model::with_system_root(r"C:\Windows");
+        let rows = m.update(&net_snap(Some(BTreeMap::new())));
+        assert!(rows.iter().all(|r| r.net_bps == Some(0.0) && r.net == Some(NetRate::default())));
+        assert!(rows.iter().flat_map(|r| &r.processes).all(|p| p.net == Some(NetRate::default())));
     }
 
     #[test]

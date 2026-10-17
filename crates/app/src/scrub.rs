@@ -78,7 +78,7 @@ mod tests {
     fn app(name: &str, cpu: f32, bytes: u64) -> AppRow {
         AppRow {
             key: AppKey::Background { pid: name.len() as u32, create_time: 0 }, name: name.into(), kind: AppKind::Background,
-            processes: vec![], cpu_pct: cpu, private_bytes: bytes, disk_bps: 0.0, gpu_pct: None, net_bps: None, hung_for_ms: None,
+            processes: vec![], cpu_pct: cpu, private_bytes: bytes, disk_bps: 0.0, gpu_pct: None, net_bps: None, net: None, hung_for_ms: None,
         }
     }
 

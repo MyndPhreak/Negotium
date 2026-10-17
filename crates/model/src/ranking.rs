@@ -266,7 +266,7 @@ mod tests {
     fn row(pid: u32, name: &str, cpu: f32, hung: bool) -> AppRow {
         AppRow {
             key: AppKey::Background { pid, create_time: 0 }, name: name.into(), kind: AppKind::Background,
-            processes: vec![], cpu_pct: cpu, private_bytes: 0, disk_bps: 0.0, gpu_pct: None, net_bps: None,
+            processes: vec![], cpu_pct: cpu, private_bytes: 0, disk_bps: 0.0, gpu_pct: None, net_bps: None, net: None,
             hung_for_ms: hung.then_some(5000),
         }
     }
@@ -455,7 +455,7 @@ mod tests {
     fn compare_procs_leads_with_hung_then_sorts_and_ties_by_name_then_pid() {
         let p = |pid, name: &str, cpu, hung: bool| ProcRow {
             pid, parent_pid: 0, create_time: 0, name: name.into(), cpu_pct: cpu, private_bytes: 0,
-            disk_bps: 0.0, gpu_pct: None, hung_for_ms: hung.then_some(1),
+            disk_bps: 0.0, gpu_pct: None, net: None, hung_for_ms: hung.then_some(1),
         };
         let mut v = [p(4, "x", 1.0, false), p(3, "x", 1.0, false), p(2, "y", 9.0, false), p(1, "z", 0.0, true)];
         v.sort_by(|a, b| compare_procs(a, b, desc(Metric::Cpu)));
