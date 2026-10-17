@@ -4,7 +4,7 @@ use crate::controls::{Controls, Page};
 use crate::nav::{NavKey, NavOutcome, navigate};
 use crate::perf::{GraphView, PerfFrame};
 use crate::smooth::{self, Scroll};
-use crate::view::{Frame, RowView, Target, visible_rows};
+use crate::view::{Frame, RowKind, RowView, Target, visible_rows};
 use crate::worker::SharedHistory;
 use crate::{DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
 use negotium_actions::startup::StartupEntry;
@@ -178,10 +178,11 @@ impl RowLayout {
     }
 }
 
-/// Keeps `prev`'s ids at their indices, refreshing each from `all`; ids missing from `all` become
-/// exited placeholders. New children of admitted apps go at the end of their app's block.
+/// Keeps `prev`'s ids at their indices, refreshing each from `fresh` (a heading's count is worked
+/// out there), else from `all`; ids missing from both become exited placeholders. New children of
+/// admitted apps go at the end of their app's block.
 fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i32>) -> Vec<RowView> {
-    let live: HashMap<i32, &RowView> = all.iter().map(|r| (r.id, r)).collect();
+    let live: HashMap<i32, &RowView> = all.iter().chain(fresh).map(|r| (r.id, r)).collect();
     let prev_ids: HashSet<i32> = prev.iter().map(|r| r.id).collect();
     let mut out = Vec::with_capacity(prev.len());
     for (i, p) in prev.iter().enumerate() {
@@ -191,6 +192,7 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
                 id: p.id,
                 parent: p.parent,
                 depth: p.depth,
+                kind: p.kind,
                 name: p.name.clone(),
                 search_text: p.search_text.clone(),
                 exited: true,
@@ -212,7 +214,7 @@ fn hold(prev: &[RowView], all: &[RowView], fresh: &[RowView], admit: &HashSet<i3
 /// stands until that hang clears. Returns true if `expanded` changed.
 fn auto_expand_hung_groups(rows: &[RowView], expanded: &mut HashSet<i32>, auto: &mut HashSet<i32>) -> bool {
     let mut changed = false;
-    for r in rows.iter().filter(|r| r.depth == 0 && !r.actionable) {
+    for r in rows.iter().filter(|r| r.kind == RowKind::App && r.depth == 0 && !r.actionable) {
         if r.hung.is_empty() {
             auto.remove(&r.id);
         } else if auto.insert(r.id) {
@@ -584,14 +586,17 @@ impl Bridge {
     }
 
     fn fresh(&self) -> Vec<RowView> {
-        visible_rows(&self.last.rows, &self.expanded, &self.search)
+        // Sections can't be collapsed yet: every one is open.
+        visible_rows(&self.last.rows, &self.expanded, &HashSet::new(), &self.search)
     }
 
     fn push_rows(&self) {
+        // The list still draws one bar: the selected meter's.
+        let metric = self.controls.metric() as usize;
         sync_model(&*self.rows, self.layout.rows().iter().map(|r| RowData {
             id: r.id, depth: r.depth, name: r.name.clone().into(), count: r.count.clone().into(), cpu: r.cpu.clone().into(),
             mem: r.mem.clone().into(), disk: r.disk.clone().into(), gpu: r.gpu.clone().into(), net: r.net.clone().into(),
-            bar: r.bar, hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.expanded.contains(&r.id),
+            bar: r.bars[metric], hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.expanded.contains(&r.id),
             actionable: r.actionable, exited: r.exited,
         }).collect());
         self.sync_current();
@@ -655,7 +660,7 @@ impl Bridge {
     fn key_focus_holds(&self) -> bool {
         let Some(id) = self.key_focus else { return false };
         self.layout.rows().iter().any(|r| {
-            r.id == id && r.actionable && !r.exited && (!r.hung.is_empty() || (self.hover && r.depth == 0))
+            r.id == id && r.actionable && !r.exited && (!r.hung.is_empty() || (self.hover && r.kind == RowKind::App && r.depth == 0))
         })
     }
 

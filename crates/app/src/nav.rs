@@ -1,6 +1,6 @@
 //! Keyboard navigation through the app list (ruling R4): one list-level focus stop and a
 //! "current row" moved by the keys. Pure: it decides; the bridge applies.
-use crate::view::RowView;
+use crate::view::{RowKind, RowView};
 use std::collections::HashSet;
 
 pub const PAGE_ROWS: usize = 10;
@@ -55,7 +55,7 @@ impl NavKey {
 pub enum NavOutcome {
     /// Make this row current.
     Move(i32),
-    /// Expand or collapse this app (and make it current).
+    /// Expand or collapse this app, or open or close this section (and make it current).
     Toggle(i32),
     /// Act on this row, exactly as its button or menu would.
     Action(&'static str, i32),
@@ -78,6 +78,14 @@ pub fn navigate(rows: &[RowView], expanded: &HashSet<i32>, current: Option<i32>,
         NavKey::End => to(last),
         NavKey::PageUp => to(i.saturating_sub(PAGE_ROWS)),
         NavKey::PageDown => to((i + PAGE_ROWS).min(last)),
+        // A heading toggles its section and is never a target. It is open exactly when a card
+        // follows it (visible_rows drops a heading with nothing to show; a collapsed one shows
+        // alone).
+        _ if r.kind == RowKind::Section => match (key, rows.get(i + 1).filter(|n| n.kind != RowKind::Section)) {
+            (NavKey::Left, Some(_)) | (NavKey::Right, None) | (NavKey::Enter, _) => NavOutcome::Toggle(r.id),
+            (NavKey::Right, Some(card)) => NavOutcome::Move(card.id),
+            _ => NavOutcome::Nothing,
+        },
         NavKey::Right if r.expandable && !expanded.contains(&r.id) => NavOutcome::Toggle(r.id),
         NavKey::Right if r.expandable => match rows.get(i + 1) {
             Some(c) if c.parent == r.id => NavOutcome::Move(c.id),
@@ -155,6 +163,45 @@ mod tests {
         assert_eq!(go(2, NavKey::Delete, &[1]), NavOutcome::Action("end-task", 2), "a single process");
         assert_eq!(go(5, NavKey::Delete, &[]), NavOutcome::Nothing, "an exited row held in place is inert");
         assert_eq!(go(6, NavKey::Delete, &[]), NavOutcome::Nothing, "the Windows group is never a target");
+    }
+
+    /// Section Apps (open: A, B), Section Background (closed), Section Windows (open: W).
+    fn sectioned() -> Vec<RowView> {
+        use crate::view::{RowKind, SECTION_APPS, SECTION_BACKGROUND, SECTION_WINDOWS};
+        let section = |id: i32| RowView { id, parent: -1, depth: 0, kind: RowKind::Section, expandable: true, ..Default::default() };
+        vec![
+            section(SECTION_APPS), row(1, -1, true, true, false), row(2, -1, false, true, false),
+            section(SECTION_BACKGROUND),
+            section(SECTION_WINDOWS), row(6, -1, true, false, false),
+        ]
+    }
+
+    #[test]
+    fn left_and_right_close_and_open_a_section() {
+        use crate::view::{SECTION_APPS, SECTION_BACKGROUND};
+        let none = HashSet::new();
+        let go = |current: i32, key: NavKey| navigate(&sectioned(), &none, Some(current), key);
+        assert_eq!(go(SECTION_APPS, NavKey::Left), NavOutcome::Toggle(SECTION_APPS), "an open section closes");
+        assert_eq!(go(SECTION_APPS, NavKey::Right), NavOutcome::Move(1), "into an open section");
+        assert_eq!(go(SECTION_BACKGROUND, NavKey::Right), NavOutcome::Toggle(SECTION_BACKGROUND), "a closed section opens");
+        assert_eq!(go(SECTION_BACKGROUND, NavKey::Left), NavOutcome::Nothing);
+        assert_eq!(go(SECTION_APPS, NavKey::Enter), NavOutcome::Toggle(SECTION_APPS));
+        assert_eq!(go(SECTION_BACKGROUND, NavKey::Enter), NavOutcome::Toggle(SECTION_BACKGROUND));
+        assert_eq!(go(2, NavKey::Down), NavOutcome::Move(SECTION_BACKGROUND), "a heading can be current");
+        assert_eq!(go(1, NavKey::Right), NavOutcome::Toggle(1), "apps under a heading expand as before");
+    }
+
+    #[test]
+    fn delete_on_a_section_does_nothing() {
+        use crate::view::{SECTION_APPS, SECTION_BACKGROUND};
+        let none = HashSet::new();
+        for id in [SECTION_APPS, SECTION_BACKGROUND] {
+            assert_eq!(navigate(&sectioned(), &none, Some(id), NavKey::Delete), NavOutcome::Nothing);
+        }
+        // Even a heading claiming to be actionable is never a target.
+        let mut rows = sectioned();
+        rows[0].actionable = true;
+        assert_eq!(navigate(&rows, &none, Some(SECTION_APPS), NavKey::Delete), NavOutcome::Nothing);
     }
 
     #[test]

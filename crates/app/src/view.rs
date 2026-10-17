@@ -3,7 +3,7 @@
 use crate::format;
 use crate::graph;
 use negotium_history::{History, Series};
-use negotium_model::{AppKey, AppRow, Metric, Pick, Sort};
+use negotium_model::{AppKey, AppKind, AppRow, Metric, Pick, ProcRow, Sort, compare_procs};
 use negotium_snapshot::Snapshot;
 use std::collections::{HashMap, HashSet};
 
@@ -16,15 +16,58 @@ pub struct MeterView { pub label: &'static str, pub value: String, pub sub: Stri
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TileView { pub id: i32, pub name: String, pub value: String, pub weight: f32, pub hung: bool }
 
+/// What a list row draws as: a section heading, an app's card, or a process row inside an
+/// expanded card.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowKind {
+    Section,
+    #[default]
+    App,
+    Proc,
+}
+
+/// Section heading ids: fixed, at the top of the range, where `IdSeed` (counting up from 1) never
+/// reaches, so the UI can hold a heading's id (current row, collapsed set) like any other.
+pub const SECTION_APPS: i32 = i32::MAX - 2;
+pub const SECTION_BACKGROUND: i32 = i32::MAX - 1;
+pub const SECTION_WINDOWS: i32 = i32::MAX;
+
+/// Row heights by kind, the one source of truth: applist.slint mirrors them (a test keeps them
+/// equal), and scrolling to a row sums them. An app's 50 px is its 46 px card and a 4 px gap.
+pub const ROW_H_SECTION: f32 = 32.0;
+pub const ROW_H_APP: f32 = 50.0;
+pub const ROW_H_PROC: f32 = 30.0;
+
+pub fn row_height(kind: RowKind) -> f32 {
+    match kind {
+        RowKind::Section => ROW_H_SECTION,
+        RowKind::App => ROW_H_APP,
+        RowKind::Proc => ROW_H_PROC,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RowView {
-    pub id: i32, pub parent: i32, pub depth: i32, pub name: String, pub search_text: String, pub count: String,
+    pub id: i32, pub parent: i32, pub depth: i32, pub name: String, pub search_text: String,
+    /// "(N)": an app's process count (its accessible label), a section's apps on show.
+    pub count: String,
     pub cpu: String, pub mem: String, pub disk: String, pub gpu: String, pub net: String,
-    pub bar: f32, pub hung: String, pub expandable: bool,
-    /// False for the "Windows" group row: it is never a target of any action.
+    pub hung: String, pub expandable: bool,
+    /// False for the "Windows" group row and section headings: never a target of any action.
     pub actionable: bool,
     /// Gone since the list froze: held in place (so no other row shifts under the pointer), inert.
     pub exited: bool,
+    pub kind: RowKind,
+    /// An app card's second line: its process count, or its hang.
+    pub sub: String,
+    /// Each column's bar, 0..=1, indexed by `Metric`; all zero on process rows and headings.
+    pub bars: [f32; 5],
+    /// The program image the row's icon comes from; empty when unknown.
+    pub icon: String,
+    /// The Windows group: draws the Windows glyph instead of a program icon.
+    pub windows: bool,
+    /// The last process row of an expanded card: the card closes below it.
+    pub last_in_card: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -214,12 +257,59 @@ pub fn build_frame(
         .iter()
         .filter_map(|p| p.image_path.as_deref().map(|i| ((p.pid, p.create_time), i)))
         .collect();
-    let max = rows.iter().map(|r| r.value(metric)).fold(0.0f64, f64::max);
-    let frac = |v: f64| if max > 0.0 && v.is_finite() { (v / max).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    // Bars: CPU and GPU of the whole machine, Memory of physical memory, Disk and Network of the
+    // busiest app this frame (they have no meaningful machine total).
+    let mem_total = snap.totals.memory.as_ref().map_or(0.0, |m| m.total as f64);
+    let busiest = |m: Metric| rows.iter().map(|r| r.value(m)).filter(|v| v.is_finite()).fold(0.0f64, f64::max);
+    let (disk_max, net_max) = (busiest(Metric::Disk), busiest(Metric::Network));
+    let frac = |v: f64, of: f64| if of > 0.0 && v.is_finite() { (v / of).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    let bars = |r: &AppRow| {
+        let mut b = [0.0; 5];
+        b[Metric::Cpu as usize] = frac(r.cpu_pct as f64, 100.0);
+        b[Metric::Memory as usize] = frac(r.private_bytes as f64, mem_total);
+        b[Metric::Disk as usize] = frac(r.disk_bps, disk_max);
+        b[Metric::Gpu as usize] = frac(r.value(Metric::Gpu), 100.0);
+        b[Metric::Network as usize] = frac(r.value(Metric::Network), net_max);
+        b
+    };
+
+    // Grouped: each type's heading, then its apps in the ranker's order. Empty sections are left
+    // out here; `visible_rows` drops the ones a search or a collapse empties.
+    enum Entry {
+        Section(i32, &'static str),
+        App(usize),
+    }
+    let sequence: Vec<Entry> = if opts.grouped {
+        let mut seq = Vec::with_capacity(order.len() + 3);
+        for (kind, id, name) in [
+            (AppKind::App, SECTION_APPS, "Apps"),
+            (AppKind::Background, SECTION_BACKGROUND, "Background processes"),
+            (AppKind::Windows, SECTION_WINDOWS, "Windows processes"),
+        ] {
+            let at = seq.len();
+            seq.extend(order.iter().copied().filter(|&i| rows[i].key.kind() == kind).map(Entry::App));
+            if seq.len() > at {
+                seq.insert(at, Entry::Section(id, name));
+            }
+        }
+        seq
+    } else {
+        order.iter().copied().map(Entry::App).collect()
+    };
 
     let mut out_rows = Vec::new();
     let mut targets = HashMap::new();
-    for &i in order {
+    for entry in sequence {
+        let i = match entry {
+            Entry::App(i) => i,
+            Entry::Section(id, name) => {
+                out_rows.push(RowView {
+                    id, parent: -1, depth: 0, name: name.into(), kind: RowKind::Section, expandable: true, actionable: false,
+                    ..Default::default()
+                });
+                continue;
+            }
+        };
         let r = &rows[i];
         let id = ids.id(RowKey::App(r.key.clone()), &mut seen);
         let root = match r.key {
@@ -228,12 +318,13 @@ pub fn build_frame(
         };
         let procs: Vec<(u32, i64)> = r.processes.iter().map(|p| (p.pid, p.create_time)).collect();
         let hung_pid = r.processes.iter().find(|p| hung_pids.contains(&p.pid)).map(|p| (p.pid, p.create_time));
+        let image_path = root.or(procs.first().copied()).and_then(|k| image_of.get(&k).map(|s| s.to_string()));
         targets.insert(id, Target {
             name: r.name.clone(),
             root,
             procs: procs.clone(),
             hung_pid,
-            image_path: root.or(procs.first().copied()).and_then(|k| image_of.get(&k).map(|s| s.to_string())),
+            image_path: image_path.clone(),
             critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
             group: r.key == AppKey::Windows,
         });
@@ -241,16 +332,23 @@ pub fn build_frame(
             .chain(r.processes.iter().map(|p| p.name.to_lowercase()))
             .collect::<Vec<_>>()
             .join(" ");
+        let hung = r.hung_for_ms.map(format::hung).unwrap_or_default();
+        let sub = match r.processes.len() {
+            _ if !hung.is_empty() => hung.clone(),
+            1 => "1 process".into(),
+            n => format!("{n} processes"),
+        };
         out_rows.push(RowView {
             id, parent: -1, depth: 0, name: r.name.clone(), search_text,
             count: if r.processes.len() > 1 { format!("({})", r.processes.len()) } else { String::new() },
             cpu: format::pct1(r.cpu_pct), mem: format::bytes(r.private_bytes as f64), disk: format::byte_rate(r.disk_bps),
             gpu: r.gpu_pct.map(format::pct1).unwrap_or_else(|| "—".into()),
             net: r.net_bps.map(format::bit_rate).unwrap_or_else(|| "—".into()),
-            bar: frac(r.value(metric)), hung: r.hung_for_ms.map(format::hung).unwrap_or_default(),
-            expandable: r.processes.len() > 1,
+            hung, expandable: r.processes.len() > 1,
             actionable: r.key != AppKey::Windows,
             exited: false,
+            kind: RowKind::App, sub, bars: bars(r), icon: image_path.unwrap_or_default(),
+            windows: r.key == AppKey::Windows, last_in_card: false,
         });
         // Child rows only where the UI can show them: expanded apps, everything while searching, and
         // a Windows group with a hung member (the group row itself is never actionable, so the hung
@@ -259,7 +357,11 @@ pub fn build_frame(
             || opts.expanded.contains(&id)
             || (r.key == AppKey::Windows && r.hung_for_ms.is_some());
         if r.processes.len() > 1 && children {
-            for p in &r.processes {
+            // Inside the card, processes follow the list's sort too.
+            let mut sorted: Vec<&ProcRow> = r.processes.iter().collect();
+            sorted.sort_by(|a, b| compare_procs(a, b, opts.sort));
+            let last = sorted.len() - 1;
+            for (n, p) in sorted.into_iter().enumerate() {
                 let pid_key = (p.pid, p.create_time);
                 let cid = ids.id(RowKey::Proc(p.pid, p.create_time), &mut seen);
                 targets.insert(cid, Target {
@@ -275,8 +377,10 @@ pub fn build_frame(
                     gpu: p.gpu_pct.map(format::pct1).unwrap_or_else(|| "—".into()), net: "—".into(),
                     // Its own hung text, so Force close shows on (and targets) this process even
                     // when its app row is the never-actionable Windows group.
-                    bar: 0.0, hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true,
-                    exited: false,
+                    hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true,
+                    exited: false, kind: RowKind::Proc, sub: String::new(), bars: [0.0; 5],
+                    icon: image_of.get(&pid_key).map(|s| s.to_string()).unwrap_or_default(), windows: false,
+                    last_in_card: n == last,
                 });
             }
         }
@@ -309,21 +413,51 @@ pub fn build_frame(
     }
 }
 
-pub fn visible_rows(rows: &[RowView], expanded: &HashSet<i32>, search: &str) -> Vec<RowView> {
+/// The rows the list shows: apps matching `search` (by name or a process's name), the processes
+/// of expanded apps (and, while searching, the matching ones), each under its section heading.
+/// A heading counts the apps it lets through, shows just itself while `collapsed` holds its id,
+/// and goes when no app of its matches. The last process shown in a card closes it (a search may
+/// hide the one built last).
+pub fn visible_rows(rows: &[RowView], expanded: &HashSet<i32>, collapsed: &HashSet<i32>, search: &str) -> Vec<RowView> {
     let needle = search.trim().to_lowercase();
-    let matches_app = |r: &RowView| needle.is_empty() || r.search_text.contains(&needle);
-    let app_ok: HashSet<i32> = rows.iter().filter(|r| r.depth == 0 && matches_app(r)).map(|r| r.id).collect();
-    rows.iter()
-        .filter(|r| {
-            if r.depth == 0 {
-                app_ok.contains(&r.id)
-            } else {
-                app_ok.contains(&r.parent)
-                    && (expanded.contains(&r.parent) || (!needle.is_empty() && r.search_text.contains(&needle)))
+    let matches = |r: &RowView| needle.is_empty() || r.search_text.contains(&needle);
+    // Apps that match, and how many under each heading; open ones show their cards.
+    let mut counts: HashMap<i32, usize> = HashMap::new();
+    let mut shown_apps = HashSet::new();
+    let mut section = None;
+    for r in rows {
+        if r.kind == RowKind::Section {
+            section = Some(r.id);
+        } else if r.depth == 0 && matches(r) {
+            if let Some(s) = section {
+                *counts.entry(s).or_default() += 1;
             }
+            if !section.is_some_and(|s| collapsed.contains(&s)) {
+                shown_apps.insert(r.id);
+            }
+        }
+    }
+    let mut out: Vec<RowView> = rows.iter()
+        .filter_map(|r| {
+            if r.kind == RowKind::Section {
+                let n = counts.get(&r.id).copied().unwrap_or(0);
+                let count = if n == 0 || r.id == SECTION_WINDOWS { String::new() } else { format!("({n})") };
+                return (n > 0).then(|| RowView { count, ..r.clone() });
+            }
+            let show = if r.depth == 0 {
+                shown_apps.contains(&r.id)
+            } else {
+                shown_apps.contains(&r.parent) && (expanded.contains(&r.parent) || (!needle.is_empty() && r.search_text.contains(&needle)))
+            };
+            show.then(|| r.clone())
         })
-        .cloned()
-        .collect()
+        .collect();
+    for i in 0..out.len() {
+        if out[i].kind == RowKind::Proc {
+            out[i].last_in_card = out.get(i + 1).is_none_or(|n| n.depth == 0 || n.parent != out[i].parent);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -462,7 +596,7 @@ mod tests {
         assert_eq!(f.meters[1].sub, "8.0 / 16.0 GB");
         assert_eq!(f.tiles.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Chrome", "Editor"]);
         assert_eq!(f.caption, "Top CPU users");
-        let names: Vec<_> = f.rows.iter().filter(|r| r.depth == 0).map(|r| r.name.clone()).collect();
+        let names: Vec<_> = f.rows.iter().filter(|r| r.kind == RowKind::App).map(|r| r.name.clone()).collect();
         assert_eq!(names, ["Editor", "Chrome"], "rows follow the ranker order");
         let editor = f.rows.iter().find(|r| r.name == "Editor").unwrap();
         assert_eq!(editor.hung, "Not responding · 14s");
@@ -470,7 +604,7 @@ mod tests {
         let chrome = f.rows.iter().find(|r| r.name == "Chrome").unwrap();
         assert_eq!(chrome.count, "(2)");
         assert!(chrome.expandable);
-        assert!((chrome.bar - 1.0).abs() < 1e-6);
+        assert!((chrome.bars[Metric::Cpu as usize] - 0.3).abs() < 1e-6, "30% of the machine");
         assert!(!f.admin_banner);
     }
 
@@ -507,7 +641,7 @@ mod tests {
         s.windows = vec![negotium_snapshot::WindowSample { pid: 6, hung: true, title: "Search".into() }];
         let mut ids = IdMap::new();
         let f = test_frame(&mut ids, &s, &[win], &[0], &History::new(), &opts(Metric::Cpu, true));
-        let group = f.rows.iter().find(|r| r.depth == 0).unwrap();
+        let group = f.rows.iter().find(|r| r.kind == RowKind::App).unwrap();
         assert_eq!(group.hung, "Not responding · 9s", "the group still shows the roll-up");
         assert!(!group.actionable, "R7: the group itself is never actionable");
         let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").unwrap();
@@ -560,7 +694,8 @@ mod tests {
         let mut ids = IdMap::new();
         let f = test_frame(&mut ids, &snap(None), &rows, &[0], &History::new(), &opts(Metric::Gpu, false));
         assert!(f.tiles.is_empty());
-        assert!(f.rows.iter().all(|r| r.bar == 0.0));
+        // Disk and Network against a busiest app of 0: empty, not NaN. Memory has a total.
+        assert!(f.rows.iter().all(|r| r.bars.iter().all(|b| b.is_finite()) && r.bars[Metric::Disk as usize] == 0.0 && r.bars[Metric::Network as usize] == 0.0));
         assert!(!f.meters[0].available, "CPU meter shows Unavailable when cpu_pct is None");
         assert!(!f.meters[3].available, "GPU meter shows Unavailable without GPU counters");
     }
@@ -580,7 +715,8 @@ mod tests {
         let mut ids = IdMap::new();
         let a = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
         let b = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
-        assert_eq!(a.rows[0].id, b.rows[0].id);
+        let chrome = |f: &Frame| f.rows.iter().find(|r| r.name == "Chrome").unwrap().id;
+        assert_eq!(chrome(&a), chrome(&b));
     }
 
     #[test]
@@ -591,10 +727,10 @@ mod tests {
             RowView { id: 3, parent: -1, depth: 0, name: "Editor".into(), search_text: "editor code.exe".into(), ..Default::default() },
         ];
         let none = HashSet::new();
-        assert_eq!(visible_rows(&rows, &none, "").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 3]);
-        assert_eq!(visible_rows(&rows, &HashSet::from([1]), "").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2, 3]);
-        assert_eq!(visible_rows(&rows, &none, "HELPER").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2]);
-        assert!(visible_rows(&rows, &none, "zzz").is_empty());
+        assert_eq!(visible_rows(&rows, &none, &none, "").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(visible_rows(&rows, &HashSet::from([1]), &none, "").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(visible_rows(&rows, &none, &none, "HELPER").iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2]);
+        assert!(visible_rows(&rows, &none, &none, "zzz").is_empty());
     }
 
     #[test]
@@ -611,5 +747,207 @@ mod tests {
         let spark = &f.meters[0].spark;
         assert!(spark.starts_with("M 0.0 50.0"), "{spark}");
         assert!(spark.ends_with("L 1000.0 50.0"), "{spark}");
+    }
+
+    fn bg(pid: u32, name: &str, cpu: f32, procs: Vec<ProcRow>) -> AppRow {
+        AppRow { key: AppKey::Background { pid, create_time: pid as i64 }, kind: AppKind::Background, ..app(pid, name, cpu, procs, None) }
+    }
+    fn windows_group(procs: Vec<ProcRow>) -> AppRow {
+        AppRow { key: AppKey::Windows, kind: AppKind::Windows, ..app(4, "Windows", 1.0, procs, None) }
+    }
+    fn sample(pid: u32, image: &str) -> negotium_snapshot::ProcessSample {
+        negotium_snapshot::ProcessSample {
+            pid, parent_pid: 0, create_time: pid as i64, name: String::new(), session_id: 1, cpu_time_100ns: 0,
+            private_working_set: 0, disk_io_bytes: 0, threads: 1, handles: 1, image_path: Some(image.into()),
+            package_family: None, description: None,
+        }
+    }
+    fn names(rows: &[RowView]) -> Vec<(RowKind, &str)> {
+        rows.iter().map(|r| (r.kind, r.name.as_str())).collect()
+    }
+    /// Editor, Mail (apps), Updater (background) and the Windows group, ranked Windows, Mail,
+    /// Updater, Editor.
+    fn mixed() -> (Vec<AppRow>, Vec<usize>) {
+        let rows = vec![
+            app(1, "Editor", 1.0, vec![proc(1, 0, 1.0, "code.exe"), proc(2, 1, 0.0, "helper.exe")], None),
+            app(3, "Mail", 2.0, vec![proc(3, 0, 2.0, "mail.exe")], None),
+            bg(5, "Updater", 3.0, vec![proc(5, 0, 3.0, "updater.exe")]),
+            windows_group(vec![proc(4, 0, 1.0, "System"), proc(6, 4, 0.0, "svchost.exe")]),
+        ];
+        (rows, vec![3, 1, 2, 0])
+    }
+
+    #[test]
+    fn grouped_frames_put_apps_under_their_section_in_sort_order() {
+        use RowKind::{App, Section};
+        let (rows, order) = mixed();
+        let flat = FrameOptions { all_children: false, ..opts(Metric::Cpu, true) };
+        let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &rows, &order, &History::new(), &flat);
+        assert_eq!(names(&f.rows), [
+            (Section, "Apps"), (App, "Mail"), (App, "Editor"),
+            (Section, "Background processes"), (App, "Updater"),
+            (Section, "Windows processes"), (App, "Windows"),
+        ]);
+        let ids: Vec<i32> = f.rows.iter().filter(|r| r.kind == Section).map(|r| r.id).collect();
+        assert_eq!(ids, [SECTION_APPS, SECTION_BACKGROUND, SECTION_WINDOWS]);
+        for s in f.rows.iter().filter(|r| r.kind == Section) {
+            assert!(s.depth == 0 && !s.actionable && s.expandable, "{s:?}");
+        }
+        assert!(f.rows.iter().find(|r| r.name == "Windows").unwrap().windows, "the Windows group draws the Windows glyph");
+        assert!(f.rows.iter().filter(|r| r.name != "Windows").all(|r| !r.windows));
+        let ungrouped = FrameOptions { grouped: false, ..flat };
+        let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &rows, &order, &History::new(), &ungrouped);
+        assert_eq!(names(&f.rows), [(App, "Windows"), (App, "Mail"), (App, "Updater"), (App, "Editor")], "no sections, the ranker's order");
+    }
+
+    #[test]
+    fn search_hides_empty_sections_and_counts_matches() {
+        let (rows, order) = mixed();
+        let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &rows, &order, &History::new(), &opts(Metric::Cpu, true));
+        let none = HashSet::new();
+        let shown = visible_rows(&f.rows, &none, &none, "UPDAT");
+        assert_eq!(names(&shown), [(RowKind::Section, "Background processes"), (RowKind::App, "Updater")]);
+        assert_eq!(shown[0].count, "(1)");
+        let all = visible_rows(&f.rows, &none, &none, "");
+        let count = |id: i32| all.iter().find(|r| r.id == id).unwrap().count.clone();
+        assert_eq!((count(SECTION_APPS), count(SECTION_BACKGROUND), count(SECTION_WINDOWS)), ("(2)".into(), "(1)".into(), String::new()));
+        // A process name matches too: its app's section and card come with it.
+        let shown = visible_rows(&f.rows, &none, &none, "svchost");
+        assert_eq!(names(&shown), [(RowKind::Section, "Windows processes"), (RowKind::App, "Windows"), (RowKind::Proc, "svchost.exe")]);
+        let shown = visible_rows(&f.rows, &none, &none, "system");
+        assert_eq!(names(&shown)[2], (RowKind::Proc, "System"));
+        assert!(shown[2].last_in_card, "the only process shown closes the card, though built first");
+        assert!(visible_rows(&f.rows, &none, &none, "zzz").is_empty(), "no section heading without apps");
+    }
+
+    #[test]
+    fn a_collapsed_section_shows_its_heading_only() {
+        use RowKind::{App, Proc, Section};
+        let (rows, order) = mixed();
+        let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &rows, &order, &History::new(), &opts(Metric::Cpu, true));
+        let editor = f.rows.iter().find(|r| r.name == "Editor").unwrap().id;
+        let expanded = HashSet::from([editor]);
+        let open = visible_rows(&f.rows, &expanded, &HashSet::new(), "");
+        assert_eq!(names(&open)[..5], [(Section, "Apps"), (App, "Mail"), (App, "Editor"), (Proc, "code.exe"), (Proc, "helper.exe")]);
+        let shown = visible_rows(&f.rows, &expanded, &HashSet::from([SECTION_APPS]), "");
+        assert_eq!(names(&shown), [
+            (Section, "Apps"), (Section, "Background processes"), (App, "Updater"), (Section, "Windows processes"), (App, "Windows"),
+        ]);
+        assert_eq!(shown[0].count, "(2)", "the heading still counts its apps");
+    }
+
+    #[test]
+    fn bars_follow_the_spec() {
+        const GB: u64 = 1 << 30;
+        let mut a = app(1, "A", 12.7, vec![proc(1, 0, 12.7, "a.exe"), proc(2, 1, 0.0, "a2.exe")], None);
+        (a.private_bytes, a.disk_bps, a.gpu_pct, a.net_bps) = (6 * GB, 50.0, Some(40.0), Some(1000.0));
+        let mut b = app(3, "B", f32::NAN, vec![proc(3, 0, 0.0, "b.exe")], None);
+        (b.disk_bps, b.net_bps) = (200.0, None);
+        let mut c = app(4, "C", 150.0, vec![proc(4, 0, 150.0, "c.exe")], None);
+        c.private_bytes = 200 * GB;
+        let rows = vec![a, b, c];
+        let mut s = snap(Some(1.0));
+        s.totals.memory = Some(MemoryTotals { total: 96 * GB, used: 8 * GB, ..Default::default() });
+        let flat = FrameOptions { grouped: false, ..opts(Metric::Cpu, true) };
+        let f = test_frame(&mut IdMap::new(), &s, &rows, &[0, 1, 2], &History::new(), &flat);
+        let bars = |name: &str| f.rows.iter().find(|r| r.name == name).unwrap().bars;
+        let close = |got: [f32; 5], want: [f32; 5]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-6);
+        // Indexed by Metric: CPU, Memory, Disk, GPU, Network.
+        assert!(close(bars("A"), [0.127, 0.0625, 0.25, 0.4, 1.0]), "{:?}", bars("A"));
+        assert!(close(bars("B"), [0.0, 1024.0 / (96 * GB) as f32, 1.0, 0.0, 0.0]), "NaN and none are 0: {:?}", bars("B"));
+        assert!(close(bars("C"), [1.0, 1.0, 0.0, 0.0, 0.0]), "never past the track: {:?}", bars("C"));
+        assert!(f.rows.iter().filter(|r| r.kind == RowKind::Proc).all(|r| r.bars == [0.0; 5]), "process rows have no bars");
+        s.totals.memory = None;
+        let f = test_frame(&mut IdMap::new(), &s, &rows, &[0, 1, 2], &History::new(), &flat);
+        assert!(f.rows.iter().all(|r| r.bars[Metric::Memory as usize] == 0.0), "no memory total: no memory bar");
+    }
+
+    #[test]
+    fn an_apps_sub_line_is_its_process_count_or_its_hang() {
+        let many: Vec<ProcRow> = (10..141).map(|pid| proc(pid, 10, 0.0, "chrome.exe")).collect();
+        let rows = vec![
+            app(10, "Chrome", 1.0, many, None),
+            app(3, "Editor", 1.0, vec![proc(3, 0, 1.0, "code.exe")], None),
+            app(5, "Frozen", 1.0, vec![proc(5, 0, 1.0, "frozen.exe")], Some(14_400)),
+        ];
+        let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &rows, &[0, 1, 2], &History::new(), &opts(Metric::Cpu, true));
+        let app_row = |name: &str| f.rows.iter().find(|r| r.name == name && r.kind == RowKind::App).unwrap().clone();
+        assert_eq!(app_row("Chrome").sub, "131 processes");
+        assert_eq!(app_row("Chrome").count, "(131)", "kept for the accessible label");
+        assert_eq!(app_row("Editor").sub, "1 process");
+        assert_eq!(app_row("Frozen").sub, "Not responding · 14s");
+    }
+
+    #[test]
+    fn process_rows_follow_the_sort_and_the_last_closes_the_card() {
+        use negotium_model::SortColumn;
+        let rows = vec![app(1, "Chrome", 35.0, vec![proc(1, 0, 5.0, "b.exe"), proc(2, 1, 20.0, "c.exe"), proc(3, 1, 10.0, "a.exe")], None)];
+        let procs = |sort: Sort| {
+            let o = FrameOptions { sort, ..opts(Metric::Cpu, true) };
+            let f = test_frame(&mut IdMap::new(), &snap(Some(1.0)), &rows, &[0], &History::new(), &o);
+            f.rows.iter().filter(|r| r.kind == RowKind::Proc).map(|r| (r.name.clone(), r.last_in_card)).collect::<Vec<_>>()
+        };
+        let p = |n: &str, last: bool| (n.to_string(), last);
+        assert_eq!(procs(Sort::default()), [p("c.exe", false), p("a.exe", false), p("b.exe", true)], "CPU, high to low");
+        assert_eq!(procs(Sort::by(SortColumn::Name)), [p("a.exe", false), p("b.exe", false), p("c.exe", true)], "Name, A to Z");
+        let up = Sort { descending: false, ..Sort::default() };
+        assert_eq!(procs(up), [p("b.exe", false), p("a.exe", false), p("c.exe", true)], "CPU, low to high");
+    }
+
+    #[test]
+    fn icons_are_the_apps_root_image_and_each_processes_own() {
+        let rows = vec![
+            app(1, "Chrome", 1.0, vec![proc(2, 1, 0.0, "helper.exe"), proc(1, 0, 1.0, "chrome.exe")], None),
+            bg(7, "Unknown", 1.0, vec![proc(7, 0, 1.0, "x.exe")]),
+        ];
+        let mut s = snap(Some(1.0));
+        s.processes = vec![sample(1, r"C:\chrome.exe"), sample(2, r"C:\helper.exe")];
+        let f = test_frame(&mut IdMap::new(), &s, &rows, &[0, 1], &History::new(), &opts(Metric::Cpu, true));
+        let icon = |name: &str| f.rows.iter().find(|r| r.name == name).unwrap().icon.clone();
+        assert_eq!(icon("Chrome"), r"C:\chrome.exe", "the root process, not the first");
+        assert_eq!(icon("helper.exe"), r"C:\helper.exe");
+        assert_eq!(icon("Unknown"), "", "no image path: no icon");
+    }
+
+    #[test]
+    fn a_frozen_list_keeps_section_rows_in_place() {
+        use crate::bridge::RowLayout;
+        let (rows, order) = mixed();
+        let flat = FrameOptions { all_children: false, ..opts(Metric::Cpu, true) };
+        let mut ids = IdMap::new();
+        let none = HashSet::new();
+        let a = test_frame(&mut ids, &snap(Some(1.0)), &rows, &order, &History::new(), &flat);
+        let mut layout = RowLayout::default();
+        layout.on_frame(&a.rows, visible_rows(&a.rows, &none, &none, ""));
+        layout.set_frozen(true, &a.rows, visible_rows(&a.rows, &none, &none, ""));
+        let before: Vec<i32> = layout.rows().iter().map(|r| r.id).collect();
+        // Mail (in Apps) exits.
+        let rest: Vec<AppRow> = rows.iter().filter(|r| r.name != "Mail").cloned().collect();
+        let b = test_frame(&mut ids, &snap(Some(1.0)), &rest, &[2, 1, 0], &History::new(), &flat);
+        layout.on_frame(&b.rows, visible_rows(&b.rows, &none, &none, ""));
+        let shown = layout.rows();
+        assert_eq!(shown.iter().map(|r| r.id).collect::<Vec<_>>(), before, "every index keeps its row");
+        let mail = shown.iter().find(|r| r.name == "Mail").unwrap();
+        assert!(mail.exited && !mail.actionable && mail.kind == RowKind::App, "the exited card stays in place, inert");
+        let headings: Vec<_> = shown.iter().filter(|r| r.kind == RowKind::Section).map(|r| (r.name.as_str(), r.exited)).collect();
+        assert_eq!(headings, [("Apps", false), ("Background processes", false), ("Windows processes", false)]);
+        assert_eq!(shown[0].count, "(1)", "the heading counts what is live");
+    }
+
+    #[test]
+    fn row_heights_are_one_per_kind() {
+        assert_eq!([RowKind::Section, RowKind::App, RowKind::Proc].map(row_height), [ROW_H_SECTION, ROW_H_APP, ROW_H_PROC]);
+        assert_eq!((ROW_H_SECTION, ROW_H_APP, ROW_H_PROC), (32.0, 50.0, 30.0));
+    }
+
+    /// The Slint list mirrors the Rust row heights (ensure-visible and the menu anchor sum them).
+    #[test]
+    #[ignore = "applist.slint declares section-height / app-height / proc-height in Task 6"]
+    fn row_heights_match_the_list() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/applist.slint")).unwrap();
+        for (name, h) in [("section-height", ROW_H_SECTION), ("app-height", ROW_H_APP), ("proc-height", ROW_H_PROC)] {
+            let line = src.lines().find(|l| l.contains(&format!("{name}:"))).unwrap_or_else(|| panic!("applist.slint declares no {name}"));
+            assert!(line.contains(&format!("{h}px")), "{name} must be {h}px: {line}");
+        }
     }
 }
