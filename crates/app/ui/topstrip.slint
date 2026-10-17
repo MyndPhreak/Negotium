@@ -1,5 +1,6 @@
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
+import { GraphClock } from "graph.slint";
 
 // `leaving`: gone from the top this frame; it shrinks away and the bridge drops it next frame.
 export struct TileData { id: int, name: string, value: string, weight: float, hung: bool, leaving: bool }
@@ -11,6 +12,34 @@ export component TopStrip inherits VerticalLayout {
     // Tiles glide to their new widths instead of jumping each frame (Settings > Smooth graphs).
     in property <bool> smooth: true;
     callback open(int);
+    // The glide (crate::smooth's rule for the graphs, ruling P3c-3: a whole pixel of motion is
+    // worth a redraw). Not `animate`: an animation draws at display rate for its whole length, and
+    // the tiles' averaged weights change a little with nearly every frame, so a 450 ms animation
+    // drew about 108 frames a second at 240 Hz for motion of a pixel or two. Instead this timer
+    // steps the glide as often as its widest move needs (about 16 ms to one step for under a pixel).
+    // `glide-now` is the glide's own clock: GraphClock's, but it always moves by at least a step,
+    // so a glide ends even before Rust installs the clock (which then answers 0).
+    property <duration> glide-now;
+    property <duration> glide-end;
+    property <float> glide-px;
+    // Whole steps that end on the glide's end: one a pixel, at most one per 16 ms.
+    property <duration> glide-step: root.glide-ms / clamp(ceil(root.glide-px), 1, 28);
+    property <duration> glide-ms: 450ms;
+    Timer {
+        interval: root.glide-step;
+        running: root.smooth && root.glide-now < root.glide-end;
+        triggered => { root.glide-now = max(GraphClock.clock(), root.glide-now + self.interval); }
+    }
+    // A tile starts gliding (`px`: about how far it moves, physical pixels); returns its start.
+    function start-glide(px: float) -> duration {
+        if (root.glide-now >= root.glide-end) {
+            root.glide-px = 0; // the last glide is over
+        }
+        root.glide-now = max(GraphClock.clock(), root.glide-now);
+        root.glide-px = max(root.glide-px, px);
+        root.glide-end = root.glide-now + root.glide-ms;
+        return root.glide-now;
+    }
     vertical-stretch: 0; // see MetersRow: spare height belongs to the app list
     spacing: 4px;
     Text { text: caption; color: Theme.muted; font-size: 11px; }
@@ -28,10 +57,34 @@ export component TopStrip inherits VerticalLayout {
                 running: !parent.born;
                 triggered => { parent.born = true; }
             }
-            horizontal-stretch: self.present ? max(t.weight, 0.0001) : 0.0001;
-            min-width: self.present ? 28px : 0px;
-            opacity: self.present ? 1 : 0;
-            animate horizontal-stretch, min-width, opacity { duration: root.smooth ? 450ms : 0ms; easing: ease-out; }
+            // Where the tile is going (stretch, and 1 shown / 0 gone) and where its glide started.
+            property <float> target: self.present ? max(t.weight, 0.0001) : 0.0001;
+            property <float> target-shown: self.present ? 1 : 0;
+            property <float> from: 0.0001;
+            property <float> to: 0.0001;
+            property <float> from-shown: 0;
+            property <float> to-shown: 0;
+            property <duration> start;
+            property <float> progress: clamp((root.glide-now - self.start) / root.glide-ms, 0, 1);
+            property <float> eased: 1 - (1 - self.progress) * (1 - self.progress); // ease-out
+            property <float> stretch: self.from + (self.to - self.from) * self.eased;
+            property <float> shown: self.from-shown + (self.to-shown - self.from-shown) * self.eased;
+            changed target => { self.glide(); }
+            changed target-shown => { self.glide(); }
+            function glide() {
+                // From where it is now. Pixels per unit of stretch from its own width; a tile
+                // growing from nothing moves far.
+                self.from = self.stretch;
+                self.from-shown = self.shown;
+                self.to = self.target;
+                self.to-shown = self.target-shown;
+                if (root.smooth) {
+                    self.start = root.start-glide(self.from > 0.001 ? self.width / 1phx * abs(self.to - self.from) / self.from : 1000);
+                }
+            }
+            horizontal-stretch: root.smooth ? self.stretch : self.target;
+            min-width: 28px * (root.smooth ? self.shown : self.target-shown);
+            opacity: root.smooth ? self.shown : self.target-shown;
             clip: true;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);

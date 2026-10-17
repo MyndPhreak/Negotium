@@ -538,6 +538,22 @@ mod frame_count {
             }
             drawn
         }
+
+        /// Like `run`, but returns the mocked time (ms) of every frame drawn.
+        pub fn run_log(&mut self, steps: u32) -> Vec<u64> {
+            let mut at = Vec::new();
+            for _ in 0..steps {
+                if self.run(1) == 1 {
+                    at.push(now_ms());
+                }
+            }
+            at
+        }
+    }
+
+    /// The mocked clock, ms since the platform started.
+    pub fn now_ms() -> u64 {
+        NOW_MS.with(Cell::get)
     }
 }
 
@@ -646,5 +662,49 @@ fn an_icons_soft_pixels_blend_as_straight_alpha_on_dark_and_light() {
         let straight = (200.0 * 0.25 + beside.r as f32 * 0.75).round() as i32;
         assert!((inside.r as i32 - straight).abs() <= 4, "dark {dark}: {inside:?} over {beside:?}, straight would be {straight}");
         ui.hide().unwrap();
+    }
+}
+
+/// With Smooth graphs on, a frame whose top tiles shift by a few pixels glides them there in a
+/// handful of redraws, as the graphs scroll (a whole pixel of motion is worth a redraw, ruling
+/// P3c-3), not one per display refresh for the whole glide: animating the tiles' stretch drew at
+/// display rate for 450 ms after every frame, about 108 frames a second at 240 Hz, because the
+/// tiles' averaged weights change a little with every frame. A tile growing in still glides.
+#[test]
+fn a_frame_that_nudges_the_top_tiles_glides_them_in_a_few_redraws() {
+    use negotium::bridge::sync_tiles;
+    use slint::Model;
+    let mut frames = frame_count::Frames::install(1000, 720);
+    let ui = MainWindow::new().unwrap();
+    negotium::smooth::install(&ui, || std::time::Duration::from_millis(frame_count::now_ms()));
+    let spark = negotium::graph::line(samples(82, 3, Load::Smooth), 81_000, 60_000, 100.0, 60);
+    let meter = |l: &str, v: u64| negotium::MeterData { label: l.into(), value: format!("{v}%").into(), sub: "".into(), spark: spark.clone().into(), available: true };
+    let labels = ["CPU", "Memory", "Disk", "GPU", "Network"];
+    let meters = std::rc::Rc::new(VecModel::from(labels.iter().map(|l| meter(l, 1)).collect::<Vec<_>>()));
+    ui.set_meters(ModelRc::from(meters.clone()));
+    let tiles = std::rc::Rc::new(VecModel::<negotium::TileData>::default());
+    ui.set_tiles(ModelRc::from(tiles.clone()));
+    let rows = std::rc::Rc::new(VecModel::from((0..40).map(|i| app_row(i, "1.0%")).collect::<Vec<_>>()));
+    ui.set_rows(ModelRc::from(rows.clone()));
+    ui.show().unwrap();
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    let tile = |i: i32, w: f32| negotium::TileData { id: i, name: format!("App {i}").into(), value: format!("{w:.2}%").into(), weight: w, hung: false, leaving: false };
+    // One frame a second, as the bridge applies it: tiles (one weight wobbling by 2%, a few
+    // pixels), meter values, a row, and the graphs' scroll run.
+    let mut frame = |sec: u64| {
+        let wobble = if sec.is_multiple_of(2) { 3.0 } else { 3.06 };
+        sync_tiles(&tiles, (0..5).map(|i| tile(i, if i == 2 { wobble } else { 5.0 - i as f32 })).collect(), true);
+        for (i, l) in labels.iter().enumerate() {
+            meters.set_row_data(i, meter(l, sec + i as u64));
+        }
+        rows.set_row_data(3, app_row(3, &format!("{sec}.0%")));
+        ui.invoke_scroll_from(-1250.0, 1.0);
+        frames.run_log(250) // a second at 250 Hz
+    };
+    let first = frame(0);
+    assert!(first.iter().filter(|&&t| t > 40).count() >= 5, "the tiles grow in over several redraws: {first:?}");
+    for sec in 1..6 {
+        let drawn = frame(sec);
+        assert!(drawn.len() <= 12, "second {sec}: {} frames for tiles a few pixels apart: {drawn:?}", drawn.len());
     }
 }

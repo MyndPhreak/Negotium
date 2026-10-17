@@ -3328,13 +3328,15 @@ fn settle(ui: &MainWindow, ms: u64) {
 
 #[test]
 fn tiles_glide_to_their_new_widths_when_smooth_and_jump_when_not() {
-    // The bridge updates tiles in place (sync_model), so their widths animate between frames.
+    // The bridge updates tiles in place (sync_model), so their widths glide between frames.
     let ui = shown_window();
+    negotium::smooth::install(&ui, mocked_clock); // the glide's clock (Bridge::install does this in the app)
     let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0), tile(1, 1.0)]));
     ui.set_tiles(ModelRc::from(model.clone()));
     settle(&ui, 1000);
     let start = tile_width(&ui, 0);
     model.set_row_data(0, tile(0, 3.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // the frame lands: the glide starts
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
     let mid = tile_width(&ui, 0);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
@@ -3371,6 +3373,7 @@ fn tiles_keep_their_place_a_leaver_shrinks_away_and_a_newcomer_slots_in_by_rank(
 #[test]
 fn a_new_tile_grows_in_from_nothing_when_smooth() {
     let ui = shown_window();
+    negotium::smooth::install(&ui, mocked_clock); // the glide's clock (Bridge::install does this in the app)
     let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0)]));
     ui.set_tiles(ModelRc::from(model.clone()));
     settle(&ui, 1000);
