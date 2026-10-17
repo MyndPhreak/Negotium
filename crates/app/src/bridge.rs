@@ -667,6 +667,7 @@ impl Bridge {
         self.scrub_shown = Some((f, view.clone()));
         ui.set_scrub_title(view.title.into());
         ui.set_scrub_empty(view.empty.into());
+        ui.set_scrub_note(view.note.into());
         sync_model(&*self.scrub_rows, view.rows.into_iter().map(|(name, value)| ScrubRow { name: name.into(), value: value.into() }).collect());
         ui.set_scrub_x(f);
     }

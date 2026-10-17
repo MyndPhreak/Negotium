@@ -17,6 +17,8 @@ pub struct ScrubView {
     pub rows: Vec<(String, String)>,
     /// Shown instead of rows when there are none.
     pub empty: String,
+    /// A footnote under the rows (network pages: "All adapters"); empty for other metrics.
+    pub note: String,
 }
 
 /// The top apps at the moment under the pointer, `fraction` of the way across a Performance
@@ -28,15 +30,31 @@ pub fn scrub(history: &History, perf: &PerfFrame, view_end_ms: u64, fraction: f3
     let found = at_column(history, perf, t);
     let at = found.as_ref().map_or(t, |(sample_t, _)| *sample_t as i64);
     let title = format!("Top apps at {}", format::clock(clock_at(perf, at)));
-    let (rows, empty) = match (&found, perf.scrub_metric) {
-        (_, Metric::Network) => (Vec::new(), "Per-app network use isn't measured yet."),
-        (None, _) => (Vec::new(), "No history for this moment."),
-        (Some((_, apps)), metric) => (
-            apps.iter().map(|(name, v)| (name.clone(), crate::view::metric_text(*v as f64, metric))).collect(),
-            "No app was busy at this moment.",
-        ),
+    let metric = perf.scrub_metric;
+    let feedless = metric == Metric::Network && !perf.net_feed;
+    let (rows, empty) = match &found {
+        _ if feedless => (Vec::new(), "Per-app network use needs admin rights."),
+        None => (Vec::new(), "No history for this moment."),
+        Some((sample_t, apps)) => {
+            // Upload and download apart only for the newest sample: the history keeps totals.
+            let split = if metric == Metric::Network && *sample_t == perf.window_end_ms { perf.net_split.as_slice() } else { &[] };
+            let rows = apps
+                .iter()
+                .map(|(name, v)| {
+                    let total = crate::view::metric_text(*v as f64, metric);
+                    let value = match split.iter().find(|(n, _)| n == name) {
+                        Some((_, net)) => format!("{total}  ↑{} ↓{}", format::bit_rate(net.sent_bps), format::bit_rate(net.recv_bps)),
+                        None => total,
+                    };
+                    (name.clone(), value)
+                })
+                .collect();
+            (rows, "No app was busy at this moment.")
+        }
     };
-    ScrubView { title, rows, empty: empty.to_string() }
+    // Windows does not attribute an app's traffic to an adapter.
+    let note = if metric == Metric::Network && !feedless { "All adapters" } else { "" };
+    ScrubView { title, rows, empty: empty.to_string(), note: note.to_string() }
 }
 
 /// The sample the main graph draws at time `t`: the one where the page's main series peaks in the
@@ -73,7 +91,7 @@ pub fn clock_before(clock_ms: u64, back_ms: u64) -> u64 {
 mod tests {
     use super::*;
     use negotium_model::{AppKey, AppKind, AppRow};
-    use negotium_snapshot::SystemTotals;
+    use negotium_snapshot::{NetRate, SystemTotals};
 
     fn app(name: &str, cpu: f32, bytes: u64) -> AppRow {
         AppRow {
@@ -171,10 +189,69 @@ mod tests {
         assert_eq!(scrub(&h, &p, 3_600_000, 1_800_500.0 / 3_600_000.0), v);
     }
 
+    /// The history above with network traffic: at t chrome moves t KB/s (bytes), code nothing.
+    fn net_history() -> History {
+        let mut h = History::new();
+        for s in 1..=61u64 {
+            let mut chrome = app("chrome", 1.0, 1 << 20);
+            chrome.net_bps = Some(s as f64 * 1_000.0);
+            let mut code = app("code", 0.5, 1 << 20);
+            code.net_bps = Some(0.0);
+            h.push(s * 1_000, &SystemTotals::default(), &[chrome, code]);
+        }
+        h
+    }
+
+    fn net_perf(feed: bool) -> PerfFrame {
+        let mut p = perf(61_000, 60_000, TWO_PM, Metric::Network);
+        p.net_feed = feed;
+        p.net_split = vec![("chrome".to_string(), NetRate { sent_bps: 1_000.0, recv_bps: 60_000.0 })];
+        p
+    }
+
     #[test]
-    fn network_pages_explain_the_missing_per_app_data() {
-        let v = scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Network), 61_000, 0.5);
+    fn network_pages_list_apps_from_history() {
+        let v = scrub(&net_history(), &net_perf(true), 61_000, 0.5);
+        assert_eq!(v.rows, vec![("chrome".to_string(), format::bit_rate(31_000.0))], "only apps with traffic, as a total");
+    }
+
+    #[test]
+    fn the_newest_sample_shows_the_upload_download_split() {
+        let v = scrub(&net_history(), &net_perf(true), 61_000, 1.0);
+        assert_eq!(v.title, "Top apps at 14:00:00");
+        assert_eq!(v.rows, vec![("chrome".to_string(), "488.0 Kb/s  ↑8.0 Kb/s ↓480.0 Kb/s".to_string())]);
+    }
+
+    #[test]
+    fn older_samples_show_the_total_only() {
+        let p = net_perf(true);
+        // A second back from the newest sample: the split belongs to the newest one only.
+        let v = scrub(&net_history(), &p, 61_000, 59_000.0 / 60_000.0);
+        assert_eq!(v.title, "Top apps at 13:59:59");
+        assert_eq!(v.rows, vec![("chrome".to_string(), "480.0 Kb/s".to_string())]);
+        // Graphs scrolling a second behind: the right edge is the older sample, total only too.
+        assert_eq!(scrub(&net_history(), &p, 60_000, 1.0).rows[0].1, "480.0 Kb/s");
+    }
+
+    #[test]
+    fn without_a_feed_network_pages_say_admin_is_needed() {
+        let v = scrub(&history(), &net_perf(false), 61_000, 0.5);
         assert!(v.rows.is_empty());
-        assert_eq!(v.empty, "Per-app network use isn't measured yet.");
+        assert_eq!(v.empty, "Per-app network use needs admin rights.");
+        // With the feed but no traffic, the usual words.
+        let mut quiet = History::new();
+        let mut idle = app("idle", 1.0, 0);
+        idle.net_bps = Some(0.0);
+        for s in 1..=61u64 {
+            quiet.push(s * 1_000, &SystemTotals::default(), std::slice::from_ref(&idle));
+        }
+        assert_eq!(scrub(&quiet, &net_perf(true), 61_000, 0.5).empty, "No app was busy at this moment.");
+    }
+
+    #[test]
+    fn the_network_hover_notes_all_adapters() {
+        assert_eq!(scrub(&net_history(), &net_perf(true), 61_000, 0.5).note, "All adapters");
+        assert_eq!(scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Cpu), 61_000, 0.5).note, "", "other pages have no note");
+        assert_eq!(scrub(&history(), &perf(61_000, 60_000, TWO_PM, Metric::Disk), 61_000, 0.5).note, "");
     }
 }

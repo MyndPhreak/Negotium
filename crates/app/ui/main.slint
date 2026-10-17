@@ -51,6 +51,7 @@ export component MainWindow inherits Window {
     in property <float> scrub-x: -1;
     in property <string> scrub-title;
     in property <string> scrub-empty;
+    in property <string> scrub-note;
     in property <[ScrubRow]> scrub-rows;
     // Smooth graphs (crate::smooth). The paths put each frame's newest sample at x = 1000, and
     // GraphClock moves the view's right edge from `lead-ms` toward it. This timer advances the
@@ -318,6 +319,7 @@ export component MainWindow inherits Window {
                     scrub-x: root.scrub-x;
                     scrub-title: root.scrub-title;
                     scrub-empty: root.scrub-empty;
+                    scrub-note: root.scrub-note;
                     scrub-rows: root.scrub-rows;
                     scrub(f) => { root.scrub(f); }
                 }

@@ -205,7 +205,7 @@ impl Source for LiveSource {
                 let (device, range) = controls.perf();
                 self.seen = LastSeen::track(self.seen.take(), &snap, &device);
                 let perf = read_history(&self.history, |h| {
-                    build_perf(&PerfInput { snap: &snap, history: h, info: &self.info, device: &device, range, last_seen: self.seen.as_ref() })
+                    build_perf(&PerfInput { snap: &snap, history: h, info: &self.info, apps: &rows, device: &device, range, last_seen: self.seen.as_ref() })
                 });
                 Some(Frame { page: Page::Performance, perf: Some(perf), ..Default::default() })
             }

@@ -4,7 +4,7 @@ import { Theme } from "theme.slint";
 // The inline admin path (spec 7: never a dialog): why admin rights are needed and a "Restart as
 // admin" button, on the Overview (dismissable) and the Startup page (not).
 export component Banner inherits Rectangle {
-    in property <string> text: "Some processes need admin rights to show details or be ended.";
+    in property <string> text: "Some processes need admin rights to show details, network use, or be ended.";
     in property <bool> dismissable: true;
     in property <bool> interactive: true;
     callback restart();

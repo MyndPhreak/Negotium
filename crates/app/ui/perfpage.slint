@@ -84,6 +84,7 @@ export component PerformancePage inherits HorizontalLayout {
     in property <float> scrub-x: -1;
     in property <string> scrub-title;
     in property <string> scrub-empty;
+    in property <string> scrub-note;
     in property <[ScrubRow]> scrub-rows;
     callback select-device(string);
     callback select-range(int);
@@ -166,6 +167,7 @@ export component PerformancePage inherits HorizontalLayout {
                         scrub-x: root.scrub-x;
                         scrub-title: root.scrub-title;
                         scrub-empty: root.scrub-empty;
+                        scrub-note: root.scrub-note;
                         scrub-rows: root.scrub-rows;
                         scrub(f) => { root.scrub(f); }
                     }

@@ -4,9 +4,9 @@
 use crate::format;
 use crate::graph::{self, EMPTY_PATH, Shape};
 use negotium_collector::SystemInfo;
-use negotium_history::{History, Series};
-use negotium_model::Metric;
-use negotium_snapshot::{AdapterSample, DiskSample, GpuSample, MemoryTotals, Snapshot};
+use negotium_history::{History, Series, TOP_PER_METRIC};
+use negotium_model::{AppRow, Metric, top_n};
+use negotium_snapshot::{AdapterSample, DiskSample, GpuSample, MemoryTotals, NetRate, Snapshot};
 
 pub const MAIN_BUCKETS: usize = 300;
 pub const CELL_BUCKETS: usize = 60;
@@ -246,12 +246,19 @@ pub struct PerfFrame {
     /// The page's main series: within a graph column the scrub shows the sample where it peaks,
     /// the one that column draws (ruling P3-5).
     pub scrub_series: Option<Series>,
+    /// Network pages: the newest sample's busiest apps (as many as the history keeps per moment)
+    /// with upload and download apart, for the scrub on that sample; empty on other pages.
+    pub net_split: Vec<(String, NetRate)>,
+    /// Network pages: whether the per-process network feed runs (it needs admin rights).
+    pub net_feed: bool,
 }
 
 pub struct PerfInput<'a> {
     pub snap: &'a Snapshot,
     pub history: &'a History,
     pub info: &'a SystemInfo,
+    /// This tick's apps (the network pages' upload/download split).
+    pub apps: &'a [AppRow],
     pub device: &'a str,
     pub range: Range,
     /// The requested device as last seen (see [`LastSeen::track`]): keeps its page through a
@@ -582,7 +589,11 @@ fn net_page(f: &mut PerfFrame, input: &PerfInput, a: &AdapterSample) {
     f.subtitle = a.description.clone().unwrap_or_else(|| name.to_string());
     f.scrub_metric = Metric::Network;
     f.scrub_series = Some(Series::NetRecv(name.into()));
-    f.note = "Per-app network use arrives in a later version.".into();
+    f.net_feed = input.snap.totals.net_by_pid.is_some();
+    f.net_split = top_n(input.apps, Metric::Network, TOP_PER_METRIC)
+        .into_iter()
+        .filter_map(|i| input.apps[i].net.map(|net| (input.apps[i].name.clone(), net)))
+        .collect();
     let (sent_key, recv_key) = (Series::NetSent(name.into()), Series::NetRecv(name.into()));
     let span = input.range.span_ms();
     // Network rates are shown in decimal bits: round the scale in bits, at least 100 Kb/s.
@@ -666,7 +677,8 @@ fn gpu_page(f: &mut PerfFrame, input: &PerfInput, g: &GpuSample, number: usize) 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use negotium_snapshot::{AdapterSample, DiskSample, GpuSample, MemoryLists, MemoryTotals, ProcessSample, SystemTotals};
+    use negotium_model::AppRow;
+    use negotium_snapshot::{AdapterSample, DiskSample, GpuSample, MemoryLists, MemoryTotals, NetRate, ProcessSample, SystemTotals};
 
     fn proc(pid: u32, threads: u32, handles: u32) -> ProcessSample {
         ProcessSample {
@@ -705,7 +717,7 @@ pub(crate) mod tests {
     pub(crate) fn build_with(s: &Snapshot, info: &SystemInfo, device: &str, range: Range) -> PerfFrame {
         let mut h = History::new();
         h.push(s.taken_at_ms, &s.totals, &[]);
-        build_perf(&PerfInput { snap: s, history: &h, info, device, range, last_seen: None })
+        build_perf(&PerfInput { snap: s, history: &h, info, apps: &[], device, range, last_seen: None })
     }
 
     fn build(s: &Snapshot, device: &str) -> PerfFrame {
@@ -938,6 +950,40 @@ pub(crate) mod tests {
         assert_eq!(f.scrub_series, Some(Series::NetRecv("Intel[R] Ethernet".into())));
     }
 
+    fn net_app(name: &str, sent: f64, recv: f64) -> AppRow {
+        let net = NetRate { sent_bps: sent, recv_bps: recv };
+        AppRow {
+            key: negotium_model::AppKey::Background { pid: name.len() as u32, create_time: 0 }, name: name.into(),
+            kind: negotium_model::AppKind::Background, processes: vec![], cpu_pct: 0.0, private_bytes: 0, disk_bps: 0.0,
+            gpu_pct: None, net_bps: Some(net.total()), net: Some(net), hung_for_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_network_page_carries_the_newest_split_of_its_busiest_apps() {
+        let mut s = devices_snapshot();
+        s.totals.net_by_pid = Some(Default::default());
+        let apps = vec![net_app("quiet", 0.0, 0.0), net_app("small", 10.0, 20.0), net_app("big", 100.0, 900.0)];
+        let mut h = History::new();
+        h.push(s.taken_at_ms, &s.totals, &apps);
+        let info = devices_info();
+        let input = |snap, device| PerfInput { snap, history: &h, info: &info, apps: &apps, device, range: Range::Minute, last_seen: None };
+        let f = build_perf(&input(&s, "net:Intel[R] Ethernet"));
+        assert!(f.net_feed);
+        assert_eq!(f.net_split, vec![
+            ("big".to_string(), NetRate { sent_bps: 100.0, recv_bps: 900.0 }),
+            ("small".to_string(), NetRate { sent_bps: 10.0, recv_bps: 20.0 }),
+        ], "busiest first, apps without traffic left out");
+        assert!(f.note.is_empty(), "no 'later version' note any more: {}", f.note);
+        let cpu = build_perf(&input(&s, "cpu"));
+        assert!(cpu.net_split.is_empty(), "filled only for network pages");
+        // Without a feed: no split, and the frame says so.
+        let mut feedless = s.clone();
+        feedless.totals.net_by_pid = None;
+        let f = build_perf(&input(&feedless, "net:Intel[R] Ethernet"));
+        assert!(!f.net_feed);
+    }
+
     #[test]
     fn a_disconnected_adapter_still_has_a_page() {
         let mut s = devices_snapshot();
@@ -1014,7 +1060,7 @@ pub(crate) mod tests {
         for s in snaps {
             h.push(s.taken_at_ms, &s.totals, &[]);
             seen = LastSeen::track(seen, s, device);
-            last = Some(build_perf(&PerfInput { snap: s, history: &h, info: &info, device, range: Range::Minute, last_seen: seen.as_ref() }));
+            last = Some(build_perf(&PerfInput { snap: s, history: &h, info: &info, apps: &[], device, range: Range::Minute, last_seen: seen.as_ref() }));
         }
         last.expect("at least one snapshot")
     }
@@ -1093,7 +1139,7 @@ pub(crate) mod tests {
         gone.totals.memory = None;
         h.push(2_000, &gone.totals, &[]);
         let info = info();
-        let f = build_perf(&PerfInput { snap: &gone, history: &h, info: &info, device: "memory", range: Range::Minute, last_seen: None });
+        let f = build_perf(&PerfInput { snap: &gone, history: &h, info: &info, apps: &[], device: "memory", range: Range::Minute, last_seen: None });
         assert_eq!((f.graphs[0].line.as_str(), f.graphs[0].area.as_str()), (EMPTY_PATH, EMPTY_PATH));
         assert_eq!(f.devices[1].spark, EMPTY_PATH);
         assert_eq!(f.devices[1].value, "—");
@@ -1121,7 +1167,7 @@ pub(crate) mod tests {
         }
         let s = snapshot(60_000);
         let info = info();
-        let input = PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute, last_seen: None };
+        let input = PerfInput { snap: &s, history: &h, info: &info, apps: &[], device: "cpu", range: Range::Minute, last_seen: None };
         assert_eq!(input.max_over(&Series::GpuUtil("k".into()), 30_000), 3.0);
         assert_eq!(input.max_over(&Series::GpuUtil("none".into()), 30_000), 0.0);
     }
@@ -1143,7 +1189,7 @@ pub(crate) mod tests {
         let s = snapshot(60_500);
         assert!(!h.push(s.taken_at_ms, &s.totals, &[]), "too soon after the last sample: not kept");
         let info = info();
-        let f = build_perf(&PerfInput { snap: &s, history: &h, info: &info, device: "cpu", range: Range::Minute, last_seen: None });
+        let f = build_perf(&PerfInput { snap: &s, history: &h, info: &info, apps: &[], device: "cpu", range: Range::Minute, last_seen: None });
         let main = path_xs(&f.graphs[0].line);
         assert_eq!(main.last(), Some(&1000.0), "the line ends on the right edge: {}", f.graphs[0].line);
         assert!(main[0] <= 0.0, "and starts on the left edge: {}", &f.graphs[0].line[..30]);

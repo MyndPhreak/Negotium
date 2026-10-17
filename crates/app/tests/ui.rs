@@ -1213,6 +1213,21 @@ fn the_bridge_answers_a_scrub_from_the_shared_history_and_follows_new_frames() {
 }
 
 #[test]
+fn the_network_scrub_card_notes_all_adapters() {
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Performance);
+    bridge.borrow_mut().set_history(scrub_history());
+    let mut net = scrub_frame(60_000, TWO_PM);
+    let p = net.perf.as_mut().unwrap();
+    (p.scrub_metric, p.net_feed) = (negotium_model::Metric::Network, true);
+    bridge.borrow_mut().apply(&ui, net);
+    bridge.borrow_mut().scrub(&ui, 0.5);
+    assert_eq!(ui.get_scrub_note(), "All adapters");
+    bridge.borrow_mut().apply(&ui, scrub_frame(61_000, TWO_PM + 1_000));
+    assert_eq!(ui.get_scrub_note(), "", "a CPU page has no note");
+}
+
+#[test]
 fn the_scrub_never_waits_for_the_worker_and_keeps_its_card_while_the_history_is_busy() {
     use slint::Model;
     let (ui, controls, bridge) = bridged();
@@ -2539,7 +2554,17 @@ fn the_startup_admin_banner_offers_restart_inline() {
     ui.set_page(0);
     ui.set_show_admin_banner(true);
     assert_eq!(El::find_by_accessible_label(&ui, "Dismiss").count(), 1);
-    assert!(text(&ui, "Some processes need admin rights to show details or be ended.").is_some(), "the Overview keeps its text");
+    assert!(text(&ui, OVERVIEW_BANNER).is_some(), "the Overview keeps its text");
+}
+
+const OVERVIEW_BANNER: &str = "Some processes need admin rights to show details, network use, or be ended.";
+
+#[test]
+fn the_admin_banner_mentions_network_use() {
+    let ui = shown_window();
+    ui.set_page(0);
+    ui.set_show_admin_banner(true);
+    assert!(text(&ui, OVERVIEW_BANNER).is_some(), "per-app network needs admin too");
 }
 
 #[test]

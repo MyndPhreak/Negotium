@@ -138,6 +138,8 @@ export component Graph inherits Rectangle {
     in property <float> scrub-x: -1;
     in property <string> scrub-title;
     in property <string> scrub-empty;
+    // A footnote under the rows (network pages: "All adapters"), or empty.
+    in property <string> scrub-note;
     in property <[ScrubRow]> scrub-rows;
     callback scrub(float);
 
@@ -162,15 +164,18 @@ export component Graph inherits Rectangle {
     }
     // The card stays inside the graph, which clips: it sits right of the cursor, or left of it
     // when it would pass the right edge, and lists only as many apps as the graph's height holds.
-    property <length> card-w: min(210px, root.width - 16px);
+    // Network values carry the upload/download split: a wider card.
+    property <length> card-w: min(root.scrub-note == "" ? 210px : 280px, root.width - 16px);
+    property <length> note-h: root.scrub-note == "" ? 0px : 16px;
     property <length> cursor-px: root.width * root.scrub-x;
-    property <int> card-rows: max(0, min(root.scrub-rows.length, floor((root.height - 16px - 34px) / 16px)));
+    property <int> card-rows: max(0, min(root.scrub-rows.length, floor((root.height - 16px - 34px - root.note-h) / 16px)));
     if root.scrub-x >= 0 && ta.has-hover : Rectangle {
         accessible-role: groupbox;
         accessible-label: root.scrub-title;
         width: root.card-w;
-        // Padding 8 + title 18 + rows of 16 (or two lines of the empty text) + padding 8.
-        height: 34px + (root.scrub-rows.length == 0 ? 32px : root.card-rows * 16px);
+        // Padding 8 + title 18 + rows of 16 (or two lines of the empty text) + the note + padding 8.
+        property <length> body-h: root.scrub-rows.length == 0 ? 32px : root.card-rows * 16px;
+        height: 34px + self.body-h + root.note-h;
         x: max(0px, min(root.width - self.width,
             root.cursor-px + 8px + self.width > root.width ? root.cursor-px - self.width - 8px : root.cursor-px + 8px));
         y: 8px;
@@ -224,6 +229,17 @@ export component Graph inherits Rectangle {
             color: Theme.muted;
             font-size: 11px;
             wrap: word-wrap;
+        }
+        if root.scrub-note != "" : Text {
+            x: 8px;
+            y: 26px + parent.body-h;
+            width: parent.width - 16px;
+            height: root.note-h;
+            text: root.scrub-note;
+            color: Theme.muted;
+            font-size: 11px;
+            overflow: elide;
+            vertical-alignment: center;
         }
     }
 }
