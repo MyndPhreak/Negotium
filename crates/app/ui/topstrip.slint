@@ -7,6 +7,8 @@ export component TopStrip inherits VerticalLayout {
     in property <[TileData]> tiles;
     in property <string> caption;
     in property <bool> interactive: true;
+    // Tiles glide to their new widths instead of jumping each frame (Settings > Smooth graphs).
+    in property <bool> smooth: true;
     callback open(int);
     vertical-stretch: 0; // see MetersRow: spare height belongs to the app list
     spacing: 4px;
@@ -17,6 +19,7 @@ export component TopStrip inherits VerticalLayout {
         spacing: 4px;
         for t in tiles : FocusButton {
             horizontal-stretch: max(t.weight, 0.0001);
+            animate horizontal-stretch { duration: root.smooth ? 450ms : 0ms; easing: ease-out; }
             min-width: 28px;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);

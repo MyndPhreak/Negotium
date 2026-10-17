@@ -8,6 +8,9 @@ component Meter inherits FocusButton {
     in property <MeterData> data;
     in property <bool> selected;
     min-width: 96px;
+    // Every meter asks for the same width, so the row splits evenly and a longer value (as the
+    // Network rate's) does not widen its card.
+    preferred-width: 96px;
     border-radius: Theme.radius;
     background: selected ? Theme.accent.with-alpha(0.18) : Theme.card;
     border-width: root.focused ? 2px : 1px;
@@ -18,9 +21,9 @@ component Meter inherits FocusButton {
     VerticalLayout {
         padding: 10px;
         spacing: 2px;
-        Text { text: data.label; color: Theme.muted; font-size: 12px; }
-        Text { text: data.available ? data.value : "Unavailable"; color: Theme.text; font-size: data.available ? 20px : 14px; font-weight: 600; }
-        Text { text: data.sub; color: Theme.muted; font-size: 11px; }
+        Text { text: data.label; color: Theme.muted; font-size: 12px; overflow: elide; }
+        Text { text: data.available ? data.value : "Unavailable"; color: Theme.text; font-size: data.available ? 20px : 14px; font-weight: 600; overflow: elide; }
+        Text { text: data.sub; color: Theme.muted; font-size: 11px; overflow: elide; }
         DataPath {
             height: 26px;
             commands: data.spark;

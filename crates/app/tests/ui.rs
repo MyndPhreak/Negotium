@@ -5,6 +5,7 @@ use negotium::perf::{DeviceView, GraphView, PerfFrame, Range, StatView};
 use negotium::worker::SharedHistory;
 use negotium::ScrubRow;
 use negotium::{MainWindow, MeterData, RowData};
+use slint::Model as _;
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -3095,4 +3096,49 @@ fn the_tray_cpu_switch_saves_and_tells_the_worker_and_the_tray() {
     assert_eq!(TRAY_TOLD.with(|t| t.borrow().clone()), [false], "the tray shows the app icon again");
     assert_eq!(switch(&ui, "Show CPU in tray icon").accessible_checked(), Some(false));
     saved(&path, "tray cpu off", |s| !s.tray_cpu);
+}
+
+// ---- Top strip and meters ----
+
+#[test]
+fn every_meter_is_as_wide_as_the_others_whatever_its_text() {
+    let ui = shown_window();
+    let widths = || ["CPU", "Memory", "Disk", "GPU", "Network"].map(|l| rect(&ui, &format!("{l} meter")).2);
+    let even = widths();
+    let mut meters: Vec<MeterData> = ui.get_meters().iter().collect();
+    meters[4].value = "1234.5 Mb/s".into();
+    meters[1].sub = "43.6 / 95.2 GB".into();
+    ui.set_meters(ModelRc::new(VecModel::from(meters)));
+    let after = widths();
+    assert_eq!(after, even, "a longer value does not widen its card");
+    assert!(after.iter().all(|w| (w - after[0]).abs() < 1.0), "the cards split the row evenly: {after:?}");
+}
+
+fn tile(i: usize, weight: f32) -> negotium::TileData {
+    negotium::TileData { id: i as i32, name: format!("App {i}").into(), value: "1%".into(), weight, hung: false }
+}
+
+fn tile_width(ui: &MainWindow, i: usize) -> f32 {
+    rect(ui, &format!("App {i} tile")).2
+}
+
+#[test]
+fn tiles_glide_to_their_new_widths_when_smooth_and_jump_when_not() {
+    // The bridge updates tiles in place (sync_model), so their widths animate between frames.
+    let ui = shown_window();
+    let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0), tile(1, 1.0)]));
+    ui.set_tiles(ModelRc::from(model.clone()));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    let start = tile_width(&ui, 0);
+    model.set_row_data(0, tile(0, 3.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
+    let mid = tile_width(&ui, 0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    let end = tile_width(&ui, 0);
+    assert!(start < mid && mid < end, "the first tile grows over time: {start} {mid} {end}");
+
+    ui.set_settings_smooth_graphs(false);
+    model.set_row_data(0, tile(0, 1.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert!((tile_width(&ui, 0) - start).abs() < 1.0, "without smoothing the tile jumps straight back");
 }

@@ -252,6 +252,7 @@ export component MainWindow inherits Window {
                     TopStrip {
                         tiles: root.tiles;
                         caption: root.top-caption;
+                        smooth: root.settings-smooth-graphs;
                         interactive: !root.modal-open;
                         // Opening a tile clears the filter, so the box must be emptied together with it.
                         open(id) => { root.search-text = ""; root.open-tile(id); }
