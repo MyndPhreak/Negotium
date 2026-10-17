@@ -11,38 +11,39 @@ export component TopStrip inherits VerticalLayout {
     in property <bool> interactive: true;
     // Tiles glide to their new widths instead of jumping each frame (Settings > Smooth graphs).
     in property <bool> smooth: true;
+    // How far this frame moves the tiles' edges, as a fraction of the strip (crate::bridge::
+    // strip_shift; 1, the most, unless the bridge says).
+    in property <float> shift: 1;
     callback open(int);
-    // The glide (crate::smooth's rule for the graphs, ruling P3c-3: a whole pixel of motion is
-    // worth a redraw). Not `animate`: an animation draws at display rate for its whole length, and
-    // the tiles' averaged weights change a little with nearly every frame, so a 450 ms animation
-    // drew about 108 frames a second at 240 Hz for motion of a pixel or two. Instead this timer
-    // steps the glide about once per pixel the tiles move (16 ms a step at most, one step for
-    // under a pixel). `glide-now` is the glide's own clock: GraphClock's, but it always moves by
-    // at least a step, so a glide ends even before Rust installs the clock (which then answers 0).
+    // The glide. Not `animate`: an animation draws at display rate for its whole length, and the
+    // tiles' averaged weights change with nearly every frame, so a 450 ms animation drew about 108
+    // frames a second at 240 Hz. Instead this timer steps the glide: once per physical pixel the
+    // edges move (ruling P3c-3) but at most `max-steps` times. The cap is the cost: the winit
+    // backend presents every isolated redraw twice (its frame throttle ticks once more after the
+    // frame it asked for), and real frames move the edges 10 to 60 px, so one step per pixel (up
+    // to 28) presented about 61 frames a second (docs/benchmarks, redraw-debug-report).
+    // `glide-now` is the glide's own clock: GraphClock's, but it always moves by at least a step,
+    // so a glide ends even before Rust installs the clock (which then answers 0).
     // Tiles glide only while `live`: smoothing on and the window on screen (GraphClock.shown, as
     // the graphs). Otherwise every tile sits on its target, so turning either back on finds them
     // where they are shown, and nothing steps a glide nobody sees.
     out property <bool> live: root.smooth && GraphClock.shown;
+    property <int> max-steps: 8;
     property <duration> glide-now;
     property <duration> glide-end;
     property <float> glide-px;
-    // Whole steps that end on the glide's end: one a pixel, at most one per 16 ms.
-    property <duration> glide-step: root.glide-ms / clamp(ceil(root.glide-px), 1, 28);
+    // Whole steps, whole milliseconds, the last one landing on the glide's end.
+    property <duration> glide-step: ceil(root.glide-ms / 1ms / clamp(ceil(root.glide-px), 1, root.max-steps)) * 1ms;
     property <duration> glide-ms: 450ms;
     Timer {
         interval: root.glide-step;
         running: root.live && root.glide-now < root.glide-end;
         triggered => { root.glide-now = max(GraphClock.clock(), root.glide-now + self.interval); }
     }
-    // A tile starts gliding (`px`: about how far its width changes, physical pixels); returns its
-    // start. A tile edge moves by the width changes of every tile left of it, so the glide steps by
-    // their sum, not the largest.
-    function start-glide(px: float) -> duration {
-        if (root.glide-now >= root.glide-end) {
-            root.glide-px = 0; // the last glide is over
-        }
+    // A tile starts gliding; returns its start. Every tile changed by a frame starts together.
+    function start-glide() -> duration {
         root.glide-now = max(GraphClock.clock(), root.glide-now);
-        root.glide-px += px;
+        root.glide-px = root.shift * root.width / 1phx;
         root.glide-end = root.glide-now + root.glide-ms;
         return root.glide-now;
     }
@@ -88,15 +89,12 @@ export component TopStrip inherits VerticalLayout {
                     self.to-shown = self.target-shown;
                     return;
                 }
-                // From where it is now (read before `to` moves). Its width change in pixels,
-                // about: pixels per unit of stretch from its own width (the other tiles' changes
-                // shift it a little too); a tile growing from nothing moves far.
-                let from = self.stretch;
+                // From where it is now (read before `to` moves).
+                self.from = self.stretch;
                 self.from-shown = self.shown;
-                self.from = from;
                 self.to = self.target;
                 self.to-shown = self.target-shown;
-                self.start = root.start-glide(from > 0.001 ? self.width / 1phx * abs(self.to - from) / from : 1000);
+                self.start = root.start-glide();
             }
             horizontal-stretch: root.live ? self.stretch : self.target;
             min-width: 28px * (root.live ? self.shown : self.target-shown);

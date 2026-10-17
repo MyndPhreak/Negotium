@@ -152,6 +152,12 @@ impl LiveSource {
         }
     }
 
+    /// Logs source errors to `log` instead of the user's log (tests driving the real pipeline).
+    pub fn with_log(mut self, log: crate::log::Log) -> Self {
+        self.log = log;
+        self
+    }
+
     /// Sends the tray a CPU sample for every history sample kept while Controls::tray_cpu is on,
     /// visible or hidden.
     pub fn with_tray(mut self, sink: TraySink) -> Self {

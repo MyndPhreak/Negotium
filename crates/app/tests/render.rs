@@ -555,6 +555,14 @@ mod frame_count {
     pub fn now_ms() -> u64 {
         NOW_MS.with(Cell::get)
     }
+
+    /// The frames the winit backend presents for draws at `times` (one 4 ms step apart at the
+    /// closest): Slint 1.18's timer-based frame throttle, started by a redraw request, ticks once
+    /// more after the frame it asked for and requests another, identical one, so a draw with none
+    /// in the next step costs two frames; draws in consecutive steps (an animation) one each.
+    pub fn winit_frames(times: &[u64]) -> usize {
+        times.len() + times.iter().filter(|&&t| !times.contains(&(t + 4))).count()
+    }
 }
 
 fn app_row(id: i32, cpu: &str) -> negotium::RowData {
@@ -665,47 +673,51 @@ fn an_icons_soft_pixels_blend_as_straight_alpha_on_dark_and_light() {
     }
 }
 
-/// With Smooth graphs on, a frame whose top tiles shift by a few pixels glides them there in a
-/// handful of redraws, as the graphs scroll (a whole pixel of motion is worth a redraw, ruling
-/// P3c-3), not one per display refresh for the whole glide: animating the tiles' stretch drew at
-/// display rate for 450 ms after every frame, about 108 frames a second at 240 Hz, because the
-/// tiles' averaged weights change a little with every frame. A tile growing in still glides.
+/// With Smooth graphs on, the top tiles glide after each frame in a bounded number of steps
+/// (MAX_GLIDE_STEPS, fewer for a shift of fewer pixels), counted as the winit backend presents
+/// them. Weights from a real run (crate::view's averaged CPU, about 10 to 25 px of shift a frame):
+/// a 450 ms `animate` drew at display rate (about 111 frames a second on a 240 Hz screen), and one
+/// step per pixel up to 28 a glide, each isolated step presented twice by the frame throttle,
+/// about 61. Frames go through the real Bridge. A tile growing in still glides.
 #[test]
-fn a_frame_that_nudges_the_top_tiles_glides_them_in_a_few_redraws() {
-    use negotium::bridge::sync_tiles;
-    use slint::Model;
+fn a_frame_glides_the_top_tiles_in_a_bounded_number_of_redraws() {
+    use negotium::view::{Frame, MeterView, TileView};
     let mut frames = frame_count::Frames::install(1000, 720);
     let ui = MainWindow::new().unwrap();
+    let bridge = negotium::bridge::Bridge::install(&ui, std::sync::Arc::new(negotium::controls::Controls::default()));
+    bridge.borrow_mut().set_collector_now(Some(0.0));
+    // The mocked clock, for the glide and the graphs alike (Bridge::install gave them the wall clock).
     negotium::smooth::install(&ui, || std::time::Duration::from_millis(frame_count::now_ms()));
-    let spark = negotium::graph::line(samples(82, 3, Load::Smooth), 81_000, 60_000, 100.0, 60);
-    let meter = |l: &str, v: u64| negotium::MeterData { label: l.into(), value: format!("{v}%").into(), sub: "".into(), spark: spark.clone().into(), available: true };
-    let labels = ["CPU", "Memory", "Disk", "GPU", "Network"];
-    let meters = std::rc::Rc::new(VecModel::from(labels.iter().map(|l| meter(l, 1)).collect::<Vec<_>>()));
-    ui.set_meters(ModelRc::from(meters.clone()));
-    let tiles = std::rc::Rc::new(VecModel::<negotium::TileData>::default());
-    ui.set_tiles(ModelRc::from(tiles.clone()));
-    let rows = std::rc::Rc::new(VecModel::from((0..40).map(|i| app_row(i, "1.0%")).collect::<Vec<_>>()));
-    ui.set_rows(ModelRc::from(rows.clone()));
     ui.show().unwrap();
     ui.window().set_size(PhysicalSize::new(1000, 720));
-    let tile = |i: i32, w: f32| negotium::TileData { id: i, name: format!("App {i}").into(), value: format!("{w:.2}%").into(), weight: w, hung: false, leaving: false };
-    // One frame a second, as the bridge applies it: tiles (one weight wobbling by 2%, a few
-    // pixels), meter values, a row, and the graphs' scroll run.
-    let mut frame = |sec: u64| {
-        let wobble = if sec.is_multiple_of(2) { 3.0 } else { 3.06 };
-        sync_tiles(&tiles, (0..5).map(|i| tile(i, if i == 2 { wobble } else { 5.0 - i as f32 })).collect(), true);
-        for (i, l) in labels.iter().enumerate() {
-            meters.set_row_data(i, meter(l, sec + i as u64));
-        }
-        rows.set_row_data(3, app_row(3, &format!("{sec}.0%")));
-        ui.invoke_scroll_from(-1250.0, 1.0);
+    let spark = negotium::graph::line(samples(82, 3, Load::Smooth), 81_000, 60_000, 100.0, 60);
+    let weights: [[f32; 5]; 6] = [
+        [5.390, 2.771, 2.060, 1.441, 1.170],
+        [5.411, 2.954, 2.306, 1.683, 1.364],
+        [5.456, 3.100, 2.553, 1.746, 1.587],
+        [5.567, 3.258, 2.603, 1.859, 1.745],
+        [5.500, 3.387, 2.655, 1.886, 1.818],
+        [5.365, 3.506, 2.690, 1.946, 1.815],
+    ];
+    let mut frame = |sec: usize| {
+        let f = Frame {
+            meters: ["CPU", "Memory", "Disk", "GPU", "Network"].iter()
+                .map(|l| MeterView { label: l, value: format!("{sec}%"), sub: String::new(), spark: spark.clone(), available: true }).collect(),
+            tiles: weights[sec].iter().enumerate()
+                .map(|(i, &w)| TileView { id: i as i32 + 1, name: format!("App {i}"), value: format!("{w:.1}%"), weight: w, hung: false }).collect(),
+            graph_end_ms: 81_000 + sec as u64 * 1_000,
+            ..Default::default()
+        };
+        bridge.borrow_mut().set_collector_now(Some(80_000.0 + sec as f64 * 1_000.0));
+        bridge.borrow_mut().apply(&ui, f);
         frames.run_log(250) // a second at 250 Hz
     };
     let first = frame(0);
     assert!(first.iter().filter(|&&t| t > 40).count() >= 5, "the tiles grow in over several redraws: {first:?}");
-    for sec in 1..6 {
+    for sec in 1..weights.len() {
         let drawn = frame(sec);
-        assert!(drawn.len() <= 12, "second {sec}: {} frames for tiles a few pixels apart: {drawn:?}", drawn.len());
+        let presented = frame_count::winit_frames(&drawn);
+        assert!(presented <= 26, "second {sec}: {presented} frames presented ({} drawn) for one frame's glide: {drawn:?}", drawn.len());
     }
 }
 
@@ -748,4 +760,101 @@ fn tiles_stay_shown_at_their_widths_when_smooth_graphs_turns_on() {
             assert!(accent_tinted(p), "{ms} ms after turning smooth on, a tile is drawn: {p:?}");
         }
     }
+}
+
+/// The real pipeline (Collector, Model, Ranker, TopPicker, build_frame through LiveSource) into the
+/// real Bridge, on a software window driven at about 250 Hz of wall-clock time, one frame a second
+/// for `NEGOTIUM_REAL_SECS` (10) seconds: the redraws a second, as negotium-bench counts them.
+/// Machine-dependent and slow: run by hand (`--ignored --nocapture`). `NEGOTIUM_REAL_OFF` takes a
+/// comma list of parts to leave out: tiles, meters, rows, icons, smooth.
+#[test]
+#[ignore]
+fn real_pipeline_redraws_per_second() {
+    use negotium::bridge::Bridge;
+    use negotium::controls::Controls;
+    use negotium::worker::{LiveSource, Source};
+    use slint::Model;
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType};
+    use slint::platform::{Platform, WindowAdapter};
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    struct Real(Rc<MinimalSoftwareWindow>, Instant);
+    impl Platform for Real {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+        fn duration_since_start(&self) -> Duration {
+            self.1.elapsed()
+        }
+    }
+    let off = std::env::var("NEGOTIUM_REAL_OFF").unwrap_or_default();
+    let off = |part: &str| off.split(',').any(|p| p == part);
+    let secs: u64 = std::env::var("NEGOTIUM_REAL_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+    let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+    let (w, h, scale) = (env("NEGOTIUM_REAL_W", 1600.0) as u32, env("NEGOTIUM_REAL_H", 1000.0) as u32, env("NEGOTIUM_REAL_SCALE", 1.0));
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    slint::platform::set_platform(Box::new(Real(window.clone(), Instant::now()))).unwrap();
+    let ui = MainWindow::new().unwrap();
+    ui.set_settings_smooth_graphs(!off("smooth"));
+    ui.global::<negotium::GraphClock>().set_smooth(!off("smooth"));
+    let controls = Arc::new(Controls::default());
+    let bridge = Bridge::install(&ui, controls.clone());
+    let history: negotium::worker::SharedHistory = Default::default();
+    bridge.borrow_mut().set_history(history.clone());
+    let epoch = Instant::now();
+    bridge.borrow_mut().set_epoch(epoch);
+    type Arrived = Arc<Mutex<Vec<(String, Option<negotium::icons::IconPixels>)>>>;
+    let icons: Arrived = Default::default();
+    if !off("icons") {
+        let icons = icons.clone();
+        bridge.borrow_mut().set_icon_loader(negotium::icons::IconLoader::spawn(negotium::icons::extract, move |p, px| icons.lock().unwrap().push((p, px))));
+    }
+    let scratch = std::env::temp_dir().join(format!("negotium-real-pipeline-{}", std::process::id()));
+    let mut source = LiveSource::new(history, epoch, Default::default()).with_log(negotium::log::Log::new(scratch.join("negotium.log")));
+    if off("tiles") { ui.set_tiles(ModelRc::new(VecModel::<negotium::TileData>::default())); }
+    if off("meters") { ui.set_meters(ModelRc::new(VecModel::<negotium::MeterData>::default())); }
+    if off("rows") { ui.set_rows(ModelRc::new(VecModel::<negotium::RowData>::default())); }
+    ui.show().unwrap();
+    window.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: scale });
+    ui.window().set_size(PhysicalSize::new(w, h));
+    let mut buffer = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+    let start = Instant::now();
+    let mut next_frame = start;
+    let mut per_sec = vec![Vec::<u32>::new(); secs as usize + 1];
+    let mut sec_start = start;
+    while start.elapsed() < Duration::from_secs(secs) {
+        let now = Instant::now();
+        if now >= next_frame {
+            if let Some(frame) = source.next_frame(&controls) {
+                bridge.borrow_mut().apply(&ui, frame);
+            }
+            sec_start = now;
+            next_frame += Duration::from_secs(1);
+            println!("frame at {:>6} ms: scroll-interval {:?}, tiles {:?}", (now - start).as_millis(), ui.get_scroll_interval(),
+                ui.get_tiles().iter().map(|t| (t.id, t.weight, t.leaving)).collect::<Vec<_>>());
+        }
+        for (p, px) in icons.lock().unwrap().drain(..) {
+            bridge.borrow_mut().put_icon(p, px);
+        }
+        slint::platform::update_timers_and_animations();
+        // As the winit backend: an active animation asks for a frame even when nothing is dirty.
+        let animating = ui.window().has_active_animations();
+        if animating {
+            window.request_redraw();
+        }
+        if window.draw_if_needed(|r| { r.render(&mut buffer, w as usize); }) {
+            let s = (start.elapsed().as_secs()) as usize;
+            if s < per_sec.len() { per_sec[s].push((Instant::now() - sec_start).as_millis() as u32); }
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    // Draws land on a ~5 ms loop here, not the 4 ms grid frame_count::winit_frames assumes: a
+    // draw with none within 8 ms after it is isolated, and winit presents it twice.
+    for (s, d) in per_sec.iter().enumerate() {
+        let isolated = d.iter().filter(|&&t| !d.iter().any(|&u| u > t && u <= t + 8)).count();
+        println!("second {s}: {} redraws, about {} presented by winit {:?}", d.len(), d.len() + isolated, d);
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
 }
