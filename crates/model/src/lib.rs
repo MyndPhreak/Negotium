@@ -7,7 +7,7 @@ pub mod tree;
 
 pub use grouping::{AppKey, AppKind, SHELL_HOSTS, display_name, group};
 pub use hung::HungTracker;
-pub use ranking::{Metric, RESORT_INTERVAL_MS, Ranker, top_n};
+pub use ranking::{Metric, Pick, RESORT_INTERVAL_MS, Ranker, TOP_AVERAGE_MS, TOP_MARGIN, TopPicker, top_n};
 pub use rates::{ProcRates, RateTracker};
 pub use tree::descendants_deepest_first;
 

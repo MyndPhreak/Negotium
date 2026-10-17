@@ -1,7 +1,8 @@
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
 
-export struct TileData { id: int, name: string, value: string, weight: float, hung: bool }
+// `leaving`: gone from the top this frame; it shrinks away and the bridge drops it next frame.
+export struct TileData { id: int, name: string, value: string, weight: float, hung: bool, leaving: bool }
 
 export component TopStrip inherits VerticalLayout {
     in property <[TileData]> tiles;
@@ -18,15 +19,26 @@ export component TopStrip inherits VerticalLayout {
         max-width: 16384px; // see MetersRow: empty repeaters must not cap the window width
         spacing: 4px;
         for t in tiles : FocusButton {
-            horizontal-stretch: max(t.weight, 0.0001);
-            animate horizontal-stretch { duration: root.smooth ? 450ms : 0ms; easing: ease-out; }
-            min-width: 28px;
+            // A new tile grows from nothing: `born` turns on a moment after it is created, so the
+            // change animates (a value set at creation would not).
+            property <bool> born: false;
+            property <bool> present: self.born && !t.leaving;
+            Timer {
+                interval: 1ms;
+                running: !parent.born;
+                triggered => { parent.born = true; }
+            }
+            horizontal-stretch: self.present ? max(t.weight, 0.0001) : 0.0001;
+            min-width: self.present ? 28px : 0px;
+            opacity: self.present ? 1 : 0;
+            animate horizontal-stretch, min-width, opacity { duration: root.smooth ? 450ms : 0ms; easing: ease-out; }
+            clip: true;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);
             border-width: self.focused ? 2px : 0px;
             border-color: Theme.text;
             accessible-label: t.name + " tile";
-            interactive: root.interactive;
+            interactive: root.interactive && !t.leaving;
             activated => { root.open(t.id); }
             VerticalLayout {
                 padding: 6px;

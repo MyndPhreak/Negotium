@@ -3,10 +3,10 @@
 use crate::controls::{Controls, Page};
 use crate::perf::{LastSeen, PerfInput, build_perf};
 use crate::tray::TraySample;
-use crate::view::{Frame, FrameOptions, IdMap, IdSeed, build_frame};
+use crate::view::{Frame, FrameOptions, IdMap, IdSeed, TOP_TILES, build_frame};
 use negotium_collector::{Collector, SystemInfo};
 use negotium_history::History;
-use negotium_model::{Model, Ranker};
+use negotium_model::{Model, Ranker, TopPicker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -116,6 +116,7 @@ pub struct LiveSource {
     info: SystemInfo,
     model: Model,
     ranker: Ranker,
+    top: TopPicker,
     history: SharedHistory,
     ids: IdMap,
     /// The selected Performance device as last seen, for its page's grace period.
@@ -141,6 +142,7 @@ impl LiveSource {
             info,
             model: Model::new(),
             ranker: Ranker::new(),
+            top: TopPicker::new(),
             history,
             ids: IdMap::with_seed(ids),
             seen: None,
@@ -179,10 +181,11 @@ impl Source for LiveSource {
             Page::Overview => {
                 let metric = controls.metric();
                 let order = self.ranker.order(&rows, metric, snap.taken_at_ms, controls.frozen());
+                let top = self.top.pick(&rows, metric, snap.taken_at_ms, TOP_TILES);
                 let (expanded, all_children) = controls.child_rows();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children };
                 let ids = &mut self.ids;
-                Some(read_history(&self.history, |h| build_frame(ids, &snap, &rows, &order, h, &opts)))
+                Some(read_history(&self.history, |h| build_frame(ids, &snap, &rows, &order, &top, h, &opts)))
             }
             Page::Performance => {
                 let (device, range) = controls.perf();

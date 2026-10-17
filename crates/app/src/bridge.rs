@@ -48,6 +48,61 @@ pub fn sync_model<T: Clone + PartialEq, S: RowStore<T>>(store: &S, items: Vec<T>
     }
 }
 
+/// Applies a frame's top tiles (in rank order) so each app keeps its tile across frames: the
+/// strip animates only what changed. Smoothly, an app leaving the top keeps its place for one
+/// frame marked `leaving` (shrinking away) and a newcomer is inserted next to the tile ranked
+/// just above it (growing in). Apps that stay but swap ranks trade tiles in place; by then their
+/// averaged widths are about equal, so only the labels change. Without smoothing tiles are simply
+/// replaced in order.
+pub fn sync_tiles(model: &VecModel<TileData>, tiles: Vec<TileData>, smooth: bool) {
+    for i in (0..model.row_count()).rev() {
+        if model.row_data(i).is_some_and(|t| t.leaving) {
+            model.remove(i);
+        }
+    }
+    if !smooth {
+        sync_model(model, tiles);
+        return;
+    }
+    let ids: HashSet<i32> = tiles.iter().map(|t| t.id).collect();
+    let mut kept = HashSet::new();
+    for i in 0..model.row_count() {
+        let Some(mut t) = model.row_data(i) else { continue };
+        if ids.contains(&t.id) {
+            kept.insert(t.id);
+        } else {
+            t.leaving = true;
+            t.weight = 0.0;
+            model.set_row_data(i, t);
+        }
+    }
+    // The staying apps, in rank order, into the staying tiles in strip order.
+    let mut staying = tiles.iter().filter(|t| kept.contains(&t.id));
+    for i in 0..model.row_count() {
+        if model.row_data(i).is_some_and(|t| !t.leaving) {
+            // One each, unless ids repeat; never panic on the UI thread over it.
+            let Some(next) = staying.next().cloned() else { break };
+            if model.row_data(i).as_ref() != Some(&next) {
+                model.set_row_data(i, next);
+            }
+        }
+    }
+    // Newcomers after the tile ranked just above them (already placed: rank order).
+    for (r, t) in tiles.iter().enumerate() {
+        if kept.contains(&t.id) {
+            continue;
+        }
+        let at = match r.checked_sub(1) {
+            None => 0,
+            Some(prev) => {
+                let above = tiles[prev].id;
+                (0..model.row_count()).find(|&i| model.row_data(i).is_some_and(|m| !m.leaving && m.id == above)).map_or(model.row_count(), |i| i + 1)
+            }
+        };
+        model.insert(at, t.clone());
+    }
+}
+
 /// Which rows the list shows, in which order. Unfrozen it simply follows the latest frame. While
 /// frozen (pointer over the list, or a row's context menu open) every index keeps its row: rows
 /// that went away stay in place, marked exited and inert, and new rows wait until the list
@@ -499,9 +554,9 @@ impl Bridge {
         sync_model(&*self.meters, frame.meters.iter().map(|m| MeterData {
             label: m.label.into(), value: m.value.clone().into(), sub: m.sub.clone().into(), spark: m.spark.clone().into(), available: m.available,
         }).collect());
-        sync_model(&*self.tiles, frame.tiles.iter().map(|t| TileData {
-            id: t.id, name: t.name.clone().into(), value: t.value.clone().into(), weight: t.weight, hung: t.hung,
-        }).collect());
+        sync_tiles(&self.tiles, frame.tiles.iter().map(|t| TileData {
+            id: t.id, name: t.name.clone().into(), value: t.value.clone().into(), weight: t.weight, hung: t.hung, leaving: false,
+        }).collect(), ui.get_settings_smooth_graphs());
         ui.set_top_caption(frame.caption.clone().into());
         ui.set_show_admin_banner(frame.admin_banner && !self.banner_dismissed);
         self.scroll_to(ui, frame.graph_end_ms);

@@ -3,7 +3,7 @@
 use crate::format;
 use crate::graph;
 use negotium_history::{History, Series};
-use negotium_model::{AppKey, AppRow, Metric, top_n};
+use negotium_model::{AppKey, AppRow, Metric, Pick};
 use negotium_snapshot::Snapshot;
 use std::collections::{HashMap, HashSet};
 
@@ -199,8 +199,9 @@ pub struct FrameOptions {
     pub all_children: bool,
 }
 
+/// `top` is the top tiles, picked by a TopPicker (negotium_model) that lasts across frames.
 pub fn build_frame(
-    ids: &mut IdMap, snap: &Snapshot, rows: &[AppRow], order: &[usize], history: &History, opts: &FrameOptions,
+    ids: &mut IdMap, snap: &Snapshot, rows: &[AppRow], order: &[usize], top: &[Pick], history: &History, opts: &FrameOptions,
 ) -> Frame {
     let (metric, elevated) = (opts.metric, opts.elevated);
     let mut seen = HashSet::new();
@@ -279,12 +280,13 @@ pub fn build_frame(
     }
     ids.retain(&seen);
 
-    let tiles = top_n(rows, metric, TOP_TILES)
-        .into_iter()
-        .map(|i| {
-            let r = &rows[i];
+    // Sized by the average that ranks them; the text is the live reading, as in the list.
+    let tiles = top
+        .iter()
+        .map(|p| {
+            let r = &rows[p.index];
             let id = ids.ids.get(&RowKey::App(r.key.clone())).copied().unwrap_or(0);
-            TileView { id, name: r.name.clone(), value: metric_text(r.value(metric), metric), weight: r.value(metric) as f32, hung: r.hung_for_ms.is_some() }
+            TileView { id, name: r.name.clone(), value: metric_text(r.value(metric), metric), weight: p.average as f32, hung: r.hung_for_ms.is_some() }
         })
         .collect();
 
@@ -324,6 +326,13 @@ pub fn visible_rows(rows: &[RowView], expanded: &HashSet<i32>, search: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use negotium_model::TopPicker;
+
+    /// build_frame with the tiles a fresh TopPicker picks: the current readings, ranked.
+    fn test_frame(ids: &mut IdMap, snap: &Snapshot, rows: &[AppRow], order: &[usize], history: &History, opts: &FrameOptions) -> Frame {
+        let top = TopPicker::new().pick(rows, opts.metric, snap.taken_at_ms, TOP_TILES);
+        build_frame(ids, snap, rows, order, &top, history, opts)
+    }
     use negotium_model::{AppKind, ProcRow};
     use negotium_snapshot::{MemoryTotals, SystemTotals};
 
@@ -359,14 +368,14 @@ mod tests {
             app(1, "Chrome", 30.0, vec![proc(1, 0, 20.0, "chrome.exe"), proc(2, 1, 10.0, "chrome.exe")], None),
             app(3, "Editor", 5.0, vec![proc(3, 0, 5.0, "code.exe")], None),
         ];
-        let a = build_frame(&mut IdMap::with_seed(seed.clone()), &s, &before, &[0, 1], &History::new(), &opts(Metric::Cpu, true));
+        let a = test_frame(&mut IdMap::with_seed(seed.clone()), &s, &before, &[0, 1], &History::new(), &opts(Metric::Cpu, true));
         // Restarted: a fresh map, and other apps rank first now.
         let after = vec![
             app(5, "Mail", 50.0, vec![proc(5, 0, 50.0, "mail.exe"), proc(6, 5, 1.0, "mail.exe")], None),
             app(3, "Editor", 5.0, vec![proc(3, 0, 5.0, "code.exe")], None),
             app(1, "Chrome", 1.0, vec![proc(1, 0, 1.0, "chrome.exe"), proc(2, 1, 0.0, "chrome.exe")], None),
         ];
-        let b = build_frame(&mut IdMap::with_seed(seed.clone()), &s, &after, &[0, 1, 2], &History::new(), &opts(Metric::Cpu, true));
+        let b = test_frame(&mut IdMap::with_seed(seed.clone()), &s, &after, &[0, 1, 2], &History::new(), &opts(Metric::Cpu, true));
         assert!(!a.targets.is_empty() && !b.targets.is_empty());
         for (id, old) in &a.targets {
             if let Some(new) = b.targets.get(id) {
@@ -383,10 +392,10 @@ mod tests {
         s.totals.gpu_pct = Some(80.0);
         s.totals.gpus = Some(vec![gpu("igpu", 5.0, None), gpu("dgpu", 80.0, Some(64.6))]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "65 °C");
         s.totals.gpus = Some(vec![gpu("dgpu", 80.0, None)]);
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "", "no sensor: no label");
     }
 
@@ -397,10 +406,10 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.totals.gpus = Some(vec![gpu("first", 0.0, 40.0), gpu("second", 0.0, 70.0)]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "40 °C", "tie: the first GPU");
         s.totals.gpus = Some(vec![gpu("unknown", f32::NAN, 90.0), gpu("known", 0.0, 55.0)]);
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters[3].sub, "55 °C", "unknown utilization never beats a known one");
     }
 
@@ -408,7 +417,7 @@ mod tests {
     fn a_memory_total_of_zero_shows_the_meter_unavailable() {
         let mut s = snap(Some(1.0));
         s.totals.memory = Some(MemoryTotals::default());
-        let f = build_frame(&mut IdMap::new(), &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut IdMap::new(), &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert!(!f.meters[1].available, "total 0 is unknown, not 100% in use: {:?}", f.meters[1]);
     }
 
@@ -422,7 +431,7 @@ mod tests {
             h.push(t, &s.totals, &[]);
         }
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
         assert_eq!(f.meters[0].spark, "M 966.7 100.0 L 983.3 50.0 L 1000.0 0.0");
     }
 
@@ -433,7 +442,7 @@ mod tests {
         s.totals.net_bps = Some(0.0);
         h.push(60_000, &s.totals, &[]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[], &[], &h, &opts(Metric::Cpu, true));
         assert_eq!(f.meters[4].spark, "M 1000.0 100.0 L 999.9 100.0");
     }
 
@@ -444,7 +453,7 @@ mod tests {
             app(3, "Editor", 5.0, vec![proc(3, 0, 5.0, "code.exe")], Some(14_400)),
         ];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(37.6)), &rows, &[1, 0], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &snap(Some(37.6)), &rows, &[1, 0], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(f.meters.len(), 5);
         assert_eq!(f.meters[0].value, "38%");
         assert_eq!(f.meters[1].sub, "8.0 / 16.0 GB");
@@ -469,7 +478,7 @@ mod tests {
         win.kind = AppKind::Windows;
         let rows = vec![win, app(9, "Editor", 5.0, vec![proc(9, 0, 5.0, "code.exe")], None)];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &opts(Metric::Cpu, true));
         let windows = f.rows.iter().find(|r| r.name == "Windows" && r.depth == 0).unwrap();
         assert!(!windows.actionable);
         assert!(f.targets[&windows.id].group);
@@ -494,7 +503,7 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.windows = vec![negotium_snapshot::WindowSample { pid: 6, hung: true, title: "Search".into() }];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[win], &[0], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[win], &[0], &History::new(), &opts(Metric::Cpu, true));
         let group = f.rows.iter().find(|r| r.depth == 0).unwrap();
         assert_eq!(group.hung, "Not responding · 9s", "the group still shows the roll-up");
         assert!(!group.actionable, "R7: the group itself is never actionable");
@@ -514,17 +523,17 @@ mod tests {
         ];
         let mut ids = IdMap::new();
         let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &collapsed);
+        let f = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &collapsed);
         assert!(f.rows.iter().all(|r| r.depth == 0), "no child rows for collapsed apps");
         assert_eq!(f.targets.len(), 2, "and no child targets");
         let code = f.rows.iter().find(|r| r.name == "Code").unwrap().id;
         let one = FrameOptions { expanded: HashSet::from([code]), ..collapsed.clone() };
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &one);
+        let f = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &one);
         let children: Vec<_> = f.rows.iter().filter(|r| r.depth == 1).collect();
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|r| r.parent == code && f.targets.contains_key(&r.id)));
         let searching = FrameOptions { all_children: true, ..collapsed };
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &searching);
+        let f = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &searching);
         assert_eq!(f.rows.iter().filter(|r| r.depth == 1).count(), 4, "a search can match any process");
     }
 
@@ -537,7 +546,7 @@ mod tests {
         win.kind = AppKind::Windows;
         let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(), &collapsed);
+        let f = test_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(), &collapsed);
         let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").expect("built so it can be shown and force-closed");
         assert_eq!(child.hung, "Not responding · 9s");
     }
@@ -546,7 +555,7 @@ mod tests {
     fn degenerate_inputs_do_not_divide_by_zero() {
         let rows = vec![app(1, "Idle", 0.0, vec![proc(1, 0, 0.0, "idle.exe")], None)];
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &snap(None), &rows, &[0], &History::new(), &opts(Metric::Gpu, false));
+        let f = test_frame(&mut ids, &snap(None), &rows, &[0], &History::new(), &opts(Metric::Gpu, false));
         assert!(f.tiles.is_empty());
         assert!(f.rows.iter().all(|r| r.bar == 0.0));
         assert!(!f.meters[0].available, "CPU meter shows Unavailable when cpu_pct is None");
@@ -558,7 +567,7 @@ mod tests {
         let mut s = snap(Some(1.0));
         s.totals.disks = Some(vec![]);
         let mut ids = IdMap::new();
-        let f = build_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
+        let f = test_frame(&mut ids, &s, &[], &[], &History::new(), &opts(Metric::Cpu, true));
         assert!(!f.meters[2].available);
     }
 
@@ -566,8 +575,8 @@ mod tests {
     fn ids_are_stable_across_frames() {
         let rows = vec![app(1, "Chrome", 30.0, vec![proc(1, 0, 30.0, "chrome.exe")], None)];
         let mut ids = IdMap::new();
-        let a = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
-        let b = build_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
+        let a = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
+        let b = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0], &History::new(), &opts(Metric::Cpu, true));
         assert_eq!(a.rows[0].id, b.rows[0].id);
     }
 
@@ -595,7 +604,7 @@ mod tests {
         }
         // A 0.5 s refresh: this tick is half a second newer than the newest kept sample.
         s.taken_at_ms = 60_500;
-        let f = build_frame(&mut IdMap::new(), &s, &[], &[], &h, &opts(Metric::Cpu, true));
+        let f = test_frame(&mut IdMap::new(), &s, &[], &[], &h, &opts(Metric::Cpu, true));
         let spark = &f.meters[0].spark;
         assert!(spark.starts_with("M 0.0 50.0"), "{spark}");
         assert!(spark.ends_with("L 1000.0 50.0"), "{spark}");

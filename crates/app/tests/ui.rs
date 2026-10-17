@@ -199,7 +199,7 @@ fn window_opens_at_its_preferred_width() {
 fn clicking_a_tile_clears_the_search_box() {
     let ui = window();
     ui.set_tiles(ModelRc::new(VecModel::from(vec![negotium::TileData {
-        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false,
+        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false, leaving: false,
     }])));
     ui.set_search_text("chr".into());
     let tile = ElementHandle::find_by_accessible_label(&ui, "Chrome tile").next().expect("tile");
@@ -538,7 +538,7 @@ fn the_meters_do_not_grow_when_the_first_tiles_and_rows_arrive() {
     };
     let (meter_h, search_y) = measure();
     let tiles: Vec<negotium::TileData> = (0..5)
-        .map(|i| negotium::TileData { id: i, name: format!("App {i}").into(), value: "5%".into(), weight: 1.0, hung: false })
+        .map(|i| negotium::TileData { id: i, name: format!("App {i}").into(), value: "5%".into(), weight: 1.0, hung: false, leaving: false })
         .collect();
     ui.set_tiles(ModelRc::new(VecModel::from(tiles)));
     ui.set_top_caption("Top CPU users".into());
@@ -705,7 +705,7 @@ fn leaving_the_overview_drops_a_row_buttons_keyboard_focus() {
 fn an_open_modal_blocks_the_default_action_of_rail_and_tiles() {
     let ui = window();
     ui.set_tiles(ModelRc::new(VecModel::from(vec![negotium::TileData {
-        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false,
+        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false, leaving: false,
     }])));
     let pages = Rc::new(RefCell::new(Vec::new()));
     let p = pages.clone();
@@ -728,7 +728,7 @@ fn an_open_modal_blocks_the_default_action_of_rail_and_tiles() {
 fn a_clicked_tile_opens_and_takes_focus_so_space_opens_it_again() {
     let ui = shown_window();
     ui.set_tiles(ModelRc::new(VecModel::from(vec![negotium::TileData {
-        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false,
+        id: 3, name: "Chrome".into(), value: "5%".into(), weight: 1.0, hung: false, leaving: false,
     }])));
     let tiles = Rc::new(RefCell::new(Vec::new()));
     let t = tiles.clone();
@@ -3115,11 +3115,23 @@ fn every_meter_is_as_wide_as_the_others_whatever_its_text() {
 }
 
 fn tile(i: usize, weight: f32) -> negotium::TileData {
-    negotium::TileData { id: i as i32, name: format!("App {i}").into(), value: "1%".into(), weight, hung: false }
+    negotium::TileData { id: i as i32, name: format!("App {i}").into(), value: "1%".into(), weight, hung: false, leaving: false }
 }
 
 fn tile_width(ui: &MainWindow, i: usize) -> f32 {
     rect(ui, &format!("App {i} tile")).2
+}
+
+/// Lets new tiles be born (their one-shot Timer starts when the tile is laid out, then fires),
+/// then advances `ms`.
+fn settle(ui: &MainWindow, ms: u64) {
+    let n = ui.get_tiles().row_count();
+    for i in 0..n {
+        tile_width(ui, i);
+    }
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(ms));
 }
 
 #[test]
@@ -3128,7 +3140,7 @@ fn tiles_glide_to_their_new_widths_when_smooth_and_jump_when_not() {
     let ui = shown_window();
     let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0), tile(1, 1.0)]));
     ui.set_tiles(ModelRc::from(model.clone()));
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    settle(&ui, 1000);
     let start = tile_width(&ui, 0);
     model.set_row_data(0, tile(0, 3.0));
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
@@ -3141,4 +3153,41 @@ fn tiles_glide_to_their_new_widths_when_smooth_and_jump_when_not() {
     model.set_row_data(0, tile(0, 1.0));
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     assert!((tile_width(&ui, 0) - start).abs() < 1.0, "without smoothing the tile jumps straight back");
+}
+
+fn ids_of(model: &VecModel<negotium::TileData>) -> Vec<(i32, bool)> {
+    model.iter().map(|t| (t.id, t.leaving)).collect()
+}
+
+#[test]
+fn tiles_keep_their_place_a_leaver_shrinks_away_and_a_newcomer_slots_in_by_rank() {
+    use negotium::bridge::sync_tiles;
+    let _ui = window(); // initialises the backend
+    let model = VecModel::from(vec![tile(1, 5.0), tile(2, 4.0), tile(3, 3.0)]);
+    // 2 leaves, 4 arrives ranked second.
+    sync_tiles(&model, vec![tile(1, 5.0), tile(4, 4.5), tile(3, 3.0)], true);
+    assert_eq!(ids_of(&model), [(1, false), (4, false), (2, true), (3, false)]);
+    assert_eq!(model.row_data(2).unwrap().weight, 0.0, "the leaver shrinks to nothing");
+    // Next frame the leaver is gone.
+    sync_tiles(&model, vec![tile(1, 5.0), tile(4, 4.5), tile(3, 3.0)], true);
+    assert_eq!(ids_of(&model), [(1, false), (4, false), (3, false)]);
+    // Without smoothing: replaced in order, no leavers.
+    sync_tiles(&model, vec![tile(5, 9.0), tile(1, 5.0)], false);
+    assert_eq!(ids_of(&model), [(5, false), (1, false)]);
+}
+
+#[test]
+fn a_new_tile_grows_in_from_nothing_when_smooth() {
+    let ui = shown_window();
+    let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0)]));
+    ui.set_tiles(ModelRc::from(model.clone()));
+    settle(&ui, 1000);
+    model.push(tile(1, 1.0));
+    settle(&ui, 50);
+    let early = tile_width(&ui, 1);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    let settled = tile_width(&ui, 1);
+    assert!(early < settled * 0.6, "it starts narrow: {early} vs {settled}");
+    let first = tile_width(&ui, 0);
+    assert!((settled - first).abs() <= 2.0, "and ends as wide as its equal: {settled} vs {first}");
 }
