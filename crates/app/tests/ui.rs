@@ -367,29 +367,56 @@ impl negotium::icons::RequestIcon for AskedIcons {
     }
 }
 
+fn icon_px() -> Option<negotium::icons::IconPixels> {
+    Some(slint::SharedPixelBuffer::new(negotium::icons::ICON_PX, negotium::icons::ICON_PX))
+}
+
 #[test]
 fn rows_ask_for_their_icon_once_and_show_it_when_it_arrives() {
     use slint::Model;
     let (ui, _controls, bridge) = bridged();
     let asked = Rc::new(RefCell::new(Vec::new()));
-    let mut b = bridge.borrow_mut();
-    b.set_icon_loader(AskedIcons(asked.clone()));
+    bridge.borrow_mut().set_icon_loader(AskedIcons(asked.clone()));
     let editor = RowView { icon: r"C:\editor.exe".into(), ..row_view(1, "Editor", "") };
     // The Windows group draws its own glyph; a row without an image path has nothing to ask for.
     let group = RowView { icon: r"C:\Windows\explorer.exe".into(), windows: true, actionable: false, ..row_view(2, "Windows", "") };
     let rows = vec![editor, group, row_view(3, "Unknown", "")];
-    b.apply(&ui, frame(rows.clone()));
-    b.apply(&ui, frame(rows.clone()));
+    bridge.borrow_mut().apply(&ui, frame(rows.clone()));
+    bridge.borrow_mut().apply(&ui, frame(rows.clone()));
     assert_eq!(*asked.borrow(), [r"C:\editor.exe"], "one request, only for a real program image");
     assert!(!ui.get_rows().row_data(0).unwrap().has_icon, "not here yet");
-    b.put_icon(r"C:\editor.exe".into(), Some(slint::SharedPixelBuffer::new(negotium::icons::ICON_PX, negotium::icons::ICON_PX)));
+    negotium::bridge::icon_arrived(&bridge, r"C:\editor.exe".into(), icon_px());
+    i_slint_backend_testing::mock_elapsed_time(negotium::bridge::ICON_BATCH);
     let shown = ui.get_rows().row_data(0).unwrap();
-    assert!(shown.has_icon, "the row updates as soon as its icon lands");
+    assert!(shown.has_icon, "the row updates once its icon lands");
     let size = shown.icon.size();
     assert_eq!((size.width, size.height), (32, 32));
     assert!(ui.get_rows().iter().skip(1).all(|r| !r.has_icon));
-    b.apply(&ui, frame(rows));
+    bridge.borrow_mut().apply(&ui, frame(rows));
     assert_eq!(asked.borrow().len(), 1, "never asked for again");
+}
+
+/// A launch brings dozens of icons one by one: they are gathered and the rows pushed once, not
+/// once per icon (each push redraws the list).
+#[test]
+fn icon_arrivals_are_gathered_into_one_push() {
+    use slint::Model;
+    let (ui, _controls, bridge) = bridged();
+    bridge.borrow_mut().set_icon_loader(AskedIcons(Default::default()));
+    let rows = vec![
+        RowView { icon: r"C:\editor.exe".into(), ..row_view(1, "Editor", "") },
+        RowView { icon: r"C:rowser.exe".into(), ..row_view(2, "Browser", "") },
+        RowView { icon: r"C:\Windows\explorer.exe".into(), windows: true, actionable: false, ..row_view(3, "Windows", "") },
+    ];
+    bridge.borrow_mut().apply(&ui, frame(rows));
+    let has_icon = || ui.get_rows().iter().map(|r| r.has_icon).collect::<Vec<_>>();
+    negotium::bridge::icon_arrived(&bridge, r"C:\editor.exe".into(), icon_px());
+    negotium::bridge::icon_arrived(&bridge, r"C:rowser.exe".into(), icon_px());
+    assert_eq!(has_icon(), [false, false, false], "stored, not pushed yet");
+    i_slint_backend_testing::mock_elapsed_time(negotium::bridge::ICON_BATCH);
+    assert_eq!(has_icon(), [true, true, false], "both in one push");
+    // A path only the Windows group shows (it draws its own glyph) needs no push at all.
+    assert!(!bridge.borrow_mut().put_icon(r"C:\Windows\explorer.exe".into(), icon_px()));
 }
 
 /// Slint's empty image never equals itself, which would make every iconless row look changed on

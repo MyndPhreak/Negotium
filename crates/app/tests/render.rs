@@ -844,7 +844,7 @@ fn real_pipeline_redraws_per_second() {
                 ui.get_tiles().iter().map(|t| (t.id, t.weight, t.leaving)).collect::<Vec<_>>());
         }
         for (p, px) in icons.lock().unwrap().drain(..) {
-            bridge.borrow_mut().put_icon(p, px);
+            negotium::bridge::icon_arrived(&bridge, p, px);
         }
         slint::platform::update_timers_and_animations();
         // As the winit backend: an active animation asks for a frame even when nothing is dirty.

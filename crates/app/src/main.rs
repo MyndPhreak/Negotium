@@ -212,9 +212,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let bridge = Bridge::install(&ui, controls.clone());
     // Program icons: extracted on the loader's own thread (shell and GDI calls, never in a frame);
     // each result comes back to the bridge's cache on the UI thread, which re-pushes the rows
-    // showing it. Fails only once the event loop is gone (quitting): nothing left to show.
+    // showing them, gathered (bridge::ICON_BATCH). Fails only once the event loop is gone
+    // (quitting): nothing left to show.
     bridge.borrow_mut().set_icon_loader(negotium::icons::IconLoader::spawn(negotium::icons::extract, |path, px| {
-        let _ = slint::invoke_from_event_loop(move || negotium::bridge::with_bridge(|b| b.put_icon(path, px)));
+        let _ = slint::invoke_from_event_loop(move || negotium::bridge::current_icon_arrived(path, px));
     }));
 
     // Worker -> UI thread through a latest-frame slot: one wakeup is posted only when the slot was

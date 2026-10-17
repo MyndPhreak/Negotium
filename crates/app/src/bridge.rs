@@ -381,6 +381,8 @@ pub struct Bridge {
     /// tests that don't set one: rows then show no icons).
     icons: IconCache,
     icon_loader: Option<Box<dyn RequestIcon>>,
+    /// Icons for rows on show arrived since the last push: one push is on its way (`icon_arrived`).
+    icons_pending: bool,
     /// What a row without an icon carries: one image shared by every such row, because Slint's
     /// empty image never equals itself and would make `sync_model` rewrite those rows every frame.
     no_icon: slint::Image,
@@ -430,6 +432,7 @@ impl Bridge {
             startup_rows: Rc::new(VecModel::default()),
             icons: IconCache::default(),
             icon_loader: None,
+            icons_pending: false,
             no_icon: slint::Image::from_rgba8(slint::SharedPixelBuffer::new(1, 1)),
             no_bars: ModelRc::new(VecModel::from(vec![0.0; 5])),
             controls,
@@ -712,11 +715,18 @@ impl Bridge {
         self.icon_loader = Some(Box::new(loader));
     }
 
-    /// An icon came back from the loader: rows showing that image get it (only they change).
-    pub fn put_icon(&mut self, path: String, px: Option<IconPixels>) {
-        let shown = self.layout.rows().iter().any(|r| r.icon == path);
+    /// Stores an icon from the loader; true when a row on show waits for it. The Windows group
+    /// never does (it draws its own glyph). The rows are pushed later, gathered (`icon_arrived`).
+    pub fn put_icon(&mut self, path: String, px: Option<IconPixels>) -> bool {
+        let shown = self.layout.rows().iter().any(|r| !r.windows && r.icon == path);
         self.icons.put(path, px);
-        if shown {
+        shown
+    }
+
+    /// The gathered icons' turn: rows showing them get them (only they change), unless a push
+    /// since they arrived already carried them.
+    fn flush_icons(&mut self) {
+        if self.icons_pending {
             self.push_rows();
         }
     }
@@ -731,6 +741,8 @@ impl Bridge {
     }
 
     fn push_rows(&mut self) {
+        // Every push takes each row's icon as it is now: arrivals waiting for one are carried.
+        self.icons_pending = false;
         let loader = self.icon_loader.as_deref();
         let icons: Vec<Option<slint::Image>> = self.layout.rows().iter().map(|r| Self::icon_of(&mut self.icons, loader, r)).collect();
         let rows = self.layout.rows().iter().zip(icons).enumerate().map(|(i, (r, icon))| RowData {
@@ -1042,6 +1054,33 @@ pub fn handle_list_key(bridge: &Rc<RefCell<Bridge>>, ui: &MainWindow, text: &str
         ui.invoke_row_action(name.into(), id);
     }
     true
+}
+
+/// How long icon arrivals gather before the rows showing them are pushed, once. At launch the
+/// loader returns dozens one after another, and a push per icon redrew the list each time.
+pub const ICON_BATCH: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// An icon came back from the loader (on the UI thread): stored at once, and the rows showing it
+/// pushed with any others arriving within ICON_BATCH, by one timer.
+pub fn icon_arrived(bridge: &Rc<RefCell<Bridge>>, path: String, px: Option<IconPixels>) {
+    let mut b = bridge.borrow_mut();
+    if !b.put_icon(path, px) || b.icons_pending {
+        return;
+    }
+    b.icons_pending = true;
+    let weak = Rc::downgrade(bridge);
+    slint::Timer::single_shot(ICON_BATCH, move || {
+        if let Some(b) = weak.upgrade() {
+            b.borrow_mut().flush_icons();
+        }
+    });
+}
+
+/// `icon_arrived` for the bridge `set_current` installed (the app's loader callback).
+pub fn current_icon_arrived(path: String, px: Option<IconPixels>) {
+    if let Some(b) = CURRENT.with(|c| c.borrow().clone()) {
+        icon_arrived(&b, path, px);
+    }
 }
 
 pub fn set_current(b: Rc<RefCell<Bridge>>) {
