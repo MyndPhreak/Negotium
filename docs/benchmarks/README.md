@@ -344,3 +344,43 @@ a follow-up: cut that per-update work.
 7. Tiles slide in a few steps with the graphs, never stuck part-way.
 8. Icons look right (straight alpha) on light and dark.
 9. A focused row control scrolled out of view does not freeze the list.
+
+## Per-app network
+
+Measured with `.superpowers/run-net-bench.ps1` (`negotium-bench`, release, elevated terminal, so the
+opt-in network feed was on), GPU renderer, Overview, 60 s, 32 logical CPUs, same method as the App
+list redesign. CPU is the share of one core (`cpu_one_core_pct.mean`). Files:
+`docs/benchmarks/net-gpu-overview-off.json` (smooth off), `net-gpu-overview-on.json` and
+`net-gpu-overview-on-2.json` (smooth on; `on-2` is from an earlier elevated run of the same build).
+
+| Run | Smooth graphs | CPU % of one core | Frames / 60 s |
+|---|---|---|---|
+| App list redesign, final (baseline) | off | 5.32 | 207 |
+| App list redesign, final (baseline) | on | 7.46 / 6.46 | 549 / 544 |
+| Network build, earlier run (not saved) | off | 5.30 | 146 |
+| Network build, earlier run (`net-gpu-overview-on-2.json`) | on | 8.23 / 7.98 | 480 / 480 |
+| Network build, final script run (`net-gpu-overview-off.json`) | off | 6.84 | 140 |
+| Network build, final script run (`net-gpu-overview-on.json`) | on | 7.42 | 471 |
+
+### Reading
+
+- Run-to-run spread on the same build is about 1.5 points of a core, larger than the 0.5-point
+  budget, so the budget cannot be judged from single runs.
+- The cleaner comparison is smooth off, earlier run: 5.30 % against the baseline 5.32 %. It shows no
+  measurable cost from the feed under the network traffic at that time.
+- Whether network traffic was heavy during the 6.84 % run is unknown.
+- The collector tick median was not measured: the bench has no field for it.
+
+### Elevated tests
+
+- `cargo test -p negotium-collector --lib netetw -- --include-ignored`: 17 passed.
+- `cargo test -p negotium-collector --test collector only_an_opted_in`: 1 passed.
+
+## Manual checks: Per-app network
+
+1. The Network column fills while a download runs, and shows "—" when not elevated.
+2. Sort by the Network column.
+3. The Network meter's top tiles.
+4. The network page hover shows the split on the newest sample, and "All adapters".
+5. A crash leaves no session after the next start: `logman query -ets` shows at most one
+   `Negotium-Net`, and none after Negotium exits.
