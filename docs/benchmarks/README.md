@@ -326,6 +326,13 @@ on). The remaining cost, about +2.2 % of a core with smooth off and about +3 % w
 per-update work of the new card list (rows, cards, icons and layout of every row slot). Recorded as
 a follow-up: cut that per-update work.
 
+- Private working set 68 → about 81 MB: the icon loader (shell32 and its COM state on the loader
+  thread) and the icon textures. The remaining CPU gap is a measured follow-up: an update frame's
+  draw takes 6–11 ms with the rows on screen against 1.5–2.3 ms without them, and grows with the
+  window's height (the number of visible cards), so it is per-visible-card draw cost. The final
+  review's cheap cuts landed after these runs (icon arrivals pushed once per 100 ms instead of once
+  each, a closed card drawn as one rectangle, the number cells flattened) and are not yet measured.
+
 ## Manual checks: App list redesign
 
 1. Sort by each header, both directions; Name A–Z and Z–A.
