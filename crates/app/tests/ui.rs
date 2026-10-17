@@ -3528,12 +3528,23 @@ fn the_sorted_header_is_checked_and_clicking_another_sorts_by_it() {
     let dir = Scratch::new("sortheader");
     let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
     ui.set_page(0);
-    let header = |label: &str| El::find_by_accessible_label(&ui, label).next().unwrap_or_else(|| panic!("missing {label}"));
+    use i_slint_backend_testing::ElementRoot;
+    // Found by its "Sort by <column>" prefix: the sorted one goes on to say which way.
+    let header = |label: &str| {
+        let (exact, more) = (label.to_string(), format!("{label}, "));
+        ui.root_element().query_descendants()
+            .match_predicate(move |e| e.accessible_label().is_some_and(|l| l == exact.as_str() || l.starts_with(&more)))
+            .find_first()
+            .unwrap_or_else(|| panic!("missing {label}"))
+    };
+    let said = |label: &str| header(label).accessible_label().unwrap().to_string();
     for label in ["Sort by Name", "Sort by CPU", "Sort by Memory", "Sort by Disk", "Sort by GPU", "Sort by Network"] {
         assert_eq!(header(label).accessible_role(), Some(i_slint_backend_testing::AccessibleRole::Button), "{label}");
         assert_eq!(header(label).accessible_checkable(), Some(true), "{label}");
     }
     assert_eq!(header("Sort by CPU").accessible_checked(), Some(true), "sorted by CPU at first");
+    assert_eq!(said("Sort by CPU"), "Sort by CPU, sorted descending", "the sorted column says which way");
+    assert_eq!(said("Sort by Memory"), "Sort by Memory");
     assert_eq!(header("Sort by Memory").accessible_checked(), Some(false));
     header("Sort by Memory").invoke_accessible_default_action();
     assert_eq!(ui.get_sort_column(), 1);
@@ -3544,6 +3555,8 @@ fn the_sorted_header_is_checked_and_clicking_another_sorts_by_it() {
     press(&ui, x, y, slint::platform::PointerEventButton::Left);
     assert_eq!(ui.get_sort_column(), -1);
     assert_eq!(header("Sort by Name").accessible_checked(), Some(true));
+    assert_eq!(said("Sort by Name"), "Sort by Name, sorted ascending");
+    assert_eq!(said("Sort by Memory"), "Sort by Memory");
 }
 
 #[test]
@@ -3575,6 +3588,24 @@ fn the_end_task_icon_shows_on_hover_and_ends_that_app() {
     assert!(end().is_some(), "shown while it holds focus");
 }
 
+/// The spec: the × shows while the card is hovered, or holds keyboard focus; the keyboard-current
+/// card shows it too, so it can be reached and seen without the mouse.
+#[test]
+fn the_end_task_icon_shows_on_the_keyboard_current_card() {
+    use slint::platform::Key;
+    let (ui, controls, _bridge, _) = wired_list(vec![row_view(7, "Editor", ""), row_view(9, "Browser", "")]);
+    let end = |name: &str| El::find_by_accessible_label(&ui, &format!("End task {name}")).next();
+    assert!(end("Editor").is_none() && end("Browser").is_none(), "hidden with no hover and no focus");
+    assert!(tab_until(&ui, || controls.frozen()), "Tab reaches the list");
+    assert_eq!(ui.get_current_id(), 7);
+    assert!(end("Editor").is_some(), "shown on the current card");
+    assert!(end("Browser").is_none(), "only there");
+    press_key(&ui, Key::DownArrow);
+    assert!(end("Editor").is_none() && end("Browser").is_some(), "it follows the current card");
+    press_key(&ui, Key::Escape);
+    assert!(end("Browser").is_none(), "the list lost focus: no current card");
+}
+
 #[test]
 fn cards_sections_and_process_rows_have_their_heights() {
     use negotium::view::{RowKind, SECTION_APPS};
@@ -3583,7 +3614,7 @@ fn cards_sections_and_process_rows_have_their_heights() {
     let proc = |id: i32, last: bool| RowView { id, parent: 9, depth: 1, kind: RowKind::Proc, name: format!("proc{id}"), actionable: true, last_in_card: last, ..Default::default() };
     let (ui, _controls, bridge, _) = wired_list(vec![heading(SECTION_APPS, "Apps"), browser, proc(20, false), proc(21, true), row_view(11, "Tool", "")]);
     bridge.borrow_mut().toggle(9);
-    let section = rect(&ui, "Apps section, expanded");
+    let section = rect(&ui, "Apps (2) section, expanded");
     let card = rect(&ui, "Browser, CPU 1.0%, memory ");
     let first = rect(&ui, "proc20, CPU , memory ");
     let last = rect(&ui, "proc21, CPU , memory ");
@@ -3605,16 +3636,25 @@ fn a_section_heading_click_collapses_it() {
     ]);
     let b = bridge.clone();
     ui.on_toggle_row(move |id| b.borrow_mut().toggle(id));
-    let heading = El::find_by_accessible_label(&ui, "Apps section, expanded").next().expect("an open heading");
+    let heading = El::find_by_accessible_label(&ui, "Apps (1) section, expanded").next().expect("an open heading, with its count");
     let (x, y) = centre(&heading);
     move_pointer(&ui, x, y);
     press(&ui, x, y, slint::platform::PointerEventButton::Left);
     assert_eq!(shown_ids(&ui), [SECTION_APPS, SECTION_BACKGROUND, 2], "its cards go");
-    assert!(El::find_by_accessible_label(&ui, "Apps section, collapsed").next().is_some());
-    assert!(El::find_by_accessible_label(&ui, "Background processes section, expanded").next().is_some());
+    assert!(El::find_by_accessible_label(&ui, "Apps (1) section, collapsed").next().is_some());
+    assert!(El::find_by_accessible_label(&ui, "Background processes (1) section, expanded").next().is_some());
     // The screen reader's default action toggles it too.
-    El::find_by_accessible_label(&ui, "Apps section, collapsed").next().unwrap().invoke_accessible_default_action();
+    El::find_by_accessible_label(&ui, "Apps (1) section, collapsed").next().unwrap().invoke_accessible_default_action();
     assert_eq!(shown_ids(&ui), [SECTION_APPS, 1, SECTION_BACKGROUND, 2]);
+}
+
+#[test]
+fn a_heading_without_a_count_is_read_without_one() {
+    use negotium::view::SECTION_WINDOWS;
+    let mut group = row_view(5, "Windows", "");
+    (group.windows, group.actionable) = (true, false);
+    let (ui, _controls, _bridge, _) = wired_list(vec![heading(SECTION_WINDOWS, "Windows processes"), group]);
+    assert!(El::find_by_accessible_label(&ui, "Windows processes section, expanded").next().is_some());
 }
 
 #[test]

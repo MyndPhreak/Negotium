@@ -229,7 +229,8 @@ component SortHeader inherits FocusButton {
     border-radius: 4px;
     border-width: root.focused ? 2px : 0px;
     border-color: Theme.text;
-    accessible-label: "Sort by " + root.label;
+    // "Sort by <column>" first (what activating it does), then which way the sorted one runs.
+    accessible-label: "Sort by " + root.label + (root.sorted ? (root.descending ? ", sorted descending" : ", sorted ascending") : "");
     accessible-checkable: true;
     accessible-checked: root.sorted;
     HorizontalLayout {
@@ -472,7 +473,7 @@ export component AppList inherits VerticalLayout {
                                 accessible-item-selectable: true;
                                 // Selected like the ring: the current row, while the list has focus.
                                 accessible-item-selected: self.current;
-                                accessible-label: r.kind == 0 ? r.name + " section, " + (r.expanded ? "expanded" : "collapsed")
+                                accessible-label: r.kind == 0 ? r.name + (r.count != "" ? " " + r.count : "") + " section, " + (r.expanded ? "expanded" : "collapsed")
                                     : r.exited ? r.name + ", exited"
                                     : r.name + (r.hung != "" ? ", " + r.hung : "") + ", CPU " + r.cpu + ", memory " + r.mem;
                                 // A heading opens and closes its section (Enter does too, through the list).
@@ -602,9 +603,9 @@ export component AppList inherits VerticalLayout {
                                                         }
                                                         clicked => { root.action("force-close", r.id); }
                                                     }
-                                                    // While the card is hovered, and for as long as the button holds focus
-                                                    // (the list stays frozen meanwhile, so it stays this app's).
-                                                    if r.hung == "" && r.actionable && r.depth == 0 && (row.hovered || slot.end-focused) : Rectangle {
+                                                    // While the card is hovered or keyboard-current, and for as long as the
+                                                    // button holds focus (the list stays frozen meanwhile, so it stays this app's).
+                                                    if r.hung == "" && r.actionable && r.depth == 0 && (row.hovered || row.current || slot.end-focused) : Rectangle {
                                                         width: 22px;
                                                         EndTaskButton {
                                                             y: (parent.height - self.height) / 2;
