@@ -16,7 +16,8 @@ pub struct Collector {
     info: SystemInfo,
     net: crate::net::NetTable,
     gpu_temps: crate::gpu::GpuTemps,
-    /// Per-process network: the kernel network trace, only while elevated.
+    /// Per-process network: the kernel network trace, only when asked for (`with_net_feed`) and
+    /// elevated.
     net_by_pid: crate::netetw::PerPidNet<crate::netetw::NetFeed>,
 }
 
@@ -44,14 +45,30 @@ impl Collector {
             gpu_temps: crate::gpu::GpuTemps::open(&info.gpus),
             info,
             net: crate::net::NetTable::new(),
-            // A restarted worker drops the old Collector (stopping its session) before building
-            // this one; `start` also replaces any leftover session of the name.
-            net_by_pid: crate::netetw::PerPidNet::new(
-                crate::netetw::is_elevated(),
-                || crate::netetw::NetFeed::start(crate::netetw::SESSION_NAME),
-                Instant::now(),
-            ),
+            net_by_pid: crate::netetw::PerPidNet::off(Instant::now()),
         }
+    }
+
+    /// Adds the per-process network feed: a trace session called `name`, started only when
+    /// elevated. Only the app asks for it (with `netetw::SESSION_NAME`); tests, the bench and the
+    /// probe go without, so running them elevated never replaces the app's session. A restarted
+    /// worker drops the old Collector (stopping its session) before building this one, and `start`
+    /// also replaces any leftover session of the name.
+    pub fn with_net_feed(mut self, name: &str) -> Self {
+        self.start_net_feed(name);
+        self
+    }
+
+    /// `with_net_feed` on a collector already built (replacing any feed it had).
+    pub fn start_net_feed(&mut self, name: &str) {
+        self.net_by_pid = crate::netetw::PerPidNet::off(Instant::now());
+        self.net_by_pid =
+            crate::netetw::PerPidNet::new(crate::netetw::is_elevated(), || crate::netetw::NetFeed::start(name), Instant::now());
+    }
+
+    /// Whether this collector runs a per-process network feed.
+    pub fn has_net_feed(&self) -> bool {
+        self.net_by_pid.is_on()
     }
 
     pub fn system_info(&self) -> &SystemInfo {

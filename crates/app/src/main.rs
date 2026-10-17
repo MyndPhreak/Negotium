@@ -45,7 +45,7 @@ fn begin_exit(controls: &Controls, weak: &slint::Weak<MainWindow>, saver: &setti
     if RESTART_PENDING.with(|p| p.get()) {
         warn("exiting while the UAC prompt for 'Restart as admin' is open; an approved elevated instance may still start");
     }
-    controls.request_stop();
+    worker::stop_worker(controls, negotium_collector::netetw::stop_session);
     if !saver.flush(EXIT_FLUSH) {
         warn("settings writes were still running at exit; they may not have landed");
     }

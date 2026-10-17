@@ -41,3 +41,19 @@ fn a_shared_epoch_carries_collector_time_across_a_rebuilt_collector() {
     let snap = negotium_collector::Collector::with_epoch(epoch).tick();
     assert!(snap.taken_at_ms >= at_least, "{} ms", snap.taken_at_ms);
 }
+
+#[test]
+fn only_an_opted_in_collector_starts_the_network_feed() {
+    // A plain collector never starts the feed, elevated or not, so an elevated test or bench run
+    // can't replace a running Negotium's session.
+    let mut plain = Collector::new();
+    assert!(!plain.has_net_feed());
+    assert_eq!(plain.tick().totals.net_by_pid, None);
+
+    // Opted in: the feed runs exactly when elevated (a uniquely named session, stopped on drop).
+    let name = format!("Negotium-Net-test-{}-collector", std::process::id());
+    let fed = Collector::new().with_net_feed(&name);
+    assert_eq!(fed.has_net_feed(), negotium_collector::netetw::is_elevated());
+    drop(fed);
+    negotium_collector::netetw::stop_session(&name);
+}

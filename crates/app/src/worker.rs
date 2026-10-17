@@ -152,6 +152,12 @@ impl LiveSource {
         }
     }
 
+    /// Runs the per-process network feed (the app's own source only; see `NET_SESSION`).
+    pub fn with_net_feed(mut self, name: &str) -> Self {
+        self.collector.start_net_feed(name);
+        self
+    }
+
     /// Logs source errors to `log` instead of the user's log (tests driving the real pipeline).
     pub fn with_log(mut self, log: crate::log::Log) -> Self {
         self.log = log;
@@ -231,6 +237,19 @@ impl<T> Latest<T> {
     }
 }
 
+/// The app's per-process network trace session (`negotium_collector::netetw`). Only the worker
+/// `spawn` starts runs it; the sources tests build go without.
+pub const NET_SESSION: &str = negotium_collector::netetw::SESSION_NAME;
+
+/// Tells the worker to stop, then ends its network trace session with `stop_session`. The worker
+/// thread isn't joined at exit, so its collector (and the feed's `Drop`) never goes away on its
+/// own; stopping by name after the stop request leaves no session behind, and no new one starts
+/// (a stopped supervisor builds no further source).
+pub fn stop_worker(controls: &Controls, stop_session: impl FnOnce(&str)) {
+    controls.request_stop();
+    stop_session(NET_SESSION);
+}
+
 /// Starts the supervised worker. Collector time counts from `epoch`, which the bridge shares to
 /// place the scrolling graphs against real time (crate::smooth).
 pub fn spawn(
@@ -247,7 +266,7 @@ pub fn spawn(
             let mut log = crate::log::Log::new(crate::log::Log::default_path());
             supervise(
                 move || {
-                    let source = LiveSource::new(history.clone(), epoch, ids.clone());
+                    let source = LiveSource::new(history.clone(), epoch, ids.clone()).with_net_feed(NET_SESSION);
                     match &tray {
                         Some(t) => source.with_tray(t.clone()),
                         None => source,
@@ -290,6 +309,22 @@ mod tests {
             }
             Some(Frame::default())
         }
+    }
+
+    #[test]
+    fn exit_stops_the_worker_then_ends_the_network_session() {
+        let controls = Controls::default();
+        let mut stopped = Vec::new();
+        stop_worker(&controls, |name| stopped.push((name.to_string(), controls.stopped())));
+        assert_eq!(stopped, [("Negotium-Net".to_string(), true)], "after the stop request, by the app's name");
+    }
+
+    #[test]
+    fn only_the_spawned_worker_asks_for_the_network_feed() {
+        // A test's source never starts a session, so running the suite elevated can't replace
+        // the app's. (Unelevated `with_net_feed` starts nothing either; this pins the default.)
+        let source = LiveSource::new(SharedHistory::default(), Instant::now(), IdSeed::default());
+        assert!(!source.collector.has_net_feed());
     }
 
     #[test]

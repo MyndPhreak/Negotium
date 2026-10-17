@@ -42,7 +42,7 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Diagnostics::Etw::{
     CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW, EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_RECORD,
-    EVENT_TRACE_CONTROL, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW,
+    EVENT_TRACE_CONTROL, EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW,
     EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD,
     PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE, ProcessTrace, StartTraceW, TRACE_LEVEL_INFORMATION,
     WNODE_FLAG_TRACED_GUID,
@@ -56,6 +56,12 @@ pub const SESSION_NAME: &str = "Negotium-Net";
 const PROVIDER: GUID = GUID::from_u128(0x7dd42a49_5329_4832_8dfd_43d979153a88);
 const KEYWORD_IPV4: u64 = 0x10;
 const KEYWORD_IPV6: u64 = 0x20;
+/// evntrace.h `EVENT_TRACE_USE_MS_FLUSH_TIMER` (Windows 8+; not in the windows crate): FlushTimer
+/// counts milliseconds instead of seconds.
+const EVENT_TRACE_USE_MS_FLUSH_TIMER: u32 = 0x10;
+/// How often a partly filled buffer reaches the consumer. Below the shortest tick (500 ms), so
+/// light traffic is credited to the tick it happened in instead of alternating 0 / double.
+const FLUSH_MS: u32 = 200;
 /// What `OpenTraceW` returns on failure (`INVALID_PROCESSTRACE_HANDLE` on 64-bit Windows).
 const INVALID_PROCESSTRACE: u64 = u64::MAX;
 
@@ -99,6 +105,15 @@ pub(crate) fn parse(event_id: u16, payload: &[u8]) -> Option<(u32, Direction, u3
 
 fn is_loopback_v6(a: Ipv6Addr) -> bool {
     a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+}
+
+/// `parse` for the manifest's layouts, which are all version 0: a newer version of an event may
+/// lay its payload out differently, so it is not read.
+pub(crate) fn parse_versioned(event_id: u16, version: u8, payload: &[u8]) -> Option<(u32, Direction, u32)> {
+    if version != 0 {
+        return None;
+    }
+    parse(event_id, payload)
 }
 
 /// The shared sums: written by the event callback, swapped out by the collector.
@@ -196,11 +211,55 @@ pub(crate) fn stop_by_name(name: &str) -> WIN32_ERROR {
     control(CONTROLTRACE_HANDLE::default(), &wide(name), EVENT_TRACE_CONTROL_STOP)
 }
 
+/// Stops the trace session called `name`, if there is one. The app's exit path calls this with
+/// `SESSION_NAME`: the worker's collector is not dropped when the process ends, so its feed's
+/// `Drop` never runs. Harmless when no such session exists or it can't be stopped.
+pub fn stop_session(name: &str) {
+    let _ = stop_by_name(name);
+}
+
+/// The running session called `name`, as `ControlTraceW(QUERY)` reports it.
+fn query(name: &str) -> Option<Box<Properties>> {
+    let mut p = Properties::new();
+    let wname = wide(name);
+    // SAFETY: as in `control`.
+    let status = unsafe {
+        ControlTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(wname.as_ptr()), &mut p.props, EVENT_TRACE_CONTROL_QUERY)
+    };
+    (status == ERROR_SUCCESS).then_some(p)
+}
+
+/// Stops the session called `name` only if it is the one started with `guid`, so a newer session
+/// of the same name (a later feed, or another process's) is left alone.
+fn stop_if_ours(name: &str, guid: GUID) {
+    if query(name).is_some_and(|p| p.props.Wnode.Guid == guid) {
+        let _ = stop_by_name(name);
+    }
+}
+
+/// Starts a real-time session called `name` with session GUID `guid` (no providers yet).
+fn start_session(name: &str, guid: GUID) -> Result<CONTROLTRACE_HANDLE, WIN32_ERROR> {
+    let wname = wide(name);
+    let mut p = Properties::new();
+    p.props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+    p.props.Wnode.ClientContext = 1; // QueryPerformanceCounter timestamps
+    p.props.Wnode.Guid = guid;
+    p.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_USE_MS_FLUSH_TIMER;
+    p.props.BufferSize = 64; // KB
+    p.props.MinimumBuffers = 4;
+    p.props.MaximumBuffers = 32;
+    p.props.FlushTimer = FLUSH_MS;
+    let mut session = CONTROLTRACE_HANDLE::default();
+    // SAFETY: `wname` is NUL-terminated; `p` is a properties block of the size it declares
+    // with room for the name, which StartTraceW copies there.
+    let status = unsafe { StartTraceW(&mut session, PCWSTR(wname.as_ptr()), &mut p.props) };
+    if status == ERROR_SUCCESS { Ok(session) } else { Err(status) }
+}
+
 /// Whether a session called `name` is running.
 #[cfg(test)]
 fn is_running(name: &str) -> bool {
-    use windows::Win32::System::Diagnostics::Etw::EVENT_TRACE_CONTROL_QUERY;
-    control(CONTROLTRACE_HANDLE::default(), &wide(name), EVENT_TRACE_CONTROL_QUERY) == ERROR_SUCCESS
+    query(name).is_some()
 }
 
 /// The event callback. `UserContext` is the feed's `Sums`, kept alive by the consumer thread for
@@ -213,7 +272,8 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     }
     // SAFETY: UserData points to UserDataLength bytes of payload for the duration of the call.
     let payload = unsafe { std::slice::from_raw_parts(record.UserData as *const u8, record.UserDataLength as usize) };
-    if let Some((pid, direction, bytes)) = parse(record.EventHeader.EventDescriptor.Id, payload) {
+    let event = &record.EventHeader.EventDescriptor;
+    if let Some((pid, direction, bytes)) = parse_versioned(event.Id, event.Version, payload) {
         // SAFETY: UserContext is `Arc::as_ptr` of the Sums the consumer thread holds (see start).
         let sums = unsafe { &*(record.UserContext as *const Sums) };
         sums.add(pid, direction, bytes);
@@ -225,7 +285,9 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
 pub struct NetFeed {
     session: CONTROLTRACE_HANDLE,
     consumer: PROCESSTRACE_HANDLE,
-    name: Vec<u16>,
+    name: String,
+    /// The session GUID this feed started with: tells its session from a newer one of the name.
+    guid: GUID,
     sums: Arc<Sums>,
     thread: Option<JoinHandle<()>>,
 }
@@ -237,24 +299,12 @@ impl NetFeed {
         let mut wname = wide(name);
         let _ = stop_by_name(name);
 
-        let mut p = Properties::new();
-        p.props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-        p.props.Wnode.ClientContext = 1; // QueryPerformanceCounter timestamps
-        p.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        p.props.BufferSize = 64; // KB
-        p.props.MinimumBuffers = 4;
-        p.props.MaximumBuffers = 32;
-        p.props.FlushTimer = 1; // seconds: events reach the consumer within a tick
-        let mut session = CONTROLTRACE_HANDLE::default();
-        // SAFETY: `wname` is NUL-terminated; `p` is a properties block of the size it declares
-        // with room for the name, which StartTraceW copies there.
-        let status = unsafe { StartTraceW(&mut session, PCWSTR(wname.as_ptr()), &mut p.props) };
-        if status == ERROR_ACCESS_DENIED {
-            return Err(NetFeedError::NotElevated);
-        }
-        if status != ERROR_SUCCESS {
-            return Err(NetFeedError::Os { call: "StartTraceW", code: status.0 });
-        }
+        let guid = GUID::new().map_err(|e| NetFeedError::Os { call: "UuidCreate", code: e.code().0 as u32 })?;
+        let session = match start_session(name, guid) {
+            Ok(session) => session,
+            Err(status) if status == ERROR_ACCESS_DENIED => return Err(NetFeedError::NotElevated),
+            Err(status) => return Err(NetFeedError::Os { call: "StartTraceW", code: status.0 }),
+        };
         // Unelevated, StartTraceW may still succeed (a plain real-time session is allowed); it is
         // enabling the kernel provider that is denied. Either way the session is stopped again.
         let fail = |call: &'static str, code: u32| {
@@ -303,7 +353,7 @@ impl NetFeed {
             drop(held);
         });
         match thread {
-            Ok(thread) => Ok(NetFeed { session, consumer, name: wname, sums, thread: Some(thread) }),
+            Ok(thread) => Ok(NetFeed { session, consumer, name: name.to_string(), guid, sums, thread: Some(thread) }),
             Err(_) => {
                 // SAFETY: opened above and never processed.
                 let _ = unsafe { CloseTrace(consumer) };
@@ -330,10 +380,14 @@ impl TakeBytes for NetFeed {
 
 impl Drop for NetFeed {
     fn drop(&mut self) {
-        // ProcessTrace returns once the session stops, so a finished consumer means it is already
-        // gone. Its handle (a logger id) may then belong to a newer session: leave it alone.
         if TakeBytes::running(self) {
-            let _ = control(self.session, &self.name, EVENT_TRACE_CONTROL_STOP);
+            // The consumer is attached, so the session behind the handle is still ours.
+            let _ = control(self.session, &wide(&self.name), EVENT_TRACE_CONTROL_STOP);
+        } else {
+            // ProcessTrace has returned: the session was stopped (maybe replaced by a newer one of
+            // the name, which may even reuse the handle's logger id), or ProcessTrace failed on its
+            // own and the session still runs. Stop it by name only if it is still this one.
+            stop_if_ours(&self.name, self.guid);
         }
         // SAFETY: the consumer handle was opened in start and is closed exactly once, here.
         let _ = unsafe { CloseTrace(self.consumer) };
@@ -390,6 +444,15 @@ impl<F: TakeBytes> PerPidNet<F> {
             }
         };
         PerPidNet { feed, error, last: now }
+    }
+
+    /// No feed: every step gives `None` and reports nothing.
+    pub(crate) fn off(now: Instant) -> Self {
+        PerPidNet { feed: None, error: None, last: now }
+    }
+
+    pub(crate) fn is_on(&self) -> bool {
+        self.feed.is_some()
     }
 
     /// Rates since the previous step for the processes in this tick's list. `None` without a feed.
@@ -512,6 +575,14 @@ mod tests {
             assert_eq!(parse(id, &p6), None, "event {id}");
             assert_eq!(parse(id, &p4), None, "event {id}");
         }
+    }
+
+    #[test]
+    fn only_version_0_layouts_are_read() {
+        let p = v4(5, 10, REMOTE, LOCAL);
+        assert_eq!(parse_versioned(10, 0, &p), Some((5, Direction::Sent, 10)));
+        assert_eq!(parse_versioned(10, 1, &p), None);
+        assert_eq!(parse_versioned(27, 2, &v6(5, 10, local6(), remote6())), None);
     }
 
     #[test]
@@ -659,6 +730,70 @@ mod tests {
             other => panic!("elevated: {}, start: {:?}", is_elevated(), other.err()),
         }
         assert!(!is_running(&name));
+    }
+
+    /// Starts a bare session (no provider) when Windows lets this token; `None` (test skipped)
+    /// where even that needs admin rights.
+    fn bare_session(name: &str, guid: GUID) -> Option<CONTROLTRACE_HANDLE> {
+        match start_session(name, guid) {
+            Ok(h) => Some(h),
+            Err(e) if e == ERROR_ACCESS_DENIED && !is_elevated() => {
+                eprintln!("skipped: this account may not start a trace session unelevated");
+                None
+            }
+            Err(e) => panic!("StartTraceW: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn the_session_flushes_more_often_than_the_shortest_tick() {
+        let name = test_name();
+        let _guard = StopAtEnd(name.clone());
+        let Some(_) = bare_session(&name, GUID::new().unwrap()) else { return };
+        let p = query(&name).expect("running");
+        assert_ne!(p.props.LogFileMode & EVENT_TRACE_USE_MS_FLUSH_TIMER, 0, "{:#x}", p.props.LogFileMode);
+        assert_eq!(p.props.FlushTimer, FLUSH_MS);
+        const { assert!(FLUSH_MS < 500) };
+    }
+
+    #[test]
+    fn stop_if_ours_leaves_a_newer_session_of_the_name_alone() {
+        let name = test_name();
+        let _guard = StopAtEnd(name.clone());
+        let (old, new) = (GUID::new().unwrap(), GUID::new().unwrap());
+        let Some(_) = bare_session(&name, old) else { return };
+        assert_eq!(query(&name).unwrap().props.Wnode.Guid, old, "QUERY reports the session GUID");
+        stop_session(&name);
+        assert!(!is_running(&name));
+        bare_session(&name, new).expect("restart");
+        stop_if_ours(&name, old);
+        assert!(is_running(&name), "the newer session survives the old feed's cleanup");
+        stop_if_ours(&name, new);
+        assert!(!is_running(&name));
+    }
+
+    #[test]
+    fn stop_session_stops_a_session_by_name() {
+        let name = test_name();
+        let _guard = StopAtEnd(name.clone());
+        let Some(_) = bare_session(&name, GUID::new().unwrap()) else { return };
+        assert!(is_running(&name));
+        stop_session(&name);
+        assert!(!is_running(&name));
+        stop_session(&name); // none left: harmless
+    }
+
+    #[test]
+    #[ignore = "needs an elevated terminal"]
+    fn stop_session_stops_a_running_feed() {
+        let name = test_name();
+        let _guard = StopAtEnd(name.clone());
+        let feed = NetFeed::start(&name).expect("start");
+        stop_session(&name);
+        assert!(!is_running(&name));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!TakeBytes::running(&feed), "the consumer ends with the session");
+        drop(feed); // finished consumer, session gone: nothing to stop, nothing hangs
     }
 
     #[test]
