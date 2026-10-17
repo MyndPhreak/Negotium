@@ -3,7 +3,7 @@
 use crate::format;
 use crate::graph;
 use negotium_history::{History, Series};
-use negotium_model::{AppKey, AppRow, Metric, Pick};
+use negotium_model::{AppKey, AppRow, Metric, Pick, Sort};
 use negotium_snapshot::Snapshot;
 use std::collections::{HashMap, HashSet};
 
@@ -197,6 +197,9 @@ pub struct FrameOptions {
     pub expanded: HashSet<i32>,
     /// Build every app's child rows (a search can match any process).
     pub all_children: bool,
+    /// The list's sort and whether it is grouped under type headings (Controls).
+    pub sort: Sort,
+    pub grouped: bool,
 }
 
 /// `top` is the top tiles, picked by a TopPicker (negotium_model) that lasts across frames.
@@ -348,7 +351,7 @@ mod tests {
     }
     /// Every app's child rows built (as while searching), so tests see the whole tree.
     fn opts(metric: Metric, elevated: bool) -> FrameOptions {
-        FrameOptions { metric, elevated, expanded: HashSet::new(), all_children: true }
+        FrameOptions { metric, elevated, expanded: HashSet::new(), all_children: true, sort: Sort::default(), grouped: true }
     }
     fn snap(cpu: Option<f32>) -> Snapshot {
         Snapshot {
@@ -522,7 +525,7 @@ mod tests {
             app(3, "Code", 5.0, vec![proc(3, 0, 5.0, "code.exe"), proc(4, 3, 0.0, "helper.exe")], None),
         ];
         let mut ids = IdMap::new();
-        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true };
         let f = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &collapsed);
         assert!(f.rows.iter().all(|r| r.depth == 0), "no child rows for collapsed apps");
         assert_eq!(f.targets.len(), 2, "and no child targets");
@@ -544,7 +547,7 @@ mod tests {
         let mut win = app(4, "Windows", 1.0, vec![proc(5, 4, 1.0, "StartMenuExperienceHost.exe"), hung_child], Some(9_000));
         win.key = AppKey::Windows;
         win.kind = AppKind::Windows;
-        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false };
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true };
         let mut ids = IdMap::new();
         let f = test_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(), &collapsed);
         let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").expect("built so it can be shown and force-closed");

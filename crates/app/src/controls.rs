@@ -1,6 +1,6 @@
 //! State shared between the UI thread (writes) and the worker (reads).
 use crate::perf::Range;
-use negotium_model::Metric;
+use negotium_model::{Metric, Sort, SortColumn};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -75,8 +75,31 @@ pub fn page_from_os_args<I: IntoIterator<Item = std::ffi::OsString>>(args: I) ->
     page_from_args(args.into_iter().filter_map(|a| a.into_string().ok()))
 }
 
+/// A header click: the same column flips its direction, another starts at its own (`Sort::by`).
+pub fn header_click(current: Sort, column: SortColumn) -> Sort {
+    if current.column == column { current.flipped() } else { Sort::by(column) }
+}
+
+/// A sort column as the window carries it: -1 is the name, 0..=4 a metric's index.
+pub fn sort_column_index(c: SortColumn) -> i32 {
+    match c {
+        SortColumn::Name => -1,
+        SortColumn::Metric(m) => m as i32,
+    }
+}
+
+/// [`sort_column_index`] reversed; anything above the last metric is the last metric.
+pub fn sort_column_from_index(i: i32) -> SortColumn {
+    if i < 0 { SortColumn::Name } else { SortColumn::Metric(Metric::ALL[(i as usize).min(Metric::ALL.len() - 1)]) }
+}
+
 pub struct Controls {
     metric: AtomicU8,
+    /// The list's sort packed as `column + 1` in the low bits (0 = name) and the direction in bit 7,
+    /// so the worker reads both in one load.
+    sort: AtomicU8,
+    /// Overview list grouped under Apps / Background processes / Windows processes headings.
+    grouped: AtomicBool,
     page: AtomicU8,
     /// Selected Performance device id and graph range.
     perf: Mutex<(String, Range)>,
@@ -99,10 +122,18 @@ pub struct Controls {
     cv: Condvar,
 }
 
+const DESCENDING_BIT: u8 = 0x80;
+
+fn pack_sort(s: Sort) -> u8 {
+    ((sort_column_index(s.column) + 1) as u8) | if s.descending { DESCENDING_BIT } else { 0 }
+}
+
 impl Default for Controls {
     fn default() -> Self {
         Self {
             metric: AtomicU8::new(0),
+            sort: AtomicU8::new(pack_sort(Sort::default())),
+            grouped: AtomicBool::new(true),
             page: AtomicU8::new(Page::Overview as u8),
             perf: Mutex::new(("cpu".to_string(), Range::Minute)),
             frozen: AtomicBool::new(false),
@@ -125,6 +156,22 @@ impl Controls {
     }
     pub fn metric(&self) -> Metric {
         Metric::ALL[(self.metric.load(Ordering::Relaxed) as usize).min(Metric::ALL.len() - 1)]
+    }
+    /// Sets the list's sort and wakes the worker: an explicit sort change shows at once.
+    pub fn set_sort(&self, s: Sort) {
+        self.sort.store(pack_sort(s), Ordering::Relaxed);
+        self.poke();
+    }
+    pub fn sort(&self) -> Sort {
+        let v = self.sort.load(Ordering::Relaxed);
+        Sort { column: sort_column_from_index((v & !DESCENDING_BIT) as i32 - 1), descending: v & DESCENDING_BIT != 0 }
+    }
+    pub fn set_grouped(&self, on: bool) {
+        self.grouped.store(on, Ordering::Relaxed);
+        self.poke();
+    }
+    pub fn grouped(&self) -> bool {
+        self.grouped.load(Ordering::Relaxed)
     }
     pub fn set_page(&self, p: Page) {
         self.page.store(p as u8, Ordering::Relaxed);
@@ -338,6 +385,44 @@ mod tests {
         }
         assert_eq!(Page::from_name("Performance"), Some(Page::Performance));
         assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings"]);
+    }
+
+    #[test]
+    fn header_click_flips_the_same_column_and_starts_others_fresh() {
+        let cpu = SortColumn::Metric(Metric::Cpu);
+        let desc = |column| Sort { column, descending: true };
+        let asc = |column| Sort { column, descending: false };
+        assert_eq!(header_click(desc(cpu), cpu), asc(cpu));
+        assert_eq!(header_click(asc(cpu), SortColumn::Name), asc(SortColumn::Name));
+        assert_eq!(header_click(asc(SortColumn::Name), SortColumn::Name), desc(SortColumn::Name));
+        let mem = SortColumn::Metric(Metric::Memory);
+        assert_eq!(header_click(desc(SortColumn::Name), mem), desc(mem));
+    }
+
+    #[test]
+    fn the_sort_and_grouping_are_shared_and_a_sort_wakes_the_worker() {
+        let c = Controls::default();
+        assert_eq!((c.sort(), c.grouped()), (Sort::default(), true));
+        c.set_sort(Sort { column: SortColumn::Name, descending: true });
+        assert!(c.wait(Duration::from_millis(20)), "a new sort is shown without waiting for the next tick");
+        assert_eq!(c.sort(), Sort { column: SortColumn::Name, descending: true });
+        c.set_sort(Sort { column: SortColumn::Metric(Metric::Network), descending: false });
+        assert_eq!(c.sort(), Sort { column: SortColumn::Metric(Metric::Network), descending: false });
+        assert!(c.wait(Duration::from_millis(20)));
+        c.set_grouped(false);
+        assert!(c.wait(Duration::from_millis(20)));
+        assert!(!c.grouped());
+    }
+
+    #[test]
+    fn sort_columns_use_the_slint_encoding() {
+        assert_eq!(sort_column_index(SortColumn::Name), -1);
+        assert_eq!(sort_column_index(SortColumn::Metric(Metric::Network)), 4);
+        for i in -1..5 {
+            assert_eq!(sort_column_index(sort_column_from_index(i)), i);
+        }
+        assert_eq!(sort_column_from_index(9), SortColumn::Metric(Metric::Network));
+        assert_eq!(sort_column_from_index(-7), SortColumn::Name);
     }
 
     #[test]

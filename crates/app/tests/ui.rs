@@ -1875,7 +1875,7 @@ fn a_frame_never_lands_on_the_settings_page() {
 #[test]
 fn apply_settings_sets_every_wired_property() {
     let ui = window();
-    let s = Settings { refresh_ms: 5000, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: false, smooth_graphs: false, tray_cpu: false };
+    let s = Settings { refresh_ms: 5000, theme: ThemeChoice::Dark, always_on_top: true, keep_in_tray: false, gpu_rendering: false, smooth_graphs: false, tray_cpu: false, ..Settings::default() };
     negotium::settingspage::apply_settings(&ui, &s);
     assert!(!ui.get_settings_tray_cpu());
     assert!(ui.get_on_top());
@@ -2039,6 +2039,51 @@ fn after_an_automatic_fallback_the_gpu_switch_is_off_and_turning_it_on_tries_aga
     assert!(settings.borrow().gpu_rendering);
     eventually("the fallback marker is cleared", || !negotium::renderer::fallback_recorded_at(&marker));
     saved(&path, "gpu on", |s| s.gpu_rendering);
+}
+
+#[test]
+fn clicking_a_metric_header_selects_its_meter_and_clicking_again_flips() {
+    let dir = Scratch::new("sortclick");
+    let path = dir.0.join("settings.json");
+    let (ui, controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    assert_eq!((ui.get_sort_column(), ui.get_sort_descending(), ui.get_selected_metric()), (0, true, 0));
+    ui.invoke_sort_clicked(1);
+    assert_eq!((ui.get_selected_metric(), ui.get_sort_column(), ui.get_sort_descending()), (1, 1, true));
+    assert_eq!(controls.metric(), negotium_model::Metric::Memory, "the meter selection follows");
+    ui.invoke_sort_clicked(1);
+    assert_eq!((ui.get_selected_metric(), ui.get_sort_column(), ui.get_sort_descending()), (1, 1, false));
+    assert!(!controls.sort().descending);
+    ui.invoke_sort_clicked(-1);
+    assert_eq!((ui.get_selected_metric(), ui.get_sort_column(), ui.get_sort_descending()), (1, -1, false));
+    assert_eq!(controls.sort().column, negotium_model::SortColumn::Name);
+    assert_eq!(controls.metric(), negotium_model::Metric::Memory, "Name leaves the meter where it was");
+    saved(&path, "sorted by name, A to Z", |s| s.sort_column == "name" && !s.sort_descending);
+}
+
+#[test]
+fn selecting_a_meter_sorts_by_it_descending() {
+    let dir = Scratch::new("metersort");
+    let path = dir.0.join("settings.json");
+    let (ui, controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    ui.invoke_sort_clicked(-1);
+    ui.invoke_select_metric(3);
+    assert_eq!((ui.get_selected_metric(), ui.get_sort_column(), ui.get_sort_descending()), (3, 3, true));
+    assert_eq!(controls.sort(), negotium_model::Sort::by(negotium_model::SortColumn::Metric(negotium_model::Metric::Gpu)));
+    saved(&path, "sorted by GPU", |s| s.sort_column == "gpu" && s.sort_descending);
+}
+
+#[test]
+fn the_group_by_type_switch_shows_and_reports_its_state() {
+    let dir = Scratch::new("grouping");
+    let path = dir.0.join("settings.json");
+    let (ui, controls, settings) = settings_wired(&dir, Settings::default(), false);
+    assert_eq!(switch(&ui, "Group apps by type").accessible_checked(), Some(true));
+    switch(&ui, "Group apps by type").invoke_accessible_default_action();
+    assert_eq!(switch(&ui, "Group apps by type").accessible_checked(), Some(false));
+    assert!(!settings.borrow().group_by_type && !controls.grouped());
+    saved(&path, "grouping off", |s| !s.group_by_type);
+    negotium::settingspage::apply_settings(&ui, &Settings { group_by_type: true, ..Settings::default() });
+    assert_eq!(switch(&ui, "Group apps by type").accessible_checked(), Some(true), "launch settings are shown");
 }
 
 /// The rect of each setting control on the page, by label.
@@ -2211,7 +2256,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 10, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 11, "the titles are still drawn");
 }
 
 #[test]

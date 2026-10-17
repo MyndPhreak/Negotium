@@ -150,6 +150,8 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> keep-in-tray;
     // Graphs scroll continuously between samples (crate::smooth).
     in property <bool> smooth-graphs;
+    // The Overview groups apps by type (crate::controls::Controls::grouped).
+    in property <bool> group-by-type;
     // The tray icon draws the CPU graph (crate::tray).
     in property <bool> tray-cpu;
     // The saved GPU choice; whether an automatic fallback to the CPU is recorded; whether this
@@ -166,6 +168,7 @@ export component SettingsPage inherits VerticalLayout {
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
+    callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
@@ -225,6 +228,18 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     toggled(on) => { root.smooth-graphs-toggled(on); }
                     focus-gained => { sv.reveal(smooth-row.absolute-position.y, smooth-row.height); }
+                }
+            }
+            group-row := SettingRow {
+                title: "Group apps by type";
+                description: "Apps, background processes and Windows processes under their own headings";
+                Toggle {
+                    label: group-row.title;
+                    description: group-row.description;
+                    checked: root.group-by-type;
+                    interactive: root.interactive;
+                    toggled(on) => { root.group-by-type-toggled(on); }
+                    focus-gained => { sv.reveal(group-row.absolute-position.y, group-row.height); }
                 }
             }
             top-row := SettingRow {

@@ -2,6 +2,8 @@
 //! defaults. An unreadable or invalid file is moved aside to settings.json.bad and defaults are
 //! used: a bad file never stops Negotium from starting. Unknown fields are ignored and missing
 //! ones take their defaults, so files from older or newer versions load.
+use crate::controls::sort_column_index;
+use negotium_model::{Metric, Sort, SortColumn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -46,15 +48,51 @@ pub struct Settings {
     pub smooth_graphs: bool,
     /// The tray icon draws the CPU graph (crate::tray).
     pub tray_cpu: bool,
+    /// The Overview's sort column: "name", "cpu", "memory", "disk", "gpu" or "network" (an unknown
+    /// one reads as the default, CPU). A string so the file stays readable and a newer column can't
+    /// break an older version.
+    pub sort_column: String,
+    pub sort_descending: bool,
+    /// The Overview groups apps, background processes and Windows processes under headings.
+    pub group_by_type: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { refresh_ms: 1000, theme: ThemeChoice::System, always_on_top: false, keep_in_tray: true, gpu_rendering: true, smooth_graphs: true, tray_cpu: true }
+        Self {
+            refresh_ms: 1000,
+            theme: ThemeChoice::System,
+            always_on_top: false,
+            keep_in_tray: true,
+            gpu_rendering: true,
+            smooth_graphs: true,
+            tray_cpu: true,
+            sort_column: "cpu".to_string(),
+            sort_descending: true,
+            group_by_type: true,
+        }
     }
 }
 
+/// The names `Settings::sort_column` holds, in the window's column order (name first).
+const SORT_NAMES: [&str; 6] = ["name", "cpu", "memory", "disk", "gpu", "network"];
+
 impl Settings {
+    /// The saved sort; an unknown column name is the default column.
+    pub fn sort(&self) -> Sort {
+        let column = match SORT_NAMES.iter().position(|n| *n == self.sort_column) {
+            Some(0) => SortColumn::Name,
+            Some(i) => SortColumn::Metric(Metric::ALL[i - 1]),
+            None => SortColumn::Metric(Metric::Cpu),
+        };
+        Sort { column, descending: self.sort_descending }
+    }
+
+    pub fn set_sort(&mut self, s: Sort) {
+        self.sort_column = SORT_NAMES[(sort_column_index(s.column) + 1) as usize].to_string();
+        self.sort_descending = s.descending;
+    }
+
     pub fn normalized(mut self) -> Settings {
         self.refresh_ms = nearest_refresh(self.refresh_ms);
         self
@@ -156,6 +194,14 @@ pub fn load(path: &Path) -> (Settings, Loaded) {
     field!(gpu_rendering);
     field!(smooth_graphs);
     field!(tray_cpu);
+    field!(sort_column);
+    // A well-formed string can still name a column this version doesn't have.
+    if !SORT_NAMES.contains(&s.sort_column.as_str()) {
+        s.sort_column = Settings::default().sort_column;
+        bad.push("sort_column".to_string());
+    }
+    field!(sort_descending);
+    field!(group_by_type);
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)
@@ -347,6 +393,34 @@ mod tests {
     }
 
     #[test]
+    fn sort_and_grouping_default_and_load_tolerantly() {
+        use negotium_model::{Metric, Sort, SortColumn};
+        let dir = TempDir::new("sort");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"refresh_ms": 2000}"#).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::File);
+        assert_eq!(s.sort(), Sort { column: SortColumn::Metric(Metric::Cpu), descending: true });
+        assert!(s.group_by_type, "a file that predates the switch: grouped");
+        std::fs::write(&p, r#"{"sort_column": "banana", "sort_descending": false, "group_by_type": false}"#).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::Partial(vec!["sort_column".to_string()]));
+        assert_eq!(s.sort(), Sort { column: SortColumn::Metric(Metric::Cpu), descending: false }, "only the column is lost");
+        assert!(!s.group_by_type);
+        let mut s = Settings::default();
+        s.set_sort(Sort { column: SortColumn::Name, descending: false });
+        s.group_by_type = false;
+        assert_eq!((s.sort_column.as_str(), s.sort_descending), ("name", false));
+        save(&p, &s).unwrap();
+        let (back, how) = load(&p);
+        assert_eq!((how, back.sort(), back.group_by_type), (Loaded::File, Sort { column: SortColumn::Name, descending: false }, false));
+        for m in Metric::ALL {
+            s.set_sort(Sort::by(SortColumn::Metric(m)));
+            assert_eq!(s.sort(), Sort::by(SortColumn::Metric(m)));
+        }
+    }
+
+    #[test]
     fn settings_round_trip_as_readable_json() {
         let dir = TempDir::new("roundtrip");
         let p = dir.file();
@@ -358,6 +432,9 @@ mod tests {
             gpu_rendering: false,
             smooth_graphs: false,
             tray_cpu: false,
+            sort_column: "memory".to_string(),
+            sort_descending: false,
+            group_by_type: false,
         };
         save(&p, &s).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("\"theme\": \"dark\""));

@@ -7,7 +7,6 @@ use negotium::renderer;
 use negotium::settings;
 use negotium::smooth::OnScreen;
 use negotium::{MainWindow, NegotiumTray, worker};
-use negotium_model::Metric;
 use slint::ComponentHandle;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -176,6 +175,13 @@ fn main() -> Result<(), slint::PlatformError> {
     negotium::settingspage::apply_settings(&ui, &initial);
     let controls = Arc::new(Controls::default());
     controls.set_refresh_ms(initial.refresh_ms);
+    // The saved sort and grouping; a metric sort starts with its meter selected, like a click would.
+    controls.set_sort(initial.sort());
+    controls.set_grouped(initial.group_by_type);
+    if let negotium_model::SortColumn::Metric(m) = initial.sort().column {
+        controls.set_metric(m);
+        ui.set_selected_metric(m as i32);
+    }
     // The tray icon's CPU graph (crate::tray): drawn on this thread from the worker's samples; its
     // size and colours are read here (window setup), the size again whenever a tray is made and the
     // colours on a theme change. The shell is left alone while the worker finds the taskbar hung (PF2).
@@ -250,16 +256,6 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     negotium::bridge::set_current(bridge.clone());
 
-    {
-        let controls = controls.clone();
-        let weak = weak.clone();
-        ui.on_select_metric(move |i| {
-            controls.set_metric(Metric::ALL[(i.max(0) as usize).min(Metric::ALL.len() - 1)]);
-            if let Some(ui) = weak.upgrade() {
-                ui.set_selected_metric(i);
-            }
-        });
-    }
     // Startup page: listing calls the registry, the file system, COM and WinRT, so it runs on an
     // action thread and the result comes back through the bridge (negotium::startup). The list is
     // read again when the page opens, on Refresh and after every toggle, so it shows the real state.

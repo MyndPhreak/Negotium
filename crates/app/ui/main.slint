@@ -101,6 +101,11 @@ export component MainWindow inherits Window {
 
     callback select-page(int);
     callback select-metric(int);
+    // The list's sort (crate::controls): -1 is the name column, 0..4 a metric's index. Clicking a
+    // header reports its column; Rust answers by setting both properties.
+    in-out property <int> sort-column: 0;
+    in-out property <bool> sort-descending: true;
+    callback sort-clicked(int);
     callback open-tile(int);
     callback toggle-row(int);
     callback row-action(string, int);
@@ -142,6 +147,7 @@ export component MainWindow inherits Window {
     always-on-top: root.on-top;
     in-out property <bool> settings-keep-in-tray: true;
     in-out property <bool> settings-smooth-graphs: true;
+    in-out property <bool> settings-group-by-type: true;
     in-out property <bool> settings-tray-cpu: true;
     in-out property <bool> settings-gpu-rendering: true;
     in-out property <bool> settings-gpu-fallback;
@@ -152,6 +158,7 @@ export component MainWindow inherits Window {
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
+    callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
@@ -337,6 +344,7 @@ export component MainWindow inherits Window {
                     always-on-top: root.on-top;
                     keep-in-tray: root.settings-keep-in-tray;
                     smooth-graphs: root.settings-smooth-graphs;
+                    group-by-type: root.settings-group-by-type;
                     tray-cpu: root.settings-tray-cpu;
                     gpu-rendering: root.settings-gpu-rendering;
                     gpu-fallback: root.settings-gpu-fallback;
@@ -349,6 +357,7 @@ export component MainWindow inherits Window {
                     always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
                     tray-toggled(on) => { root.tray-toggled(on); }
                     smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
+                    group-by-type-toggled(on) => { root.group-by-type-toggled(on); }
                     tray-cpu-toggled(on) => { root.tray-cpu-toggled(on); }
                     gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
                 }

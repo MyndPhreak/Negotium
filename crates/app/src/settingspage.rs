@@ -1,7 +1,8 @@
 //! The Settings page's Rust side: shows the settings on the window and acts on the page's
 //! choices. Each choice applies at once, the page shows the new state, and the file is saved off
 //! the UI thread (`settings::Saver`).
-use crate::controls::Controls;
+use crate::controls::{Controls, header_click, sort_column_from_index, sort_column_index};
+use negotium_model::{Metric, Sort, SortColumn};
 use crate::settings::{Saver, Settings, ThemeChoice, refresh_from_index};
 use crate::renderer::{self, Renderer};
 use crate::{MainWindow, platform};
@@ -27,6 +28,9 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
     ui.set_settings_tray_cpu(s.tray_cpu);
+    ui.set_settings_group_by_type(s.group_by_type);
+    ui.set_sort_column(sort_column_index(s.sort().column));
+    ui.set_sort_descending(s.sort().descending);
     // Off: GraphClock rests the view on the newest sample at once (PF3).
     ui.global::<crate::GraphClock>().set_smooth(s.smooth_graphs);
 }
@@ -88,6 +92,42 @@ impl SettingsWiring {
             let change = change.clone();
             ui.on_smooth_graphs_toggled(move |on| {
                 change.apply(|s| s.smooth_graphs = on);
+            });
+        }
+        {
+            let (change, controls) = (change.clone(), controls.clone());
+            ui.on_group_by_type_toggled(move |on| {
+                change.apply(|s| s.group_by_type = on);
+                controls.set_grouped(on);
+            });
+        }
+        // The meters and the column headers are one choice (spec "Meters and headers stay in
+        // step"): a meter sorts by its metric, a metric header selects its meter.
+        {
+            let (change, controls) = (change.clone(), controls.clone());
+            ui.on_select_metric(move |i| {
+                let metric = Metric::ALL[(i.max(0) as usize).min(Metric::ALL.len() - 1)];
+                controls.set_metric(metric);
+                let sort = Sort::by(SortColumn::Metric(metric));
+                controls.set_sort(sort);
+                if let Some(ui) = change.apply(|s| s.set_sort(sort)) {
+                    ui.set_selected_metric(i);
+                }
+            });
+        }
+        {
+            let (change, controls) = (change.clone(), controls.clone());
+            ui.on_sort_clicked(move |c| {
+                let sort = header_click(controls.sort(), sort_column_from_index(c));
+                controls.set_sort(sort);
+                if let SortColumn::Metric(m) = sort.column {
+                    controls.set_metric(m);
+                }
+                if let Some(ui) = change.apply(|s| s.set_sort(sort))
+                    && let SortColumn::Metric(m) = sort.column
+                {
+                    ui.set_selected_metric(m as i32);
+                }
             });
         }
         {
