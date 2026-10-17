@@ -50,7 +50,7 @@ impl Collector {
     }
 
     /// Adds the per-process network feed: a trace session called `name`, started only when
-    /// elevated. Only the app asks for it (with `netetw::SESSION_NAME`); tests, the bench and the
+    /// elevated. Only the app asks for it (with `netetw::session_name()`); tests, the bench and the
     /// probe go without, so running them elevated never replaces the app's session. A restarted
     /// worker drops the old Collector (stopping its session) before building this one, and `start`
     /// also replaces any leftover session of the name.
@@ -59,11 +59,19 @@ impl Collector {
         self
     }
 
-    /// `with_net_feed` on a collector already built (replacing any feed it had).
+    /// `with_net_feed` on a collector already built (replacing any feed it had). A feed that stops
+    /// or fails to start is tried again every `netetw::RETRY`.
     pub fn start_net_feed(&mut self, name: &str) {
+        // Drop the old feed first: its Drop stops its session and joins its consumer. Otherwise
+        // the new start (same name) would stop the old session by name under a consumer still
+        // attached, and two feeds would live side by side until the assignment.
         self.net_by_pid = crate::netetw::PerPidNet::off(Instant::now());
-        self.net_by_pid =
-            crate::netetw::PerPidNet::new(crate::netetw::is_elevated(), || crate::netetw::NetFeed::start(name), Instant::now());
+        let name = name.to_string();
+        self.net_by_pid = crate::netetw::PerPidNet::new(
+            crate::netetw::is_elevated(),
+            move || crate::netetw::NetFeed::start(&name),
+            Instant::now(),
+        );
     }
 
     /// Whether this collector runs a per-process network feed.

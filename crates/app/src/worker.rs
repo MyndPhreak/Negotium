@@ -152,7 +152,7 @@ impl LiveSource {
         }
     }
 
-    /// Runs the per-process network feed (the app's own source only; see `NET_SESSION`).
+    /// Runs the per-process network feed (the app's own source only; see `net_session`).
     pub fn with_net_feed(mut self, name: &str) -> Self {
         self.collector.start_net_feed(name);
         self
@@ -175,7 +175,7 @@ impl LiveSource {
 impl Source for LiveSource {
     fn next_frame(&mut self, controls: &Controls) -> Option<Frame> {
         let snap = self.collector.tick();
-        for e in &snap.source_errors {
+        for e in errors_to_log(&snap.source_errors, controls.stopped()) {
             self.log.warn(e);
         }
         let rows = self.model.update(&snap);
@@ -237,9 +237,17 @@ impl<T> Latest<T> {
     }
 }
 
-/// The app's per-process network trace session (`negotium_collector::netetw`). Only the worker
-/// `spawn` starts runs it; the sources tests build go without.
-pub const NET_SESSION: &str = negotium_collector::netetw::SESSION_NAME;
+/// The source errors worth logging. While the app stops, the network trace ending is the exit's
+/// own doing (`stop_worker` stops the session after the stop request), not news.
+fn errors_to_log(errors: &[String], stopping: bool) -> impl Iterator<Item = &String> {
+    errors.iter().filter(move |e| !(stopping && e.as_str() == negotium_collector::netetw::TRACE_STOPPED))
+}
+
+/// The app's per-process network trace session (`negotium_collector::netetw::session_name`, one
+/// per logon session). Only the worker `spawn` starts runs it; the sources tests build go without.
+pub fn net_session() -> String {
+    negotium_collector::netetw::session_name()
+}
 
 /// Tells the worker to stop, then ends its network trace session with `stop_session`. The worker
 /// thread isn't joined at exit, so its collector (and the feed's `Drop`) never goes away on its
@@ -247,7 +255,7 @@ pub const NET_SESSION: &str = negotium_collector::netetw::SESSION_NAME;
 /// (a stopped supervisor builds no further source).
 pub fn stop_worker(controls: &Controls, stop_session: impl FnOnce(&str)) {
     controls.request_stop();
-    stop_session(NET_SESSION);
+    stop_session(&net_session());
 }
 
 /// Starts the supervised worker. Collector time counts from `epoch`, which the bridge shares to
@@ -266,7 +274,7 @@ pub fn spawn(
             let mut log = crate::log::Log::new(crate::log::Log::default_path());
             supervise(
                 move || {
-                    let source = LiveSource::new(history.clone(), epoch, ids.clone()).with_net_feed(NET_SESSION);
+                    let source = LiveSource::new(history.clone(), epoch, ids.clone()).with_net_feed(&net_session());
                     match &tray {
                         Some(t) => source.with_tray(t.clone()),
                         None => source,
@@ -316,7 +324,16 @@ mod tests {
         let controls = Controls::default();
         let mut stopped = Vec::new();
         stop_worker(&controls, |name| stopped.push((name.to_string(), controls.stopped())));
-        assert_eq!(stopped, [("Negotium-Net".to_string(), true)], "after the stop request, by the app's name");
+        assert_eq!(stopped, [(net_session(), true)], "after the stop request, by the app's name");
+        assert!(net_session().starts_with("Negotium-Net-"), "{}", net_session());
+    }
+
+    #[test]
+    fn a_trace_stop_is_not_logged_while_the_app_stops() {
+        use negotium_collector::netetw::TRACE_STOPPED;
+        let errors = vec!["memory: GlobalMemoryStatusEx failed".to_string(), TRACE_STOPPED.to_string()];
+        assert_eq!(errors_to_log(&errors, false).collect::<Vec<_>>(), [&errors[0], &errors[1]]);
+        assert_eq!(errors_to_log(&errors, true).collect::<Vec<_>>(), [&errors[0]], "other errors still logged");
     }
 
     #[test]

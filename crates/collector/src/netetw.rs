@@ -37,7 +37,7 @@ use std::mem::{offset_of, size_of};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, GetLastError, HANDLE, WIN32_ERROR};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Diagnostics::Etw::{
@@ -47,11 +47,39 @@ use windows::Win32::System::Diagnostics::Etw::{
     PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE, ProcessTrace, StartTraceW, TRACE_LEVEL_INFORMATION,
     WNODE_FLAG_TRACED_GUID,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
 use windows::core::{GUID, PCWSTR, PWSTR};
 
-/// The app's session. Fixed, so a session leaked by a crash is found and replaced at the next start.
-pub const SESSION_NAME: &str = "Negotium-Net";
+/// The start of the app's session name; see `session_name`.
+const SESSION_PREFIX: &str = "Negotium-Net";
+
+/// The app's session name: `Negotium-Net-<logon session id>`. Fixed per logon session, so a
+/// session leaked by a crash is found and replaced at the next start. Trace sessions are
+/// machine-wide while the single-instance lock is per logon session: with the id in the name,
+/// another user's elevated Negotium (fast user switching, Remote Desktop) never stops ours.
+pub fn session_name() -> String {
+    let mut id = 0u32;
+    // SAFETY: `id` is a writable u32; our own process id is always valid.
+    match unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut id) } {
+        Ok(()) => session_name_for(id),
+        // Never seen for the current process; the bare prefix still names one session per machine.
+        Err(_) => SESSION_PREFIX.to_string(),
+    }
+}
+
+/// `session_name` for logon session `id`.
+pub(crate) fn session_name_for(id: u32) -> String {
+    format!("{SESSION_PREFIX}-{id}")
+}
+
+/// What a step reports when the feed's session ended under it. The app leaves it out of the log
+/// while it is exiting: then its own exit stopped the session.
+pub const TRACE_STOPPED: &str = "per-app network: the network trace stopped";
+/// What a step reports when a retry brought the feed back.
+pub const TRACE_RESTARTED: &str = "per-app network: the network trace restarted";
+/// How long the collector waits before trying again to start a feed that stopped or failed.
+pub(crate) const RETRY: Duration = Duration::from_secs(60);
 
 const PROVIDER: GUID = GUID::from_u128(0x7dd42a49_5329_4832_8dfd_43d979153a88);
 const KEYWORD_IPV4: u64 = 0x10;
@@ -156,6 +184,8 @@ impl Sums {
 pub enum NetFeedError {
     NotElevated,
     Os { call: &'static str, code: u32 },
+    /// The consumer thread could not be created (and Windows gave no error code).
+    Thread,
 }
 
 impl std::fmt::Display for NetFeedError {
@@ -163,6 +193,7 @@ impl std::fmt::Display for NetFeedError {
         match self {
             NetFeedError::NotElevated => write!(f, "needs admin rights"),
             NetFeedError::Os { code, .. } => write!(f, "couldn't start the network trace (error {code})"),
+            NetFeedError::Thread => write!(f, "couldn't start the network trace's reader thread"),
         }
     }
 }
@@ -212,7 +243,7 @@ pub(crate) fn stop_by_name(name: &str) -> WIN32_ERROR {
 }
 
 /// Stops the trace session called `name`, if there is one. The app's exit path calls this with
-/// `SESSION_NAME`: the worker's collector is not dropped when the process ends, so its feed's
+/// `session_name()`: the worker's collector is not dropped when the process ends, so its feed's
 /// `Drop` never runs. Harmless when no such session exists or it can't be stopped.
 pub fn stop_session(name: &str) {
     let _ = stop_by_name(name);
@@ -283,7 +314,6 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
 /// A running session plus its consumer thread (`negotium-netetw`). Dropping it stops the session
 /// and joins the thread.
 pub struct NetFeed {
-    session: CONTROLTRACE_HANDLE,
     consumer: PROCESSTRACE_HANDLE,
     name: String,
     /// The session GUID this feed started with: tells its session from a newer one of the name.
@@ -307,8 +337,11 @@ impl NetFeed {
         };
         // Unelevated, StartTraceW may still succeed (a plain real-time session is allowed); it is
         // enabling the kernel provider that is denied. Either way the session is stopped again.
-        let fail = |call: &'static str, code: u32| {
+        let stop = || {
             let _ = control(session, &wide(name), EVENT_TRACE_CONTROL_STOP);
+        };
+        let fail = |call: &'static str, code: u32| {
+            stop();
             Err(if code == ERROR_ACCESS_DENIED.0 { NetFeedError::NotElevated } else { NetFeedError::Os { call, code } })
         };
 
@@ -353,11 +386,17 @@ impl NetFeed {
             drop(held);
         });
         match thread {
-            Ok(thread) => Ok(NetFeed { session, consumer, name: name.to_string(), guid, sums, thread: Some(thread) }),
-            Err(_) => {
+            Ok(thread) => Ok(NetFeed { consumer, name: name.to_string(), guid, sums, thread: Some(thread) }),
+            Err(e) => {
                 // SAFETY: opened above and never processed.
                 let _ = unsafe { CloseTrace(consumer) };
-                fail("CreateThread", 0)
+                match e.raw_os_error() {
+                    Some(code) => fail("CreateThread", code as u32),
+                    None => {
+                        stop();
+                        Err(NetFeedError::Thread)
+                    }
+                }
             }
         }
     }
@@ -380,15 +419,11 @@ impl TakeBytes for NetFeed {
 
 impl Drop for NetFeed {
     fn drop(&mut self) {
-        if TakeBytes::running(self) {
-            // The consumer is attached, so the session behind the handle is still ours.
-            let _ = control(self.session, &wide(&self.name), EVENT_TRACE_CONTROL_STOP);
-        } else {
-            // ProcessTrace has returned: the session was stopped (maybe replaced by a newer one of
-            // the name, which may even reuse the handle's logger id), or ProcessTrace failed on its
-            // own and the session still runs. Stop it by name only if it is still this one.
-            stop_if_ours(&self.name, self.guid);
-        }
+        // By name and only if the session is still this one, whether or not the consumer is still
+        // attached: once the session was stopped (and maybe replaced by a newer one of the name,
+        // which may even reuse the old handle's logger id) a stop by handle could end the newer
+        // one. If ProcessTrace failed on its own, the session still runs and is ours: stopped too.
+        stop_if_ours(&self.name, self.guid);
         // SAFETY: the consumer handle was opened in start and is closed exactly once, here.
         let _ = unsafe { CloseTrace(self.consumer) };
         if let Some(thread) = self.thread.take() {
@@ -423,32 +458,41 @@ pub fn is_elevated() -> bool {
     ok && elevation.TokenIsElevated != 0
 }
 
-/// The collector's side: the feed (only when elevated), the time of the last take, and a start
-/// failure waiting to be reported once.
+/// Starts a feed; kept to try again after the feed stopped or failed to start.
+type Starter<F> = Box<dyn FnMut() -> Result<F, NetFeedError> + Send>;
+
+/// The collector's side: the feed (only when elevated), the time of the last take, a start
+/// failure waiting to be reported once, and when to try starting again (`RETRY` after a stop or
+/// a failed start).
 pub(crate) struct PerPidNet<F> {
     feed: Option<F>,
     error: Option<String>,
     last: Instant,
+    /// `None` when the feed is never to run (unelevated, or `off`).
+    start: Option<Starter<F>>,
+    retry_at: Option<Instant>,
 }
 
 impl<F: TakeBytes> PerPidNet<F> {
     /// Starts the feed only when `elevated`; unelevated there is nothing to report (the Overview
-    /// banner explains the missing column).
-    pub(crate) fn new(elevated: bool, start: impl FnOnce() -> Result<F, NetFeedError>, now: Instant) -> Self {
-        let (feed, error) = if !elevated {
-            (None, None)
-        } else {
-            match start() {
-                Ok(feed) => (Some(feed), None),
-                Err(e) => (None, Some(format!("per-app network: {e}"))),
-            }
+    /// banner explains the missing column) and nothing is ever retried.
+    pub(crate) fn new(
+        elevated: bool, start: impl FnMut() -> Result<F, NetFeedError> + Send + 'static, now: Instant,
+    ) -> Self {
+        if !elevated {
+            return Self::off(now);
+        }
+        let mut start: Starter<F> = Box::new(start);
+        let (feed, error, retry_at) = match start() {
+            Ok(feed) => (Some(feed), None, None),
+            Err(e) => (None, Some(format!("per-app network: {e}")), Some(now + RETRY)),
         };
-        PerPidNet { feed, error, last: now }
+        PerPidNet { feed, error, last: now, start: Some(start), retry_at }
     }
 
     /// No feed: every step gives `None` and reports nothing.
     pub(crate) fn off(now: Instant) -> Self {
-        PerPidNet { feed: None, error: None, last: now }
+        PerPidNet { feed: None, error: None, last: now, start: None, retry_at: None }
     }
 
     pub(crate) fn is_on(&self) -> bool {
@@ -462,7 +506,24 @@ impl<F: TakeBytes> PerPidNet<F> {
         errors.extend(self.error.take());
         if self.feed.as_ref().is_some_and(|f| !f.running()) {
             self.feed = None;
-            errors.push("per-app network: the network trace stopped".into());
+            self.retry_at = Some(now + RETRY);
+            errors.push(TRACE_STOPPED.into());
+        }
+        if self.feed.is_none() && self.retry_at.is_some_and(|at| now >= at) {
+            let start = self.start.as_mut()?;
+            // A failed retry stays quiet (the stop or the first failure was reported) and waits
+            // another RETRY; a success is reported once.
+            match start() {
+                Ok(feed) => {
+                    self.feed = Some(feed);
+                    self.retry_at = None;
+                    self.last = now;
+                    errors.push(TRACE_RESTARTED.into());
+                    // Nothing counted yet: a take now would divide a few bytes by almost no time.
+                    return Some(BTreeMap::new());
+                }
+                Err(_) => self.retry_at = Some(now + RETRY),
+            }
         }
         let feed = self.feed.as_ref()?;
         let bytes = feed.take();
@@ -488,7 +549,7 @@ impl<F: TakeBytes> PerPidNet<F> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn v4(pid: u32, size: u32, daddr: [u8; 4], saddr: [u8; 4]) -> Vec<u8> {
         let mut p = Vec::new();
@@ -654,7 +715,7 @@ mod tests {
             (10, NetBytes { sent: 1000, recv: 3000 }),
             (11, NetBytes { sent: 500, recv: 0 }), // exited before the take
         ])];
-        let mut net = PerPidNet::new(true, || Ok(Fake::new(ticks)), t0);
+        let mut net = PerPidNet::new(true, move || Ok(Fake::new(ticks.clone())), t0);
         let mut errors = Vec::new();
         let rates = net.step(t0 + Duration::from_millis(500), &[proc(10), proc(12)], &mut errors).unwrap();
         assert_eq!(rates.keys().copied().collect::<Vec<_>>(), [10], "only live PIDs with traffic");
@@ -679,6 +740,7 @@ mod tests {
         let mut unelevated: PerPidNet<Fake> = PerPidNet::new(false, || panic!("never started unelevated"), t0);
         let mut errors = Vec::new();
         assert_eq!(unelevated.step(t0 + Duration::from_secs(1), &[proc(1)], &mut errors), None);
+        assert_eq!(unelevated.step(t0 + Duration::from_secs(3600), &[proc(1)], &mut errors), None, "nor retried");
         assert!(errors.is_empty(), "unelevated is not an error");
     }
 
@@ -692,12 +754,75 @@ mod tests {
         for i in 2..=4 {
             assert_eq!(net.step(t0 + Duration::from_secs(i), &[proc(1)], &mut errors), None, "unknown, not zero");
         }
-        assert_eq!(errors, ["per-app network: the network trace stopped"]);
+        assert_eq!(errors, [TRACE_STOPPED]);
+    }
+
+    /// A starter whose calls succeed or fail in `results` order (then fail), counting its calls.
+    fn starter(results: Vec<bool>, calls: Arc<AtomicU32>) -> impl FnMut() -> Result<Fake, NetFeedError> + Send + 'static {
+        let mut results = results.into_iter();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            match results.next() {
+                Some(true) => Ok(Fake::new(Vec::new())),
+                _ => Err(NetFeedError::Os { call: "StartTraceW", code: 1450 }),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stopped_feed_is_retried_each_minute_and_its_recovery_reported_once() {
+        let t0 = Instant::now();
+        let s = |secs| t0 + Duration::from_secs(secs);
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut net = PerPidNet::new(true, starter(vec![true, false, true], calls.clone()), t0);
+        let mut errors = Vec::new();
+        assert!(net.step(s(1), &[proc(1)], &mut errors).is_some());
+        net.feed.as_ref().unwrap().1.set(false);
+        assert_eq!(net.step(s(2), &[proc(1)], &mut errors), None, "stopped: unknown, not zero");
+        assert_eq!(net.step(s(61), &[proc(1)], &mut errors), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry before a minute has passed");
+        assert_eq!(net.step(s(62), &[proc(1)], &mut errors), None, "the first retry fails");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(net.step(s(121), &[proc(1)], &mut errors), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a failed retry waits another minute");
+        assert_eq!(net.step(s(122), &[proc(1)], &mut errors), Some(BTreeMap::new()), "back: an empty first tick");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(net.step(s(123), &[proc(1)], &mut errors).is_some());
+        assert_eq!(errors, ["per-app network: the network trace stopped", "per-app network: the network trace restarted"]);
+    }
+
+    #[test]
+    fn a_failed_start_is_retried_quietly() {
+        let t0 = Instant::now();
+        let s = |secs| t0 + Duration::from_secs(secs);
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut net = PerPidNet::new(true, starter(vec![false, false, true], calls.clone()), t0);
+        let mut errors = Vec::new();
+        assert_eq!(net.step(s(1), &[proc(1)], &mut errors), None);
+        assert_eq!(net.step(s(60), &[proc(1)], &mut errors), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "retried after a minute");
+        assert_eq!(net.step(s(120), &[proc(1)], &mut errors), Some(BTreeMap::new()));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(errors.len(), 2, "the failure once, the recovery once: {errors:?}");
+        assert!(errors[0].contains("error 1450"), "{errors:?}");
+        assert_eq!(errors[1], "per-app network: the network trace restarted");
+    }
+
+    #[test]
+    fn the_app_session_is_named_after_this_logon_session() {
+        assert_eq!(session_name_for(0), "Negotium-Net-0");
+        assert_eq!(session_name_for(3), "Negotium-Net-3");
+        // The id the process list reports for this process.
+        let pid = std::process::id();
+        let ours = crate::ProcessReader::new().read().unwrap().into_iter().find(|p| p.pid == pid).expect("listed");
+        assert_eq!(session_name(), session_name_for(ours.session_id));
+        assert_ne!(session_name_for(1), session_name_for(2), "another user's session has another name");
     }
 
     #[test]
     fn errors_read_in_plain_english() {
         assert_eq!(NetFeedError::NotElevated.to_string(), "needs admin rights");
+        assert_eq!(NetFeedError::Thread.to_string(), "couldn't start the network trace's reader thread");
         assert_eq!(
             NetFeedError::Os { call: "StartTraceW", code: 5 }.to_string(),
             "couldn't start the network trace (error 5)"
@@ -807,6 +932,25 @@ mod tests {
         let _ = feed.take();
         drop(feed);
         assert!(!is_running(&name), "dropping the feed stops the session");
+    }
+
+    #[test]
+    #[ignore = "needs an elevated terminal"]
+    fn the_live_feed_counts_this_processes_udp_sends() {
+        let name = test_name();
+        let _guard = StopAtEnd(name.clone());
+        let feed = NetFeed::start(&name).expect("start");
+        let _ = feed.take();
+        // TEST-NET-1 (RFC 5737): routed off the machine, never loopback, nobody answers.
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        for _ in 0..5 {
+            let _ = socket.send_to(&[0u8; 512], "192.0.2.1:9");
+        }
+        std::thread::sleep(Duration::from_millis(500)); // more than FLUSH_MS
+        let bytes = feed.take();
+        let ours = bytes.get(&std::process::id()).copied().unwrap_or_default();
+        assert!(ours.sent > 0, "no bytes counted for this process: {bytes:?}");
+        drop(feed);
     }
 
     #[test]
