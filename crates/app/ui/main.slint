@@ -27,8 +27,6 @@ export component MainWindow inherits Window {
     in property <[MeterData]> meters;
     in property <int> selected-metric;
     in property <[TileData]> tiles;
-    // How far the last frame moved the tiles' edges, as a fraction of the strip (crate::bridge::strip_shift).
-    in property <float> tile-shift: 1;
     in property <string> top-caption;
     in property <[RowData]> rows;
     in property <bool> show-admin-banner;
@@ -265,7 +263,6 @@ export component MainWindow inherits Window {
                         tiles: root.tiles;
                         caption: root.top-caption;
                         smooth: root.settings-smooth-graphs;
-                        shift: root.tile-shift;
                         interactive: !root.modal-open;
                         // Opening a tile clears the filter, so the box must be emptied together with it.
                         open(id) => { root.search-text = ""; root.open-tile(id); }

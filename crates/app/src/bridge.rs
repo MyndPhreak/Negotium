@@ -63,39 +63,8 @@ pub fn sync_model<T: Clone + PartialEq, S: RowStore<T>>(store: &S, items: Vec<T>
 /// frame marked `leaving` (shrinking away) and a newcomer is inserted next to the tile ranked
 /// just above it (growing in). Apps that stay but swap ranks trade tiles in place; by then their
 /// averaged widths are about equal, so only the labels change. Without smoothing tiles are simply
-/// replaced in order. Returns how far the strip's tile edges move ([`strip_shift`]), for the
-/// glide (MainWindow.tile-shift).
-pub fn sync_tiles(model: &VecModel<TileData>, tiles: Vec<TileData>, smooth: bool) -> f32 {
-    let widths = |model: &VecModel<TileData>| -> Vec<(i32, f32)> {
-        model.iter().map(|t| (t.id, if t.leaving { 0.0 } else { t.weight.max(0.0) })).collect()
-    };
-    let before = widths(model);
-    apply_tiles(model, tiles, smooth);
-    strip_shift(&before, &widths(model))
-}
-
-/// The largest move of any tile edge from `before` to `after` (tiles in strip order as (id,
-/// stretch)), as a fraction of the strip: tiles share it by stretch, so an edge sits at the
-/// stretch to its left over the total. A tile new in `after` grows from nothing where it stands;
-/// one gone from it had shrunk to nothing already. The glide's step count follows it (ruling
-/// P3c-3: a whole pixel of motion is worth a redraw).
-pub fn strip_shift(before: &[(i32, f32)], after: &[(i32, f32)]) -> f32 {
-    let total = |v: &[(i32, f32)]| v.iter().map(|t| t.1).sum::<f32>();
-    let (tb, ta) = (total(before), total(after));
-    if tb <= 0.0 || ta <= 0.0 {
-        // From or to an empty strip: tiles grow in or shrink away across all of it.
-        return if tb > 0.0 || ta > 0.0 { 1.0 } else { 0.0 };
-    }
-    let (mut cb, mut ca, mut most) = (0.0f32, 0.0f32, 0.0f32);
-    for &(id, w) in after {
-        cb += before.iter().find(|t| t.0 == id).map_or(0.0, |t| t.1);
-        ca += w;
-        most = most.max((cb / tb - ca / ta).abs());
-    }
-    most
-}
-
-fn apply_tiles(model: &VecModel<TileData>, tiles: Vec<TileData>, smooth: bool) {
+/// replaced in order.
+pub fn sync_tiles(model: &VecModel<TileData>, tiles: Vec<TileData>, smooth: bool) {
     for i in (0..model.row_count()).rev() {
         if model.row_data(i).is_some_and(|t| t.leaving) {
             model.remove(i);
@@ -701,10 +670,9 @@ impl Bridge {
         sync_model(&*self.meters, frame.meters.iter().map(|m| MeterData {
             label: m.label.into(), value: m.value.clone().into(), sub: m.sub.clone().into(), spark: m.spark.clone().into(), available: m.available,
         }).collect());
-        let shift = sync_tiles(&self.tiles, frame.tiles.iter().map(|t| TileData {
+        sync_tiles(&self.tiles, frame.tiles.iter().map(|t| TileData {
             id: t.id, name: t.name.clone().into(), value: t.value.clone().into(), weight: t.weight, hung: t.hung, leaving: false,
         }).collect(), ui.get_settings_smooth_graphs());
-        ui.set_tile_shift(shift);
         ui.set_top_caption(frame.caption.clone().into());
         ui.set_show_admin_banner(frame.admin_banner && !self.banner_dismissed);
         self.scroll_to(ui, frame.graph_end_ms);
@@ -1081,22 +1049,6 @@ pub fn with_bridge(f: impl FnOnce(&mut Bridge)) {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-
-    #[test]
-    fn the_strip_shift_is_the_largest_edge_move_as_a_share_of_the_strip() {
-        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
-        // Every weight scaled alike: nothing moves.
-        assert_eq!(strip_shift(&[(1, 2.0), (2, 1.0)], &[(1, 4.0), (2, 2.0)]), 0.0);
-        // 1:1 to 3:1: the middle edge goes from 1/2 to 3/4.
-        assert!(close(strip_shift(&[(1, 1.0), (2, 1.0)], &[(1, 3.0), (2, 1.0)]), 0.25));
-        // A newcomer grows in on the right: the old edge goes from 1 to 1/2.
-        assert!(close(strip_shift(&[(1, 1.0)], &[(1, 1.0), (2, 1.0)]), 0.5));
-        // A leaver (stretch 0) shrinking away on the left: its edge goes from 1/2 to 0.
-        assert!(close(strip_shift(&[(1, 1.0), (2, 1.0)], &[(1, 0.0), (2, 1.0)]), 0.5));
-        // From or to nothing: the whole strip.
-        assert_eq!(strip_shift(&[], &[(1, 1.0)]), 1.0);
-        assert_eq!(strip_shift(&[], &[]), 0.0);
-    }
 
     /// Records every operation so the test can prove updates are minimal and in place.
     #[derive(Default)]

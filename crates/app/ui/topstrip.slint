@@ -11,42 +11,20 @@ export component TopStrip inherits VerticalLayout {
     in property <bool> interactive: true;
     // Tiles glide to their new widths instead of jumping each frame (Settings > Smooth graphs).
     in property <bool> smooth: true;
-    // How far this frame moves the tiles' edges, as a fraction of the strip (crate::bridge::
-    // strip_shift; 1, the most, unless the bridge says).
-    in property <float> shift: 1;
     callback open(int);
-    // The glide. Not `animate`: an animation draws at display rate for its whole length, and the
-    // tiles' averaged weights change with nearly every frame, so a 450 ms animation drew about 108
-    // frames a second at 240 Hz. Instead this timer steps the glide: once per physical pixel the
-    // edges move (ruling P3c-3) but at most `max-steps` times. The cap is the cost: the winit
-    // backend presents every isolated redraw twice (its frame throttle ticks once more after the
-    // frame it asked for), and real frames move the edges 10 to 60 px, so one step per pixel (up
-    // to 28) presented about 61 frames a second (docs/benchmarks, redraw-debug-report).
-    // `glide-now` is the glide's own clock: GraphClock's, but it always moves by at least a step,
-    // so a glide ends even before Rust installs the clock (which then answers 0).
-    // Tiles glide only while `live`: smoothing on and the window on screen (GraphClock.shown, as
-    // the graphs). Otherwise every tile sits on its target, so turning either back on finds them
-    // where they are shown, and nothing steps a glide nobody sees.
+    // The glide rides the graph clock (crate::smooth, GraphClock in graph.slint): a tile's
+    // progress is the time GraphClock.now has advanced since the frame landed, over `glide-ms`,
+    // eased out. So tiles move only on the redraws the scrolling graphs make anyway, a few coarse
+    // steps a glide, and never ask for one themselves. A timer or an `animate` of their own cost
+    // a redraw per step, and the winit backend presents every isolated redraw twice: one step per
+    // pixel presented about 61 frames a second, eight steps 24 (redraw-debug-report).
+    // Tiles glide only while the graph clock moves: smoothing on, the window on screen and a run
+    // in progress (GraphClock.offset-ms < 0, as main.slint's scroll timer). Otherwise every tile
+    // sits on its target, so a run that stops early, or never starts, never leaves one part-way:
+    // the redraw that stops the clock, or the frame's own, shows it there.
     out property <bool> live: root.smooth && GraphClock.shown;
-    property <int> max-steps: 8;
-    property <duration> glide-now;
-    property <duration> glide-end;
-    property <float> glide-px;
-    // Whole steps, whole milliseconds, the last one landing on the glide's end.
-    property <duration> glide-step: ceil(root.glide-ms / 1ms / clamp(ceil(root.glide-px), 1, root.max-steps)) * 1ms;
+    out property <bool> moving: root.live && GraphClock.live && GraphClock.offset-ms < 0;
     property <duration> glide-ms: 450ms;
-    Timer {
-        interval: root.glide-step;
-        running: root.live && root.glide-now < root.glide-end;
-        triggered => { root.glide-now = max(GraphClock.clock(), root.glide-now + self.interval); }
-    }
-    // A tile starts gliding; returns its start. Every tile changed by a frame starts together.
-    function start-glide() -> duration {
-        root.glide-now = max(GraphClock.clock(), root.glide-now);
-        root.glide-px = root.shift * root.width / 1phx;
-        root.glide-end = root.glide-now + root.glide-ms;
-        return root.glide-now;
-    }
     vertical-stretch: 0; // see MetersRow: spare height belongs to the app list
     spacing: 4px;
     Text { text: caption; color: Theme.muted; font-size: 11px; }
@@ -72,33 +50,26 @@ export component TopStrip inherits VerticalLayout {
             property <float> from-shown: 0;
             property <float> to-shown: 0;
             property <duration> start;
-            property <float> progress: clamp((root.glide-now - self.start) / root.glide-ms, 0, 1);
+            property <float> progress: clamp((GraphClock.now - self.start) / root.glide-ms, 0, 1);
             property <float> eased: 1 - (1 - self.progress) * (1 - self.progress); // ease-out
-            property <float> stretch: self.from + (self.to - self.from) * self.eased;
-            property <float> shown: self.from-shown + (self.to-shown - self.from-shown) * self.eased;
-            property <bool> live: root.live;
+            property <float> stretch: root.moving ? self.from + (self.to - self.from) * self.eased : self.target;
+            property <float> shown: root.moving ? self.from-shown + (self.to-shown - self.from-shown) * self.eased : self.target-shown;
+            property <bool> moving: root.moving;
             changed target => { self.glide(); }
             changed target-shown => { self.glide(); }
-            changed live => { self.glide(); }
+            changed moving => { self.glide(); }
+            // A frame changed the tile (or the clock started or stopped): it glides from where it
+            // is shown, starting now on the graph clock; with the clock still it sits on its target.
             function glide() {
-                if (!root.live) {
-                    // Not gliding: settled on the target (see `live`).
-                    self.from = self.target;
-                    self.to = self.target;
-                    self.from-shown = self.target-shown;
-                    self.to-shown = self.target-shown;
-                    return;
-                }
-                // From where it is now (read before `to` moves).
-                self.from = self.stretch;
-                self.from-shown = self.shown;
+                self.from = root.moving ? self.stretch : self.target;
+                self.from-shown = root.moving ? self.shown : self.target-shown;
                 self.to = self.target;
                 self.to-shown = self.target-shown;
-                self.start = root.start-glide();
+                self.start = GraphClock.now;
             }
-            horizontal-stretch: root.live ? self.stretch : self.target;
-            min-width: 28px * (root.live ? self.shown : self.target-shown);
-            opacity: root.live ? self.shown : self.target-shown;
+            horizontal-stretch: self.stretch;
+            min-width: 28px * self.shown;
+            opacity: self.shown;
             clip: true;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);

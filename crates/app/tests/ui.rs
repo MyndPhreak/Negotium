@@ -3326,31 +3326,87 @@ fn settle(ui: &MainWindow, ms: u64) {
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(ms));
 }
 
+/// A frame lands, as the bridge applies one: the graphs start their scroll run (crate::smooth),
+/// which is the clock the tiles glide by.
+fn land(ui: &MainWindow) {
+    ui.invoke_scroll_from(-1_250.0, 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+}
+
+/// Advances `ms` in 10 ms steps, returning GraphClock.now and the tile's width after each.
+fn steps(ui: &MainWindow, ms: u64, tile: usize) -> Vec<(i64, f32)> {
+    (0..ms / 10).map(|_| {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(10));
+        (ui.global::<GraphClock>().get_now(), tile_width(ui, tile))
+    }).collect()
+}
+
 #[test]
-fn tiles_glide_to_their_new_widths_when_smooth_and_jump_when_not() {
+fn tiles_glide_on_the_graph_clock_when_smooth_and_jump_when_not() {
     // The bridge updates tiles in place (sync_model), so their widths glide between frames.
     let ui = shown_window();
-    negotium::smooth::install(&ui, mocked_clock); // the glide's clock (Bridge::install does this in the app)
+    negotium::smooth::install(&ui, mocked_clock); // the graph clock (Bridge::install does this in the app)
     let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0), tile(1, 1.0)]));
     ui.set_tiles(ModelRc::from(model.clone()));
     settle(&ui, 1000);
     let start = tile_width(&ui, 0);
     model.set_row_data(0, tile(0, 3.0));
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO); // the frame lands: the glide starts
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
-    let mid = tile_width(&ui, 0);
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
-    let end = tile_width(&ui, 0);
-    assert!(start < mid && mid < end, "the first tile grows over time: {start} {mid} {end}");
+    land(&ui);
+    assert!((tile_width(&ui, 0) - start).abs() < 1.0, "the frame lands with the tile where it was");
+    let seen = steps(&ui, 1000, 0);
+    // It moves only when the graph clock does (the graphs' redraws), never on its own.
+    let mut last = (ui.global::<GraphClock>().get_anchor(), start);
+    for &(now, w) in &seen {
+        assert!(now != last.0 || (w - last.1).abs() < 0.01, "the tile moved with the graph clock still: {seen:?}");
+        last = (now, w);
+    }
+    let end = seen.last().unwrap().1;
+    assert!(seen.iter().any(|&(_, w)| start + 1.0 < w && w < end - 1.0), "it passes part-way: {seen:?}");
+    assert!(end > start * 1.3, "and grows to its new width: {start} to {end}");
 
     ui.set_settings_smooth_graphs(false);
     model.set_row_data(0, tile(0, 1.0));
+    land(&ui);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     assert!((tile_width(&ui, 0) - start).abs() < 1.0, "without smoothing the tile jumps straight back");
 }
 
+/// A run that ends before the glide would (the view reaches the newest sample), or never starts
+/// (the view rests on it), leaves the tiles on their targets, not part-way.
+#[test]
+fn tiles_land_on_their_targets_when_the_graph_clock_stops_early() {
+    let ui = shown_window();
+    negotium::smooth::install(&ui, mocked_clock);
+    let model = std::rc::Rc::new(VecModel::from(vec![tile(0, 1.0), tile(1, 1.0)]));
+    ui.set_tiles(ModelRc::from(model.clone()));
+    settle(&ui, 1000);
+    let start = tile_width(&ui, 0);
+    // Smoothing off for a moment shows where weight 3 puts it.
+    ui.set_settings_smooth_graphs(false);
+    model.set_row_data(0, tile(0, 3.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    let target = tile_width(&ui, 0);
+    model.set_row_data(0, tile(0, 1.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    ui.set_settings_smooth_graphs(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    assert!((tile_width(&ui, 0) - start).abs() < 1.0);
+    // A 100 ms run: the clock stops well before 450 ms.
+    model.set_row_data(0, tile(0, 3.0));
+    ui.invoke_scroll_from(-100.0, 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    steps(&ui, 1000, 0);
+    assert_eq!(ui.global::<GraphClock>().get_offset_ms(), 0.0, "the run is over");
+    assert!((tile_width(&ui, 0) - target).abs() < 1.0, "the tile is on its target: {} vs {target}", tile_width(&ui, 0));
+    // A frame that rests the view (no run): the tile jumps with the frame.
+    model.set_row_data(0, tile(0, 1.0));
+    ui.invoke_scroll_from(0.0, 0.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    assert!((tile_width(&ui, 0) - start).abs() < 1.0, "with the view resting the tile jumps");
+}
+
 /// Hidden to the tray or minimised (GraphClock.shown off), nothing glides: the tiles jump, as the
-/// graphs rest, and no timer steps a glide nobody sees.
+/// graphs rest.
 #[test]
 fn tiles_jump_while_the_window_is_not_on_screen() {
     let ui = shown_window();
@@ -3360,10 +3416,9 @@ fn tiles_jump_while_the_window_is_not_on_screen() {
     settle(&ui, 1000);
     ui.global::<GraphClock>().set_shown(false);
     model.set_row_data(0, tile(0, 3.0));
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    land(&ui);
     let early = tile_width(&ui, 0);
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    steps(&ui, 1000, 0);
     let end = tile_width(&ui, 0);
     assert!((early - end).abs() < 1.0, "the tile is at its new width at once: {early} then {end}");
     // Shown again, the tile stays put and then glides again.
@@ -3371,10 +3426,10 @@ fn tiles_jump_while_the_window_is_not_on_screen() {
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     assert!((tile_width(&ui, 0) - end).abs() < 1.0, "shown again, it stays where it was");
     model.set_row_data(0, tile(0, 1.0));
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
-    let mid = tile_width(&ui, 0);
-    assert!(mid < end - 1.0 && mid > 300.0, "and glides again: {mid} from {end}");
+    land(&ui);
+    let seen = steps(&ui, 1000, 0);
+    let last = seen.last().unwrap().1;
+    assert!(seen.iter().any(|&(_, w)| last + 1.0 < w && w < end - 1.0), "and glides again: {seen:?}");
 }
 
 fn ids_of(model: &VecModel<negotium::TileData>) -> Vec<(i32, bool)> {
@@ -3406,9 +3461,10 @@ fn a_new_tile_grows_in_from_nothing_when_smooth() {
     ui.set_tiles(ModelRc::from(model.clone()));
     settle(&ui, 1000);
     model.push(tile(1, 1.0));
+    land(&ui);
     settle(&ui, 50);
     let early = tile_width(&ui, 1);
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    steps(&ui, 1000, 1);
     let settled = tile_width(&ui, 1);
     assert!(early < settled * 0.6, "it starts narrow: {early} vs {settled}");
     let first = tile_width(&ui, 0);

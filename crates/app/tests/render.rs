@@ -673,52 +673,60 @@ fn an_icons_soft_pixels_blend_as_straight_alpha_on_dark_and_light() {
     }
 }
 
-/// With Smooth graphs on, the top tiles glide after each frame in a bounded number of steps
-/// (MAX_GLIDE_STEPS, fewer for a shift of fewer pixels), counted as the winit backend presents
-/// them. Weights from a real run (crate::view's averaged CPU, about 10 to 25 px of shift a frame):
-/// a 450 ms `animate` drew at display rate (about 111 frames a second on a 240 Hz screen), and one
-/// step per pixel up to 28 a glide, each isolated step presented twice by the frame throttle,
-/// about 61. Frames go through the real Bridge. A tile growing in still glides.
-#[test]
-fn a_frame_glides_the_top_tiles_in_a_bounded_number_of_redraws() {
+/// The Overview's draw times over `weights.len()` one-second frames through the real Bridge, on
+/// the frame-count clock: meters with sparklines, the graphs' scroll run, and top tiles with the
+/// given weights (none for an empty row). Returns each second's draw times.
+fn overview_draws(weights: &[Vec<f32>]) -> Vec<Vec<u64>> {
     use negotium::view::{Frame, MeterView, TileView};
     let mut frames = frame_count::Frames::install(1000, 720);
     let ui = MainWindow::new().unwrap();
     let bridge = negotium::bridge::Bridge::install(&ui, std::sync::Arc::new(negotium::controls::Controls::default()));
-    bridge.borrow_mut().set_collector_now(Some(0.0));
-    // The mocked clock, for the glide and the graphs alike (Bridge::install gave them the wall clock).
+    // The mocked clock, for the graphs and so the tiles (Bridge::install gave them the wall clock).
     negotium::smooth::install(&ui, || std::time::Duration::from_millis(frame_count::now_ms()));
     ui.show().unwrap();
     ui.window().set_size(PhysicalSize::new(1000, 720));
     let spark = negotium::graph::line(samples(82, 3, Load::Smooth), 81_000, 60_000, 100.0, 60);
-    let weights: [[f32; 5]; 6] = [
-        [5.390, 2.771, 2.060, 1.441, 1.170],
-        [5.411, 2.954, 2.306, 1.683, 1.364],
-        [5.456, 3.100, 2.553, 1.746, 1.587],
-        [5.567, 3.258, 2.603, 1.859, 1.745],
-        [5.500, 3.387, 2.655, 1.886, 1.818],
-        [5.365, 3.506, 2.690, 1.946, 1.815],
-    ];
-    let mut frame = |sec: usize| {
+    weights.iter().enumerate().map(|(sec, w)| {
         let f = Frame {
             meters: ["CPU", "Memory", "Disk", "GPU", "Network"].iter()
                 .map(|l| MeterView { label: l, value: format!("{sec}%"), sub: String::new(), spark: spark.clone(), available: true }).collect(),
-            tiles: weights[sec].iter().enumerate()
+            tiles: w.iter().enumerate()
                 .map(|(i, &w)| TileView { id: i as i32 + 1, name: format!("App {i}"), value: format!("{w:.1}%"), weight: w, hung: false }).collect(),
             graph_end_ms: 81_000 + sec as u64 * 1_000,
             ..Default::default()
         };
-        bridge.borrow_mut().set_collector_now(Some(80_000.0 + sec as f64 * 1_000.0));
+        bridge.borrow_mut().set_collector_now(Some(frame_count::now_ms() as f64));
         bridge.borrow_mut().apply(&ui, f);
         frames.run_log(250) // a second at 250 Hz
-    };
-    let first = frame(0);
-    assert!(first.iter().filter(|&&t| t > 40).count() >= 5, "the tiles grow in over several redraws: {first:?}");
-    for sec in 1..weights.len() {
-        let drawn = frame(sec);
-        let presented = frame_count::winit_frames(&drawn);
-        assert!(presented <= 26, "second {sec}: {presented} frames presented ({} drawn) for one frame's glide: {drawn:?}", drawn.len());
+    }).collect()
+}
+
+/// With Smooth graphs on, the top tiles glide only on the redraws the scrolling graphs make: a
+/// frame whose tiles change draws exactly when one whose tiles don't would, counted as the winit
+/// backend presents them. Weights from a real run (crate::view's averaged CPU: edges move 10 to
+/// 60 px a frame). A 450 ms `animate` drew at display rate (about 111 frames a second on a 240 Hz
+/// screen), and a glide timer of the strip's own one redraw a step, each presented twice by the
+/// winit frame throttle (61 a second at a step a pixel, 24 at eight steps a glide).
+#[test]
+fn the_top_tiles_glide_only_on_the_graphs_redraws() {
+    let real: Vec<Vec<f32>> = vec![
+        vec![5.390, 2.771, 2.060, 1.441, 1.170],
+        vec![5.411, 2.954, 2.306, 1.683, 1.364],
+        vec![5.456, 3.100, 2.553, 1.746, 1.587],
+        vec![5.567, 3.258, 2.603, 1.859, 1.745],
+        vec![5.500, 3.387, 2.655, 1.886, 1.818],
+        vec![5.365, 3.506, 2.690, 1.946, 1.815],
+    ];
+    // The same tiles every frame: nothing for them to glide to after the first.
+    let still: Vec<Vec<f32>> = vec![real[0].clone(); real.len()];
+    // One window per thread: the frame-count platform is installed per thread.
+    let run = |w: Vec<Vec<f32>>| std::thread::spawn(move || overview_draws(&w)).join().unwrap();
+    let (gliding, resting) = (run(real), run(still));
+    for sec in 1..gliding.len() {
+        let (g, r) = (frame_count::winit_frames(&gliding[sec]), frame_count::winit_frames(&resting[sec]));
+        assert_eq!(gliding[sec], resting[sec], "second {sec}: tiles gliding drew {g} frames presented, resting {r}");
     }
+    assert!(frame_count::winit_frames(&gliding[2]) <= 14, "a second costs the graphs' few redraws: {:?}", gliding[2]);
 }
 
 /// Tiles laid out while Smooth graphs is off stay where they are, fully shown, when it is turned
