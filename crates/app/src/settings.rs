@@ -55,6 +55,11 @@ pub struct Settings {
     pub sort_descending: bool,
     /// The Overview groups apps, background processes and Windows processes under headings.
     pub group_by_type: bool,
+    /// Look for a newer release when Negotium starts (the installed copy only).
+    pub check_updates: bool,
+    /// Negotium starts when the user signs in. Whether the Run value or logon task exists is read
+    /// from the machine; this is the choice the user made.
+    pub start_with_windows: bool,
 }
 
 impl Default for Settings {
@@ -70,6 +75,8 @@ impl Default for Settings {
             sort_column: "cpu".to_string(),
             sort_descending: true,
             group_by_type: true,
+            check_updates: true,
+            start_with_windows: false,
         }
     }
 }
@@ -202,6 +209,8 @@ pub fn load(path: &Path) -> (Settings, Loaded) {
     }
     field!(sort_descending);
     field!(group_by_type);
+    field!(check_updates);
+    field!(start_with_windows);
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)
@@ -381,6 +390,23 @@ mod tests {
     }
 
     #[test]
+    fn new_fields_default_and_load_tolerantly() {
+        let dir = TempDir::new("installer-fields");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"refresh_ms": 2000}"#).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::File);
+        assert!(s.check_updates && !s.start_with_windows, "a file that predates them: updates on, start off");
+        std::fs::write(&p, r#"{"check_updates": "yes", "start_with_windows": 1, "refresh_ms": 2000}"#).unwrap();
+        let (s, how) = load(&p);
+        assert_eq!(how, Loaded::Partial(vec!["check_updates".to_string(), "start_with_windows".to_string()]));
+        assert!(s.check_updates && !s.start_with_windows && s.refresh_ms == 2000);
+        std::fs::write(&p, r#"{"check_updates": false, "start_with_windows": true}"#).unwrap();
+        let s = load(&p).0;
+        assert!(!s.check_updates && s.start_with_windows);
+    }
+
+    #[test]
     fn tray_cpu_defaults_on_and_a_bad_value_loses_only_itself() {
         let dir = TempDir::new("traycpu");
         let p = dir.file();
@@ -435,6 +461,8 @@ mod tests {
             sort_column: "memory".to_string(),
             sort_descending: false,
             group_by_type: false,
+            check_updates: false,
+            start_with_windows: true,
         };
         save(&p, &s).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("\"theme\": \"dark\""));

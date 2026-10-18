@@ -67,6 +67,35 @@ component ChoiceButton inherits FocusButton {
     }
 }
 
+// A push button in a row. `label` is what a screen reader says; `shown` is the short text drawn.
+component ActionButton inherits FocusButton {
+    in property <string> label;
+    in property <string> shown;
+    height: 30px;
+    vertical-stretch: 0;
+    min-width: 56px;
+    border-radius: 4px;
+    opacity: root.interactive ? 1 : 0.5;
+    background: root.hovered && root.interactive ? Theme.text.with-alpha(0.08) : transparent;
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.text : Theme.card-border;
+    accessible-label: root.label;
+    accessible-enabled: root.interactive;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.shown;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            // The button already carries the label.
+            accessible-role: none;
+        }
+    }
+}
+
 // One choice out of a few, as a row of buttons, announced as a group ("Refresh rate").
 export component Choice inherits Rectangle {
     in property <string> label;
@@ -160,6 +189,14 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> gpu-fallback;
     in property <bool> gpu-running;
     in property <bool> gpu-env-override;
+    // This process is the installed copy (crate::install); the integration and update rows are
+    // offered only then. Admin mode: 0 off, 1 on, 2 needs repair, 3 not available on this account.
+    in property <bool> installed;
+    in property <int> admin-mode-state;
+    in property <bool> hotkey;
+    in property <bool> start-with-windows;
+    in property <bool> check-updates;
+    in property <string> version-text;
     in property <bool> interactive: true;
     // Room kept free below the last row (the floating toast), so it can be scrolled clear.
     in property <length> bottom-inset;
@@ -171,6 +208,12 @@ export component SettingsPage inherits VerticalLayout {
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
+    callback admin-mode-toggled(bool);
+    callback hotkey-toggled(bool);
+    callback start-with-windows-toggled(bool);
+    callback check-updates-toggled(bool);
+    callback check-updates-now();
+    callback open-windows-task-manager();
     // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
     property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
     max-width: 16384px;
@@ -295,19 +338,90 @@ export component SettingsPage inherits VerticalLayout {
                     focus-gained => { sv.reveal(gpu-row.absolute-position.y, gpu-row.height); }
                 }
             }
-            Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
             admin-row := SettingRow {
                 title: "Admin mode";
                 description: "Start with admin rights without a prompt.";
-                available: false;
-                Toggle { label: admin-row.title; description: "Coming in a later version"; checked: false; interactive: false; }
+                note: !root.installed ? "Install Negotium to use this"
+                    : root.admin-mode-state == 2 ? "Needs repair: turn it off and on again to fix it."
+                    : root.admin-mode-state == 3 ? "Not available on this account." : "";
+                available: root.installed && root.admin-mode-state != 3;
+                Toggle {
+                    label: admin-row.title;
+                    description: root.installed ? admin-row.description : "Install Negotium to use this";
+                    checked: root.installed && root.admin-mode-state == 1;
+                    interactive: root.interactive && root.installed && root.admin-mode-state != 3;
+                    toggled(on) => { root.admin-mode-toggled(on); }
+                    focus-gained => { sv.reveal(admin-row.absolute-position.y, admin-row.height); }
+                }
             }
             hotkey-row := SettingRow {
                 title: "Open on Ctrl+Shift+Esc";
                 description: "Open Negotium instead of Task Manager.";
-                available: false;
-                Toggle { label: hotkey-row.title; description: "Coming in a later version"; checked: false; interactive: false; }
+                note: root.installed ? "" : "Install Negotium to use this";
+                available: root.installed;
+                Toggle {
+                    label: hotkey-row.title;
+                    description: root.installed ? hotkey-row.description : "Install Negotium to use this";
+                    checked: root.installed && root.hotkey;
+                    interactive: root.interactive && root.installed;
+                    toggled(on) => { root.hotkey-toggled(on); }
+                    focus-gained => { sv.reveal(hotkey-row.absolute-position.y, hotkey-row.height); }
+                }
             }
+            start-row := SettingRow {
+                title: "Start with Windows";
+                description: "Open Negotium in the tray when you sign in.";
+                note: root.installed ? "" : "Install Negotium to use this";
+                available: root.installed;
+                Toggle {
+                    label: start-row.title;
+                    description: root.installed ? start-row.description : "Install Negotium to use this";
+                    checked: root.installed && root.start-with-windows;
+                    interactive: root.interactive && root.installed;
+                    toggled(on) => { root.start-with-windows-toggled(on); }
+                    focus-gained => { sv.reveal(start-row.absolute-position.y, start-row.height); }
+                }
+            }
+            updates-row := SettingRow {
+                title: "Check for updates on startup";
+                description: "Look for a newer version of Negotium each time it starts.";
+                note: root.installed ? "" : "Install Negotium to use this";
+                available: root.installed;
+                Toggle {
+                    label: updates-row.title;
+                    description: root.installed ? updates-row.description : "Install Negotium to use this";
+                    checked: root.installed && root.check-updates;
+                    interactive: root.interactive && root.installed;
+                    toggled(on) => { root.check-updates-toggled(on); }
+                    focus-gained => { sv.reveal(updates-row.absolute-position.y, updates-row.height); }
+                }
+            }
+            check-row := SettingRow {
+                title: "Check for updates now";
+                description: "Look for a newer version of Negotium.";
+                note: root.installed ? "" : "Install Negotium to use this";
+                available: root.installed;
+                ActionButton {
+                    label: "Check for updates";
+                    shown: "Check";
+                    interactive: root.interactive && root.installed;
+                    activated => { root.check-updates-now(); }
+                    focus-gained => { sv.reveal(check-row.absolute-position.y, check-row.height); }
+                }
+            }
+            taskmgr-row := SettingRow {
+                title: "Windows Task Manager";
+                description: "Open the original Task Manager, whatever Ctrl+Shift+Esc does.";
+                ActionButton {
+                    label: "Open Windows Task Manager";
+                    shown: "Open";
+                    interactive: root.interactive;
+                    activated => { root.open-windows-task-manager(); }
+                    focus-gained => { sv.reveal(taskmgr-row.absolute-position.y, taskmgr-row.height); }
+                }
+            }
+            Text { text: root.version-text; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
+            Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
             temp-row := SettingRow {
                 title: "CPU temperature add-on";
                 description: "Show the CPU temperature (installs the PawnIO driver from its publisher).";

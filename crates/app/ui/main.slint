@@ -165,6 +165,21 @@ export component MainWindow inherits Window {
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
+    // Installed copy, integration and updates (crate::install, crate::settingspage::show_install).
+    // Admin mode: 0 off, 1 on, 2 needs repair, 3 not available on this account.
+    in-out property <bool> settings-installed;
+    in-out property <int> settings-admin-mode-state;
+    in-out property <bool> settings-admin-mode: root.settings-admin-mode-state == 1;
+    in-out property <bool> settings-hotkey;
+    in-out property <bool> settings-start-with-windows;
+    in-out property <bool> settings-check-updates: true;
+    in property <string> version-text;
+    callback admin-mode-toggled(bool);
+    callback hotkey-toggled(bool);
+    callback start-with-windows-toggled(bool);
+    callback check-updates-toggled(bool);
+    callback check-updates-now();
+    callback open-windows-task-manager();
     // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
     // function, not a `changed` handler, so Theme.dark is current as soon as it returns.
     public function set-dark(dark: bool) {
@@ -360,6 +375,12 @@ export component MainWindow inherits Window {
                     gpu-fallback: root.settings-gpu-fallback;
                     gpu-running: root.settings-gpu-running;
                     gpu-env-override: root.settings-gpu-env-override;
+                    installed: root.settings-installed;
+                    admin-mode-state: root.settings-admin-mode-state;
+                    hotkey: root.settings-hotkey;
+                    start-with-windows: root.settings-start-with-windows;
+                    check-updates: root.settings-check-updates;
+                    version-text: root.version-text;
                     bottom-inset: root.toast-inset;
                     interactive: !root.modal-open;
                     refresh-chosen(i) => { root.refresh-chosen(i); }
@@ -370,6 +391,12 @@ export component MainWindow inherits Window {
                     group-by-type-toggled(on) => { root.group-by-type-toggled(on); }
                     tray-cpu-toggled(on) => { root.tray-cpu-toggled(on); }
                     gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
+                    admin-mode-toggled(on) => { root.admin-mode-toggled(on); }
+                    hotkey-toggled(on) => { root.hotkey-toggled(on); }
+                    start-with-windows-toggled(on) => { root.start-with-windows-toggled(on); }
+                    check-updates-toggled(on) => { root.check-updates-toggled(on); }
+                    check-updates-now() => { root.check-updates-now(); }
+                    open-windows-task-manager() => { root.open-windows-task-manager(); }
                 }
             }
             // Over every page: a result (a failed startup toggle, an action's message) shows

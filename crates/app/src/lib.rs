@@ -5,6 +5,7 @@ pub mod dispatch;
 pub mod format;
 pub mod graph;
 pub mod icons;
+pub mod install;
 pub mod framestats;
 pub mod log;
 pub mod nav;

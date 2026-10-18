@@ -3,6 +3,7 @@
 //! the UI thread (`settings::Saver`).
 use crate::controls::{Controls, header_click, sort_column_from_index, sort_column_index};
 use negotium_model::{Metric, Sort, SortColumn};
+use crate::install::{self, Install};
 use crate::settings::{Saver, Settings, ThemeChoice, refresh_from_index};
 use crate::renderer::{self, Renderer};
 use crate::{MainWindow, platform};
@@ -29,10 +30,19 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_smooth_graphs(s.smooth_graphs);
     ui.set_settings_tray_cpu(s.tray_cpu);
     ui.set_settings_group_by_type(s.group_by_type);
+    ui.set_settings_check_updates(s.check_updates);
+    ui.set_settings_start_with_windows(s.start_with_windows);
     ui.set_sort_column(sort_column_index(s.sort().column));
     ui.set_sort_descending(s.sort().descending);
     // Off: GraphClock rests the view on the newest sample at once (PF3).
     ui.global::<crate::GraphClock>().set_smooth(s.smooth_graphs);
+}
+
+/// What the page shows about this copy: the installed copy offers admin mode, the Ctrl+Shift+Esc
+/// redirect, Start with Windows and updates; a development build shows them disabled.
+pub fn show_install(ui: &MainWindow, install: &Install) {
+    ui.set_settings_installed(install.installed);
+    ui.set_version_text(install::version_line(install.installed).into());
 }
 
 /// Everything the page's handlers act on.
@@ -57,6 +67,14 @@ impl SettingsWiring {
         ui.set_settings_gpu_fallback(self.fallback_recorded);
         ui.set_settings_gpu_running(self.running == Renderer::Gpu);
         ui.set_settings_gpu_env_override(self.running == Renderer::FromEnv);
+        show_install(ui, &install::current());
+        // Filled in by the tasks that implement them; until then the page only asks.
+        ui.on_admin_mode_toggled(|_| {});
+        ui.on_hotkey_toggled(|_| {});
+        ui.on_start_with_windows_toggled(|_| {});
+        ui.on_check_updates_toggled(|_| {});
+        ui.on_check_updates_now(|| {});
+        ui.on_open_windows_task_manager(|| {});
         let change = Rc::new(Change { settings: self.settings, saver: self.saver, weak: ui.as_weak() });
         let controls = self.controls;
         {

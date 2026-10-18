@@ -2033,16 +2033,71 @@ fn choices_and_switches_show_the_current_settings() {
 #[test]
 fn later_version_settings_are_shown_disabled() {
     // Tall enough for the last row: the testing backend finds only what the page's view shows.
-    let ui = settings_window(1000, 1300);
+    let ui = settings_window(1000, 1700);
     assert!(text(&ui, "Coming in a later version").is_some());
-    for label in ["Admin mode", "Open on Ctrl+Shift+Esc", "CPU temperature add-on"] {
+    let s = switch(&ui, "CPU temperature add-on");
+    assert_eq!(s.accessible_enabled(), Some(false));
+    assert_eq!(s.accessible_checked(), Some(false));
+    assert_eq!(s.accessible_description().as_deref(), Some("Coming in a later version"));
+    assert!(s.computed_opacity() < 1.0, "the disabled switch is dimmed");
+    assert_eq!(switch(&ui, "Always on top").computed_opacity(), 1.0, "an offered switch is not");
+}
+
+const INSTALL_ROWS: [&str; 4] = ["Admin mode", "Open on Ctrl+Shift+Esc", "Start with Windows", "Check for updates on startup"];
+
+#[test]
+fn a_dev_build_disables_the_integration_rows_and_says_why() {
+    let ui = settings_window(1000, 1700);
+    negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "target\release\negotium.exe".into(), installed: false });
+    for label in INSTALL_ROWS {
         let s = switch(&ui, label);
         assert_eq!(s.accessible_enabled(), Some(false), "{label}");
         assert_eq!(s.accessible_checked(), Some(false), "{label}");
-        assert_eq!(s.accessible_description().as_deref(), Some("Coming in a later version"), "{label}");
-        assert!(s.computed_opacity() < 1.0, "{label}: the disabled switch is dimmed");
+        assert!(s.accessible_description().is_some_and(|d| d == "Install Negotium to use this"), "{label}: {:?}", s.accessible_description());
+        assert!(s.computed_opacity() < 1.0, "{label}: dimmed");
     }
-    assert_eq!(switch(&ui, "Always on top").computed_opacity(), 1.0, "an offered switch is not");
+    let button = El::find_by_accessible_label(&ui, "Check for updates").find(|e| e.accessible_role() == Some(AccessibleRole::Button)).unwrap();
+    assert_eq!(button.accessible_enabled(), Some(false), "no updates for a dev build");
+    let tm = El::find_by_accessible_label(&ui, "Open Windows Task Manager").find(|e| e.accessible_role() == Some(AccessibleRole::Button)).unwrap();
+    assert_eq!(tm.accessible_enabled(), Some(true), "Task Manager opens from any build");
+}
+
+#[test]
+fn an_installed_copy_offers_the_integration_rows_and_reports_them() {
+    let ui = settings_window(1000, 1700);
+    negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "x".into(), installed: true });
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let l = log.clone();
+    ui.on_admin_mode_toggled(move |on| l.borrow_mut().push(format!("admin {on}")));
+    let l = log.clone();
+    ui.on_hotkey_toggled(move |on| l.borrow_mut().push(format!("hotkey {on}")));
+    let l = log.clone();
+    ui.on_start_with_windows_toggled(move |on| l.borrow_mut().push(format!("start {on}")));
+    let l = log.clone();
+    ui.on_check_updates_toggled(move |on| l.borrow_mut().push(format!("updates {on}")));
+    let l = log.clone();
+    ui.on_check_updates_now(move || l.borrow_mut().push("now".to_string()));
+    let l = log.clone();
+    ui.on_open_windows_task_manager(move || l.borrow_mut().push("taskmgr".to_string()));
+    for label in INSTALL_ROWS {
+        assert_eq!(switch(&ui, label).accessible_enabled(), Some(true), "{label}");
+        switch(&ui, label).invoke_accessible_default_action();
+    }
+    for label in ["Check for updates", "Open Windows Task Manager"] {
+        El::find_by_accessible_label(&ui, label).find(|e| e.accessible_role() == Some(AccessibleRole::Button)).unwrap().invoke_accessible_default_action();
+    }
+    assert_eq!(*log.borrow(), ["admin true", "hotkey true", "start true", "updates false", "now", "taskmgr"]);
+}
+
+#[test]
+fn the_version_line_says_development_build_when_not_installed() {
+    let ui = settings_window(1000, 1700);
+    let v = negotium::install::VERSION;
+    negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "x".into(), installed: false });
+    assert_eq!(ui.get_version_text().as_str(), format!("Version {v} (development build)"));
+    assert!(text(&ui, &format!("Version {v} (development build)")).is_some(), "the page shows it");
+    negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "x".into(), installed: true });
+    assert_eq!(ui.get_version_text().as_str(), format!("Version {v}"));
 }
 
 #[test]
@@ -2334,7 +2389,7 @@ fn a_tall_window_leaves_the_settings_their_size_and_place() {
         let ui = settings_window(1000, h);
         (settings_rects(&ui), rect_of(&text(&ui, "Settings").expect("page title")))
     };
-    let (short, short_title) = measure(1300);
+    let (short, short_title) = measure(1700);
     let (tall, tall_title) = measure(2400);
     assert_eq!(short_title, tall_title, "the title stays at the top");
     assert_eq!(short, tall, "no setting moves or grows in a taller window");
@@ -2457,7 +2512,7 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
 #[test]
 fn screen_readers_hear_each_setting_once_with_its_description() {
     // Tall enough for every row: the testing backend finds only what the page's view shows.
-    let ui = settings_window(1000, 1300);
+    let ui = settings_window(1000, 1700);
     let group = El::find_by_accessible_label(&ui, "Refresh rate")
         .find(|e| e.accessible_role() == Some(AccessibleRole::Groupbox))
         .expect("the refresh choices are a labelled group");
@@ -2468,7 +2523,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 11, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 15, "the titles are still drawn");
 }
 
 #[test]
