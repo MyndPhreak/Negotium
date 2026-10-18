@@ -8,6 +8,8 @@
 //! in-memory fake in tests), and [`run`] refuses unless it runs as the installed exe: nothing it
 //! writes ever names anything but `<Program Files>\Negotium\negotium.exe`.
 use crate::install;
+use negotium_actions::ActionError;
+use negotium_actions::integration::{self, Roots, TaskStatus};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,10 @@ pub const FLAG: &str = "--integrate";
 pub const LOGON: &str = "--logon";
 /// The argument the Run value (and a logon start) passes: start hidden in the tray.
 pub const TRAY: &str = "--tray";
+/// The admin task's first argument: this start came from the task (already elevated). A start
+/// with arguments passes them after it; a logon start may pass the literal
+/// `integration::ARG_PLACEHOLDER` instead, which means none.
+pub const FROM_TASK: &str = "--from-task";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -139,23 +145,27 @@ impl std::error::Error for IntegrateError {}
 
 /// The system state the command changes. Reads report absent as `None` / `Missing`.
 pub trait Machine {
-    /// Sets (`Some`) or removes (`None`) taskmgr.exe's IFEO `Debugger` value.
+    /// Sets (`Some`) or removes (`None`) taskmgr.exe's IFEO `Debugger` value. The value written
+    /// is the exe in double quotes (`integration::ifeo_value`): Windows runs `<value> <original
+    /// command line>` with no application name, so an unquoted Program Files path would not run.
     fn set_ifeo(&self, exe: Option<&Path>) -> Result<(), IntegrateError>;
-    /// The exe taskmgr.exe's IFEO `Debugger` value names, if any.
+    /// The exe taskmgr.exe's IFEO `Debugger` value names, if any, unquoted and without arguments
+    /// (`integration::parse_ifeo`), so hotkey-off and uninstall recognise the value `set_ifeo`
+    /// wrote as the installed exe.
     fn ifeo(&self) -> Option<PathBuf>;
     /// Sets (`Some`, a whole command line) or removes (`None`) the HKCU Run value `Negotium`.
     fn set_run(&self, command: Option<&str>) -> Result<(), IntegrateError>;
     /// The HKCU Run value `Negotium`, if any.
     fn run_value(&self) -> Option<String>;
     /// Creates (or replaces) user `sid`'s admin task in `\Negotium\`: highest privileges, action
-    /// `exe`, and with `logon` a trigger at that user's sign-in.
+    /// `exe` with [`FROM_TASK`], and with `logon` a trigger at that user's sign-in.
     fn create_task(&self, sid: &str, exe: &Path, logon: bool) -> Result<(), IntegrateError>;
     /// Deletes user `sid`'s admin task (absent is fine).
     fn delete_task(&self, sid: &str) -> Result<(), IntegrateError>;
     fn task_state(&self, sid: &str) -> TaskState;
     /// Deletes the `\Negotium\` folder with every user's task in it (absent is fine).
     fn delete_task_folder(&self) -> Result<(), IntegrateError>;
-    /// Starts user `sid`'s admin task with `args`.
+    /// Starts user `sid`'s admin task with `args` (after [`FROM_TASK`]).
     fn start_task(&self, sid: &str, args: &[String]) -> Result<(), IntegrateError>;
 }
 
@@ -183,11 +193,7 @@ fn installed_exe(ctx: &Ctx) -> Result<PathBuf, IntegrateError> {
 /// name (no path separators or wildcards).
 fn user_sid(ctx: &Ctx) -> Result<String, IntegrateError> {
     let sid = ctx.user_sid.as_str();
-    let ok = sid.strip_prefix("S-1-").is_some_and(|rest| {
-        rest.split('-').count() >= 2
-            && rest.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-    });
-    if ok { Ok(sid.to_string()) } else { Err(IntegrateError::BadSid(sid.to_string())) }
+    if integration::is_string_sid(sid) { Ok(sid.to_string()) } else { Err(IntegrateError::BadSid(sid.to_string())) }
 }
 
 /// The Run value: the installed exe, quoted (Program Files has a space), started in the tray.
@@ -257,41 +263,71 @@ where
     }
 }
 
-/// The machine `main` uses until the registry and Task Scheduler implementation lands: every
-/// change and every read is refused as not implemented.
-pub struct Unavailable;
-
-impl Unavailable {
-    const WHAT: &'static str = "Windows integration";
+/// The real machine: the registry (through its write guard) and Task Scheduler, over
+/// `negotium_actions::integration`. `main` unlocks the guard first; nothing but the two values
+/// and the task folder is ever written.
+pub struct System {
+    roots: Roots,
 }
 
-impl Machine for Unavailable {
-    fn set_ifeo(&self, _: Option<&Path>) -> Result<(), IntegrateError> {
-        Err(IntegrateError::NotImplemented(Self::WHAT))
+impl System {
+    /// taskmgr.exe's redirect, HKCU's Run key and the `\Negotium\` task folder.
+    pub fn new() -> Self {
+        Self::with_roots(Roots::system())
+    }
+
+    /// The same machine over other roots (tests: a sandbox key, a test image, a test folder).
+    pub fn with_roots(roots: Roots) -> Self {
+        Self { roots }
+    }
+}
+
+impl Default for System {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn failed(e: ActionError) -> IntegrateError {
+    IntegrateError::Failed(e.to_string())
+}
+
+impl Machine for System {
+    fn set_ifeo(&self, exe: Option<&Path>) -> Result<(), IntegrateError> {
+        integration::set_ifeo(&self.roots, exe).map_err(failed)
     }
     fn ifeo(&self) -> Option<PathBuf> {
-        None
+        integration::read_ifeo(&self.roots)
     }
-    fn set_run(&self, _: Option<&str>) -> Result<(), IntegrateError> {
-        Err(IntegrateError::NotImplemented(Self::WHAT))
+    fn set_run(&self, command: Option<&str>) -> Result<(), IntegrateError> {
+        integration::set_run(&self.roots, command).map_err(failed)
     }
     fn run_value(&self) -> Option<String> {
-        None
+        integration::read_run(&self.roots)
     }
-    fn create_task(&self, _: &str, _: &Path, _: bool) -> Result<(), IntegrateError> {
-        Err(IntegrateError::NotImplemented(Self::WHAT))
+    fn create_task(&self, sid: &str, exe: &Path, logon: bool) -> Result<(), IntegrateError> {
+        integration::create_task(&self.roots, sid, exe, FROM_TASK, logon).map_err(failed)
     }
-    fn delete_task(&self, _: &str) -> Result<(), IntegrateError> {
-        Err(IntegrateError::NotImplemented(Self::WHAT))
+    fn delete_task(&self, sid: &str) -> Result<(), IntegrateError> {
+        integration::delete_task(&self.roots, sid).map_err(failed)
     }
-    fn task_state(&self, _: &str) -> TaskState {
-        TaskState::Missing
+    fn task_state(&self, sid: &str) -> TaskState {
+        task_state(integration::task_state(&self.roots, sid))
     }
     fn delete_task_folder(&self) -> Result<(), IntegrateError> {
-        Err(IntegrateError::NotImplemented(Self::WHAT))
+        integration::delete_task_folder(&self.roots).map_err(failed)
     }
-    fn start_task(&self, _: &str, _: &[String]) -> Result<(), IntegrateError> {
-        Err(IntegrateError::NotImplemented(Self::WHAT))
+    fn start_task(&self, sid: &str, args: &[String]) -> Result<(), IntegrateError> {
+        integration::start_task(&self.roots, sid, args).map_err(failed)
+    }
+}
+
+fn task_state(status: TaskStatus) -> TaskState {
+    match status {
+        TaskStatus::Missing => TaskState::Missing,
+        TaskStatus::Ready => TaskState::Ready,
+        TaskStatus::Disabled => TaskState::Disabled,
+        TaskStatus::Broken => TaskState::Broken,
     }
 }
 
@@ -578,12 +614,60 @@ mod tests {
         assert!(lines[1].starts_with("integrate hotkey-on: only the installed Negotium"), "{lines:?}");
     }
 
+    /// The real machine over a sandbox: its IFEO and Run keys under HKCU\Software\Negotium-Test
+    /// (the guard's sandbox), so `run` goes through the registry for real without touching
+    /// taskmgr.exe's redirect or the real Run value. Task Scheduler isn't reached.
     #[test]
-    fn the_unavailable_machine_refuses_every_change() {
+    fn the_real_machine_writes_the_quoted_redirect_and_the_run_value() {
+        use negotium_actions::startup::registry::{self, Hive, RegKey, TEST_ROOT};
+        let base = RegKey::new(Hive::CurrentUser, &format!(r"{TEST_ROOT}\integrate-{}", std::process::id()));
+        let _ = registry::delete_test_tree(&base);
+        let roots = Roots {
+            ifeo: base.child("taskmgr.exe"),
+            run: base.child("Run"),
+            task_folder: format!("Negotium-test-{}", std::process::id()),
+        };
+        let machine = System::with_roots(roots.clone());
         let root = Root::new();
-        for action in Action::ALL {
-            let r = run(action, &root.ctx(&Unavailable));
-            assert!(matches!(r, Err(IntegrateError::NotImplemented(_))), "{action:?}: {r:?}");
+        let exe = root.exe();
+        run(Action::HotkeyOn, &root.ctx(&machine)).unwrap();
+        let raw = registry::value(&roots.ifeo, "Debugger").and_then(|v| v.as_str().map(str::to_string));
+        assert_eq!(raw, Some(format!("\"{}\"", exe.display())), "quoted");
+        assert_eq!(machine.ifeo(), Some(exe.clone()), "read back unquoted");
+        run(Action::HotkeyOff, &root.ctx(&machine)).unwrap();
+        assert_eq!(machine.ifeo(), None, "hotkey-off recognised its own value");
+        run(Action::StartupOn, &root.ctx(&machine)).unwrap();
+        assert_eq!(machine.run_value(), Some(run_command(&exe)));
+        run(Action::StartupOff, &root.ctx(&machine)).unwrap();
+        assert_eq!(machine.run_value(), None);
+        registry::delete_test_tree(&base).unwrap();
+    }
+
+    #[test]
+    fn the_real_machine_is_the_systems_roots() {
+        assert_eq!(System::new().roots, Roots::system());
+        assert_eq!(Roots::system().task_folder, "Negotium");
+    }
+
+    #[test]
+    fn task_states_map_one_to_one() {
+        for (status, state) in [
+            (TaskStatus::Missing, TaskState::Missing),
+            (TaskStatus::Ready, TaskState::Ready),
+            (TaskStatus::Disabled, TaskState::Disabled),
+            (TaskStatus::Broken, TaskState::Broken),
+        ] {
+            assert_eq!(task_state(status), state);
         }
+    }
+
+    #[test]
+    fn this_users_sid_names_a_task() {
+        let sid = integration::current_user_sid().unwrap();
+        let root = Root::new();
+        let fake = Fake::default();
+        let ctx = Ctx { user_sid: sid.clone(), ..root.ctx(&fake) };
+        run(Action::AdminOn { logon: false }, &ctx).unwrap();
+        assert!(fake.tasks.borrow().contains_key(&sid));
     }
 }

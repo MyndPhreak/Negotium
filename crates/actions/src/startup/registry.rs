@@ -3,6 +3,8 @@
 //! which refuses anything outside the test sandbox until the app calls `allow_system_writes`, and
 //! even then anything but the startup state keys a toggle writes (`may_write`) and the two
 //! integration values (`may_write_value`: the taskmgr.exe redirect and the HKCU Run value).
+//! `delete_value` removes a value under the same check. Elevated tests get one more sandbox: the
+//! `Debugger` value of a made-up image `negotium-test-<digits>.exe` (`is_test_ifeo_value`).
 use crate::ActionError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::{
@@ -12,8 +14,8 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD,
     REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND,
-    RRF_RT_ANY, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegEnumValueW,
-    RegGetValueW, RegOpenKeyExW, RegSetValueExW,
+    RRF_RT_ANY, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegDeleteTreeW, RegDeleteValueW,
+    RegEnumKeyExW, RegEnumValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -224,9 +226,42 @@ pub fn may_write_value(key: &RegKey, name: &str) -> bool {
 /// (`is_integration_value`). Pure: it never touches the registry.
 fn may_write_value_with(key: &RegKey, name: &str, unlocked: bool) -> bool {
     in_test_root(key)
+        || is_test_ifeo_value(key, name)
         || (unlocked
             && ((may_write_with(key, true) && value_allowed(key, name))
                 || is_integration_value(key, name)))
+}
+
+/// Image File Execution Options: one subkey per image name.
+pub const IFEO_ROOT: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
+/// Elevated tests' image names, `negotium-test-<digits>.exe` (`test_ifeo_image`): no real program
+/// is called that, so redirecting one changes nothing that runs.
+pub const TEST_IFEO_PREFIX: &str = "negotium-test-";
+
+/// This process's test image name, `negotium-test-<pid>.exe`.
+pub fn test_ifeo_image() -> String {
+    format!("{TEST_IFEO_PREFIX}{}.exe", std::process::id())
+}
+
+/// `HKLM\…\Image File Execution Options\negotium-test-<digits>.exe` exactly (names compare
+/// case-insensitively; no subkey, no doubled or trailing backslash).
+fn is_test_ifeo_key(key: &RegKey) -> bool {
+    let prefix = format!("{IFEO_ROOT}\\");
+    if key.hive != Hive::LocalMachine
+        || !key.path.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(&prefix))
+    {
+        return false;
+    }
+    key.path[prefix.len()..]
+        .to_ascii_lowercase()
+        .strip_prefix(TEST_IFEO_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".exe"))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A test image's `Debugger` value: writable without the unlock, like the HKCU sandbox.
+fn is_test_ifeo_value(key: &RegKey, name: &str) -> bool {
+    is_test_ifeo_key(key) && name.eq_ignore_ascii_case("Debugger")
 }
 
 /// The Ctrl+Shift+Esc redirect's key (its `Debugger` value is the only one written).
@@ -494,6 +529,35 @@ pub fn set_string(key: &RegKey, name: &str, value: &str) -> Result<(), ActionErr
     set(key, name, REG_SZ, &bytes)
 }
 
+/// Removes value `name` of `key` (a missing key or value is fine), checked by `guard_write` like a
+/// write, so it never reaches anything a write couldn't.
+pub fn delete_value(key: &RegKey, name: &str) -> Result<(), ActionError> {
+    guard_write(key, name)?;
+    let Some(h) = open(key, KEY_SET_VALUE)? else {
+        return Ok(());
+    };
+    let name = HSTRING::from(name);
+    // SAFETY: valid key handle opened with KEY_SET_VALUE; the name is a NUL-terminated HSTRING.
+    match unsafe { RegDeleteValueW(h.0, &name) } {
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
+        e => Err(error(e)),
+    }
+}
+
+/// Deletes an elevated test's image key (`negotium-test-<digits>.exe` under IFEO, created by
+/// writing its `Debugger` value). Refuses every other key; a missing one is fine.
+pub fn delete_test_ifeo_key(key: &RegKey) -> Result<(), ActionError> {
+    if !is_test_ifeo_key(key) {
+        return Err(ActionError::Other(format!("refusing to delete {}", key.display())));
+    }
+    let path = HSTRING::from(key.path.as_str());
+    // SAFETY: deletes one HKLM key (only if it has no subkeys) checked to be a test image's.
+    match unsafe { RegDeleteKeyW(HKEY_LOCAL_MACHINE, &path) } {
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
+        e => Err(error(e)),
+    }
+}
+
 /// Deletes a test sandbox. Refuses anything but a subkey of HKCU\Software\Negotium-Test.
 pub fn delete_test_tree(key: &RegKey) -> Result<(), ActionError> {
     if !in_test_root(key) {
@@ -724,6 +788,75 @@ mod tests {
         }
         let task = k(Hive::CurrentUser, &format!(r"{APP_DATA}\Contoso.App_8wekyb3d8bbwe\Boot"));
         assert!(!may_write_value_with(&task, "UserEnabledStartupOnce", true));
+    }
+
+    #[test]
+    fn only_a_test_images_redirect_is_writable_without_the_unlock() {
+        let k = RegKey::new;
+        assert!(IFEO_TASKMGR.starts_with(IFEO_ROOT) && IFEO.eq_ignore_ascii_case(IFEO_ROOT));
+        let image = test_ifeo_image();
+        assert!(image.starts_with("negotium-test-") && image.ends_with(".exe"), "{image}");
+        for unlocked in [false, true] {
+            for (key, name) in [
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\{image}")), "Debugger"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\NEGOTIUM-TEST-42.EXE")), "debugger"),
+            ] {
+                assert!(may_write_value_with(&key, name, unlocked), "{} {name}", key.display());
+            }
+            for (key, name) in [
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\{image}")), "GlobalFlag"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\negotium-test-.exe")), "Debugger"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\negotium-test-42x.exe")), "Debugger"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\negotium-test-42.exe\sub")), "Debugger"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\negotium-test-42.exe\")), "Debugger"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\\negotium-test-42.exe")), "Debugger"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\negotium-test-42")), "Debugger"),
+                (k(Hive::CurrentUser, &format!(r"{IFEO}\negotium-test-42.exe")), "Debugger"),
+                (k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe")), "Debugger"),
+            ] {
+                let expected = unlocked && is_integration_value(&key, name);
+                assert_eq!(may_write_value_with(&key, name, unlocked), expected, "{} {name}", key.display());
+            }
+        }
+        // Its key doesn't join the key-level allow-list, and only it may be deleted.
+        let test_key = k(Hive::LocalMachine, &format!(r"{IFEO}\negotium-test-42.exe"));
+        assert!(!may_write_with(&test_key, true));
+        for refused in [
+            k(Hive::LocalMachine, IFEO_TASKMGR),
+            k(Hive::LocalMachine, IFEO),
+            k(Hive::LocalMachine, &format!(r"{IFEO}\negotium-test-42.exe\sub")),
+        ] {
+            match delete_test_ifeo_key(&refused) {
+                Err(ActionError::Other(text)) => assert!(text.contains("refusing"), "{text}"),
+                other => panic!("{}: {other:?}", refused.display()),
+            }
+        }
+    }
+
+    #[test]
+    fn delete_value_removes_one_value_and_checks_the_guard_first() {
+        let base = RegKey::new(Hive::CurrentUser, &format!(r"{TEST_ROOT}\delete-{}", std::process::id()));
+        let _ = delete_test_tree(&base);
+        let key = base.child("Run");
+        assert_eq!(delete_value(&key, "Negotium"), Ok(()), "a missing key is fine");
+        set_string(&key, "Negotium", "x").unwrap();
+        set_string(&key, "Other", "y").unwrap();
+        assert_eq!(delete_value(&key, "negotium"), Ok(()));
+        assert_eq!(value(&key, "Negotium"), None);
+        assert_eq!(value(&key, "Other").and_then(|v| v.as_str().map(str::to_string)), Some("y".into()));
+        assert_eq!(delete_value(&key, "Negotium"), Ok(()), "a missing value is fine");
+        let _ = delete_test_tree(&base);
+        // Outside the sandbox the guard answers before Windows is asked (this process never unlocks).
+        for (key, name) in [
+            (RegKey::new(Hive::CurrentUser, USER_RUN), "Negotium"),
+            (RegKey::new(Hive::CurrentUser, USER_RUN), "OneDrive"),
+            (RegKey::new(Hive::LocalMachine, IFEO_TASKMGR), "Debugger"),
+        ] {
+            match delete_value(&key, name) {
+                Err(ActionError::Other(text)) => assert!(text.contains("not allowed"), "{text}"),
+                other => panic!("expected the guard, got {other:?}"),
+            }
+        }
     }
 
     #[test]

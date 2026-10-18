@@ -78,13 +78,19 @@ fn main() -> Result<(), slint::PlatformError> {
     // `--integrate <action>` (the installer and the Settings switches): no window, no renderer, no
     // instance lock, no settings; the exit code says whether it worked, a failure is logged.
     if negotium::integrate::requested(std::env::args_os().skip(1)) {
-        // The registry and Task Scheduler machine (and the user's SID) come in a later change;
-        // until then every action is refused as not implemented.
+        // The registry guard then allows exactly the two integration values (and the startup
+        // state keys, which this path never writes). The task is named by this process's user:
+        // an administrator's SID is the same before and after the UAC prompt.
+        negotium_actions::startup::registry::allow_system_writes();
         let mut log = negotium::log::Log::new(negotium::log::Log::default_path());
+        let sid = negotium_actions::integration::current_user_sid().unwrap_or_else(|e| {
+            log.warn(&format!("integrate: couldn't read this user's SID: {e}"));
+            String::new()
+        });
         let code = negotium::integrate::command(
             std::env::args_os().skip(1),
-            &negotium::integrate::Unavailable,
-            String::new(),
+            &negotium::integrate::System::new(),
+            sid,
             &mut |line| log.warn(line),
         );
         std::process::exit(code);

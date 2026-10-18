@@ -4,6 +4,7 @@ mod close;
 mod details;
 mod efficiency;
 mod elevation;
+pub mod integration;
 mod location;
 pub mod startup;
 mod terminate;
