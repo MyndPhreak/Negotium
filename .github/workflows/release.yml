@@ -90,9 +90,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          # Any failure once the draft may exist (a create that failed uploading the asset
-          # included) deletes it, keeping the tag, so re-running the workflow starts clean instead
-          # of failing on an existing release.
+          # Only a release this step created is ever deleted: re-running for a tag that already
+          # has a release (published, which the updater reads, or a draft) fails without touching
+          # it. Any failure once this step's draft may exist (a create that failed uploading the
+          # asset included) deletes that draft, keeping the tag, so re-running starts clean.
+          $probe = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            throw "a release for $env:TAG already exists ($probe); not touching it: delete a stale draft by hand before re-running"
+          }
+          if ("$probe" -notmatch 'release not found') {
+            throw "could not check for an existing release for ${env:TAG}: $probe"
+          }
           try {
             gh release create $env:TAG $env:MSI_PATH --repo $env:GITHUB_REPOSITORY --draft --title $env:TAG --notes "Negotium $env:TAG. Install with the attached MSI (per-machine, Windows 64-bit)."
             if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
@@ -106,7 +114,16 @@ jobs:
             gh release edit $env:TAG --repo $env:GITHUB_REPOSITORY --draft=false --prerelease=false --latest
             if ($LASTEXITCODE -ne 0) { throw "gh release edit failed" }
           } catch {
-            gh release delete $env:TAG --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag=false
-            if ($LASTEXITCODE -ne 0) { Write-Warning "no draft release $env:TAG was deleted (none was created, or deleting failed: then delete it before re-running)" }
+            # No release existed before the create, so one there now is this step's; delete it
+            # only while it is still a draft (never a published release).
+            $view = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>$null
+            if ($LASTEXITCODE -eq 0 -and ($view | ConvertFrom-Json).isDraft -eq $true) {
+              gh release delete $env:TAG --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag=false
+              if ($LASTEXITCODE -ne 0) { Write-Warning "deleting the draft release $env:TAG failed: delete it before re-running" }
+            } elseif ($LASTEXITCODE -eq 0) {
+              Write-Warning "release $env:TAG is published; not deleting it"
+            } else {
+              Write-Warning "no draft release $env:TAG was found to delete"
+            }
             throw
           }
