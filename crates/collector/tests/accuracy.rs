@@ -8,7 +8,7 @@ use std::time::Duration;
 fn busy_child_reports_one_core_of_cpu() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_negotium-burn")).arg("5000").spawn().unwrap();
     let mut collector = Collector::new();
-    let mut model = Model::new();
+    let mut model = Model::with_system_root(negotium_collector::windows_dir());
     std::thread::sleep(Duration::from_millis(500));
     model.update(&collector.tick());
     std::thread::sleep(Duration::from_millis(2000));

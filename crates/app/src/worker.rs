@@ -140,7 +140,7 @@ impl LiveSource {
         Self {
             collector,
             info,
-            model: Model::new(),
+            model: Model::with_system_root(negotium_collector::windows_dir()),
             ranker: Ranker::new(),
             top: TopPicker::new(),
             history,

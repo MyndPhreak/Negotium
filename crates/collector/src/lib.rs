@@ -15,7 +15,7 @@ pub mod windows_scan;
 pub use windows_scan::scan_windows;
 
 pub use memory::{local_time_ms, logical_cpus, memory_totals, processor_groups, uptime_s};
-pub use sysinfo::{SystemInfo, read_system_info};
+pub use sysinfo::{SystemInfo, read_system_info, windows_dir};
 pub use pdh::{PdhReadings, PdhSources};
 
 mod collector;

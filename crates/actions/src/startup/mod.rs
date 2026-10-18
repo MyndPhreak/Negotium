@@ -90,10 +90,6 @@ pub struct StartupRoots {
     pub packaged: RegKey,
 }
 
-fn system_root() -> String {
-    std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string())
-}
-
 impl StartupRoots {
     /// The real lists.
     pub fn system() -> Self {
@@ -104,7 +100,7 @@ impl StartupRoots {
             machine_run32: RegKey::new(Hive::LocalMachine, RUN32),
             user_approved: RegKey::new(Hive::CurrentUser, APPROVED),
             machine_approved: RegKey::new(Hive::LocalMachine, APPROVED),
-            system_root: system_root(),
+            system_root: negotium_collector::windows_dir(),
             user_folder,
             machine_folder,
             packaged: RegKey::new(Hive::CurrentUser, packaged::SYSTEM_APP_DATA),
@@ -121,7 +117,7 @@ impl StartupRoots {
             machine_run32: key("MachineRun32"),
             user_approved: key("UserApproved"),
             machine_approved: key("MachineApproved"),
-            system_root: system_root(),
+            system_root: negotium_collector::windows_dir(),
             user_folder: None,
             machine_folder: None,
             packaged: key("Packaged"),

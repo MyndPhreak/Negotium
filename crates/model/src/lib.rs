@@ -55,18 +55,9 @@ pub struct Model {
     sticky: HashMap<(u32, i64), AppKey>,
 }
 
-impl Default for Model {
-    fn default() -> Self {
-        Self::with_system_root(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string()))
-    }
-}
-
 impl Model {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// For tests and callers that know the Windows directory.
+    /// `system_root` is the Windows directory (`negotium_collector::windows_dir`, never
+    /// `%SystemRoot%`, which the user can point anywhere): images under it group as Windows.
     pub fn with_system_root(system_root: impl Into<String>) -> Self {
         Self { rates: RateTracker::new(), hung: HungTracker::new(), system_root: system_root.into(), sticky: HashMap::new() }
     }

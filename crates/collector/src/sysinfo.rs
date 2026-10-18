@@ -1,7 +1,7 @@
 //! Facts about the machine that don't change while Negotium runs, read once at startup.
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
-use windows::Win32::System::SystemInformation::{FIRMWARE_TABLE_PROVIDER, GetSystemFirmwareTable};
+use windows::Win32::System::SystemInformation::{FIRMWARE_TABLE_PROVIDER, GetSystemFirmwareTable, GetSystemWindowsDirectoryW};
 use windows::core::w;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -14,6 +14,21 @@ pub struct SystemInfo {
     pub gpus: Vec<crate::gpu::GpuInfo>,
     /// Why GPU enumeration was incomplete (reported as source errors on every tick).
     pub gpu_errors: Vec<String>,
+}
+
+/// The machine's Windows directory, from Windows itself (`GetSystemWindowsDirectoryW`) rather than
+/// `%SystemRoot%`: the user can set that variable (HKCU\Environment) to anything, and an elevated
+/// copy must never start, or classify by, a folder the user picked. `C:\Windows` if Windows
+/// doesn't say.
+pub fn windows_dir() -> String {
+    let mut buf = [0u16; 260];
+    // SAFETY: writes at most `buf.len()` UTF-16 units into `buf` and returns how many (without the
+    // NUL), or the size it needs (larger than `buf`) or 0 on failure.
+    let n = unsafe { GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return r"C:\Windows".to_string();
+    }
+    String::from_utf16(&buf[..n]).unwrap_or_else(|_| r"C:\Windows".to_string())
 }
 
 pub fn read_system_info() -> SystemInfo {
@@ -100,6 +115,12 @@ pub fn parse_smbios_memory_speed(raw: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_dir_is_the_real_windows_directory() {
+        let dir = std::path::PathBuf::from(windows_dir());
+        assert!(dir.is_absolute() && dir.join(r"System32\kernel32.dll").is_file(), "{}", dir.display());
+    }
 
     /// One SMBIOS type-17 (Memory Device) structure: size in MB, speed, configured speed.
     fn device(size_mb: u16, speed: u16, configured: u16) -> Vec<u8> {

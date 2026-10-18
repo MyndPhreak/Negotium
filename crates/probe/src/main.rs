@@ -54,7 +54,7 @@ fn fmt_bytes(b: f64) -> String {
 fn main() -> Result<()> {
     let args = parse_args()?;
     let mut collector = Collector::new();
-    let mut model = Model::new();
+    let mut model = Model::with_system_root(negotium_collector::windows_dir());
     let mut ranker = Ranker::new();
     let mut history = History::new();
     let mut recorder = match &args.record {
