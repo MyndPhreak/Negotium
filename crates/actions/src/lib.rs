@@ -13,7 +13,8 @@ pub use close::{FORCE_CLOSE_GRACE, force_close};
 pub use details::{Details, process_details};
 pub use efficiency::toggle_efficiency_mode;
 pub use elevation::{
-    ELEVATED_WAIT, enable_debug_privilege, is_elevated, restart_as_admin, run_elevated, run_elevated_exe, shell_open,
+    ELEVATED_WAIT, enable_debug_privilege, is_elevated, restart_as_admin, run_elevated, run_elevated_detached, run_elevated_exe,
+    shell_open,
 };
 pub use location::open_file_location;
 pub use terminate::{end_many, end_process};

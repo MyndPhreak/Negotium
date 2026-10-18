@@ -362,7 +362,7 @@ fn main() -> Result<(), slint::PlatformError> {
             installed: install_installed,
             check: Box::new(negotium::update::check_in_background),
             download: Box::new(negotium::update::download_in_background),
-            run_installer: Box::new(negotium::update::run_installer),
+            install: Box::new(negotium::update::install_in_background),
             exit: Box::new({
                 let (controls, weak, saver) = (controls.clone(), ui.as_weak(), saver.clone());
                 move || begin_exit(&controls, &weak, &saver)

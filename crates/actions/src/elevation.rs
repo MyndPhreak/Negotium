@@ -82,6 +82,13 @@ pub fn shell_open(path: &Path, owner: isize) -> Result<(), ActionError> {
     shell_execute(w!("open"), path.as_os_str(), "", owner, false).map(drop)
 }
 
+/// Starts `exe` with `args` elevated (the `runas` verb: one UAC prompt) and doesn't wait for it:
+/// `Ok` once it has started, `Cancelled` if the prompt was declined (nothing runs). Returns once
+/// the prompt is answered; call it off the UI thread. `owner` as for [`restart_as_admin`].
+pub fn run_elevated_detached(exe: &Path, args: &str, owner: isize) -> Result<(), ActionError> {
+    shell_execute(w!("runas"), exe.as_os_str(), args, owner, false).map(drop)
+}
+
 /// How long [`run_elevated`] waits for the elevated command once it runs (the UAC prompt before
 /// it is not counted): a command that hangs ends the wait with an error, so the caller is never
 /// stuck.

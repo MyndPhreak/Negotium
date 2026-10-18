@@ -1,8 +1,9 @@
 //! Updates from GitHub Releases (spec goals 8–10). The installed copy asks GitHub's public API
 //! for the latest release of MyndPhreak/Negotium; a newer `vX.Y.Z` with exactly one `.msi` on
 //! GitHub over HTTPS is offered in a banner ("Update to vX.Y.Z"). Accepting downloads that MSI to
-//! `%TEMP%\Negotium-update`, runs `msiexec /i "<msi>" /passive` (the installer's own UAC prompt)
-//! and quits, so the installer can replace the exe.
+//! `%TEMP%\Negotium-update`, checks it against the release's SHA-256 digest (when GitHub gives
+//! one), starts `msiexec /i "<msi>" /passive` elevated (one UAC prompt) and quits, so the installer
+//! can replace the exe. A declined prompt keeps Negotium running.
 //!
 //! The pure parts (the release, the URLs, the file) are tested here against a fake [`Fetch`];
 //! [`WinHttp`] is the real one, and [`Updater`] is the window's side. Nothing about the user or
@@ -18,16 +19,36 @@ use std::time::Duration;
 /// The latest release of the repository (GitHub never answers a draft or a prerelease here, and
 /// both are refused anyway).
 pub const LATEST_URL: &str = "https://api.github.com/repos/MyndPhreak/Negotium/releases/latest";
-/// The hosts a release's installer may be downloaded from (GitHub's download link, and where it
-/// redirects); the API is asked at `api.github.com`. Every hop is HTTPS.
-pub const ASSET_HOSTS: [&str; 2] = ["github.com", "objects.githubusercontent.com"];
+/// The hosts a release's installer may be downloaded from: GitHub's download link, and the asset
+/// stores it redirects to (older and newer). The API is asked at `api.github.com`. Every hop is
+/// HTTPS.
+pub const ASSET_HOSTS: [&str; 3] = ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+const GITHUB: &str = ASSET_HOSTS[0];
+/// Where a download on `github.com` redirects (signed, short-lived URLs).
+const ASSET_STORES: [&str; 2] = [ASSET_HOSTS[1], ASSET_HOSTS[2]];
 const API_HOST: &str = "api.github.com";
-/// On `github.com`, the installer is a download of a release of this repository.
+/// On `github.com`, the installer is `<ASSET_PATH><the release's tag>/<file>`: a download of that
+/// release of this repository.
 const ASSET_PATH: &str = "/MyndPhreak/Negotium/releases/download/";
 /// A larger "installer" is not Negotium's.
 pub const MAX_MSI_BYTES: usize = 200 * 1024 * 1024;
+/// A release's JSON is a few kilobytes; more is not a release.
+pub const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 /// Each request's resolve, connect, send and receive timeouts.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What one request may take: at most `bytes` of body, and `deadline` overall (a trickle that
+/// never trips [`TIMEOUT`] still ends).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit {
+    pub bytes: usize,
+    pub deadline: Duration,
+}
+
+/// The check: the release's JSON.
+pub const JSON_LIMIT: Limit = Limit { bytes: MAX_JSON_BYTES, deadline: Duration::from_secs(30) };
+/// The download: the installer, within ten minutes.
+pub const MSI_LIMIT: Limit = Limit { bytes: MAX_MSI_BYTES, deadline: Duration::from_secs(10 * 60) };
 /// Redirects followed per request (GitHub's download takes one).
 const MAX_REDIRECTS: usize = 5;
 /// An OLE compound file's signature, which every MSI starts with.
@@ -35,6 +56,8 @@ const MSI_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /// A version, `X.Y.Z`, compared as numbers.
 pub type Version = (u64, u64, u64);
+/// A SHA-256 digest.
+pub type Digest = [u8; 32];
 
 /// A newer release, as offered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +67,9 @@ pub struct Release {
     pub msi_url: String,
     /// The release's page (`html_url`), for the log.
     pub page_url: String,
+    /// The asset's SHA-256, from GitHub's `digest` (`sha256:<hex>`) when it gives one; the
+    /// installer is checked against it right before it runs ([`verify_and_launch`]).
+    pub sha256: Option<Digest>,
 }
 
 impl Release {
@@ -72,8 +98,12 @@ pub enum UpdateError {
     Download(String),
     /// The installer couldn't be saved.
     Io(String),
+    /// The installer isn't the release's: its SHA-256 differs from the asset's digest.
+    Digest(String),
     /// msiexec couldn't be started.
     Start(String),
+    /// The UAC prompt for msiexec was declined: nothing ran.
+    Cancelled,
 }
 
 impl std::fmt::Display for UpdateError {
@@ -86,14 +116,17 @@ impl std::fmt::Display for UpdateError {
             UpdateError::Release(e) => write!(f, "the release can't be installed: {e}"),
             UpdateError::Download(e) => write!(f, "the download isn't an installer: {e}"),
             UpdateError::Io(e) => write!(f, "the installer couldn't be saved: {e}"),
+            UpdateError::Digest(e) => write!(f, "the installer isn't the release's: {e}"),
             UpdateError::Start(e) => write!(f, "the installer couldn't be started: {e}"),
+            UpdateError::Cancelled => f.write_str("it was cancelled"),
         }
     }
 }
 
-/// An HTTPS GET of a whole body. The real one is [`WinHttp`]; tests answer from a table.
+/// An HTTPS GET of a whole body within `limit`. The real one is [`WinHttp`]; tests answer from a
+/// table.
 pub trait Fetch {
-    fn get(&self, url: &str) -> Result<Vec<u8>, UpdateError>;
+    fn get(&self, url: &str, limit: Limit) -> Result<Vec<u8>, UpdateError>;
 }
 
 /// The User-Agent every request sends (GitHub's API requires one).
@@ -126,6 +159,20 @@ struct Latest {
 struct Asset {
     name: String,
     browser_download_url: String,
+    /// `sha256:<hex>` (GitHub adds it to assets uploaded since mid-2025); absent or null on older
+    /// ones.
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+/// GitHub's asset digest, `sha256:<64 hex digits>`.
+fn parse_digest(digest: &str) -> Option<Digest> {
+    let hex = digest.strip_prefix("sha256:").filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// The release in the API's answer `json`, if it should be offered to version `current`: not a
@@ -154,62 +201,103 @@ pub fn parse_latest(json: &str, current: &str) -> Result<Option<Release>, Update
         (Some(_), Some(_)) => return Err(UpdateError::Release(format!("{tag} has more than one .msi asset"))),
     };
     let url = &msi.browser_download_url;
-    if !asset_allowed(url) {
-        return Err(UpdateError::Release(format!("{tag}'s installer {url:?} is not a GitHub download over HTTPS")));
+    if !asset_allowed(url, tag) {
+        return Err(UpdateError::Release(format!("{tag}'s installer {url:?} is not a GitHub download of {tag} over HTTPS")));
     }
-    Ok(Some(Release { version, msi_url: url.clone(), page_url: latest.html_url }))
+    let sha256 = match msi.digest.as_deref() {
+        None => None,
+        Some(digest) => Some(
+            parse_digest(digest).ok_or_else(|| UpdateError::Release(format!("{tag}'s installer digest {digest:?} is not sha256:<hex>")))?,
+        ),
+    };
+    Ok(Some(Release { version, msi_url: url.clone(), page_url: latest.html_url, sha256 }))
 }
 
-/// An `https://` URL's host (lowercase) and path (with its query). No user info, no port, no
-/// whitespace, control characters or backslashes (which parsers disagree on), no dot segments.
-fn https_parts(url: &str) -> Option<(String, &str)> {
+/// An `https://` URL, split.
+struct Parts<'a> {
+    /// Lowercase.
+    host: String,
+    /// The path alone (no query).
+    path: &'a str,
+    /// What is asked of the host: the path and the query, without any fragment.
+    target: &'a str,
+}
+
+/// An `https://` URL's parts. No user info, no port, no whitespace, control characters or
+/// backslashes (which parsers disagree on) anywhere; no dot segments in the path, plain or
+/// percent-encoded (`%2e`, and `%2f` for a hidden slash). The query is not judged: signed asset
+/// URLs carry encoded slashes there (`X-Amz-Credential=…%2F…`, `rsct=application%2Foctet-stream`).
+fn https_parts(url: &str) -> Option<Parts<'_>> {
     if url.bytes().any(|b| b <= b' ' || b == b'\\' || b >= 0x7f) {
         return None;
     }
     let rest = url.get(..8).filter(|s| s.eq_ignore_ascii_case("https://")).map(|_| &url[8..])?;
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (host, path) = rest.split_at(end);
+    let rest = rest.split('#').next().unwrap_or_default();
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (host, target) = rest.split_at(end);
     if host.is_empty() || host.contains(['@', ':']) {
         return None;
     }
+    let path = target.split('?').next().unwrap_or_default();
     let lower = path.to_ascii_lowercase();
-    if path.split(['/', '?']).any(|seg| seg == "." || seg == "..") || lower.contains("%2e") || lower.contains("%2f") {
+    if path.split('/').any(|seg| seg == "." || seg == "..") || lower.contains("%2e") || lower.contains("%2f") {
         return None;
     }
-    Some((host.to_ascii_lowercase(), if path.is_empty() { "/" } else { path }))
+    let target = if target.is_empty() { "/" } else { target };
+    Some(Parts { host: host.to_ascii_lowercase(), path, target })
 }
 
-/// A release's installer URL: a download of this repository's release on `github.com`, or
-/// GitHub's asset store, over HTTPS.
-fn asset_allowed(url: &str) -> bool {
+/// The tag of a `github.com` release download path, `<ASSET_PATH><tag>/<file>`.
+fn download_tag(path: &str) -> Option<&str> {
+    let rest = path.get(..ASSET_PATH.len()).filter(|p| p.eq_ignore_ascii_case(ASSET_PATH)).map(|_| &path[ASSET_PATH.len()..])?;
+    let (tag, file) = rest.split_once('/')?;
+    (!tag.is_empty() && !file.is_empty() && !file.contains('/')).then_some(tag)
+}
+
+/// A release's installer URL, over HTTPS: on `github.com`, a download of release `tag` of this
+/// repository; or one of GitHub's asset stores.
+fn asset_allowed(url: &str, tag: &str) -> bool {
     match https_parts(url) {
-        Some((host, path)) if host == ASSET_HOSTS[0] => {
-            path.len() > ASSET_PATH.len() && path[..ASSET_PATH.len()].eq_ignore_ascii_case(ASSET_PATH)
-        }
-        Some((host, _)) => host == ASSET_HOSTS[1],
+        Some(p) if p.host == GITHUB => download_tag(p.path) == Some(tag),
+        Some(p) => ASSET_STORES.contains(&p.host.as_str()),
         None => false,
     }
 }
 
-/// A URL any request may reach (the first and every redirect): the API or [`ASSET_HOSTS`], over
-/// HTTPS.
-fn hop_allowed(url: &str) -> bool {
-    https_parts(url).is_some_and(|(host, _)| host == API_HOST || ASSET_HOSTS.contains(&host.as_str()))
+/// A URL a request may start at: the API, a release download of this repository, or an asset
+/// store, over HTTPS.
+fn first_hop_allowed(url: &str) -> bool {
+    match https_parts(url) {
+        Some(p) if p.host == GITHUB => download_tag(p.path).is_some(),
+        Some(p) => p.host == API_HOST || ASSET_STORES.contains(&p.host.as_str()),
+        None => false,
+    }
 }
 
 /// Where a redirect from `current` to `location` (absolute, or a path on the same host) goes, if
-/// it stays on GitHub over HTTPS.
+/// it stays on GitHub over HTTPS: the API only to itself, a release download only to the same
+/// release's downloads or an asset store, an asset store only to an asset store.
 pub fn next_hop(current: &str, location: &str) -> Result<String, UpdateError> {
-    let next = match https_parts(current) {
-        Some((host, _)) if location.starts_with('/') && !location.starts_with("//") => format!("https://{host}{location}"),
-        _ => location.to_string(),
+    let refused = || UpdateError::Redirect(format!("to {location:?}"));
+    let from = https_parts(current).ok_or_else(refused)?;
+    let next = if location.starts_with('/') && !location.starts_with("//") {
+        format!("https://{}{location}", from.host)
+    } else {
+        location.to_string()
     };
-    if hop_allowed(&next) { Ok(next) } else { Err(UpdateError::Redirect(format!("to {location:?}"))) }
+    let to = https_parts(&next).ok_or_else(refused)?;
+    let allowed = match to.host.as_str() {
+        API_HOST => from.host == API_HOST,
+        GITHUB => from.host == GITHUB && download_tag(to.path).is_some() && download_tag(to.path) == download_tag(from.path),
+        host if ASSET_STORES.contains(&host) => from.host == GITHUB || ASSET_STORES.contains(&from.host.as_str()),
+        _ => false,
+    };
+    if allowed { Ok(next) } else { Err(refused()) }
 }
 
 /// The latest release, if newer than `current` ([`parse_latest`]).
 pub fn check(fetch: &dyn Fetch, current: &str) -> Result<Option<Release>, UpdateError> {
-    let body = fetch.get(LATEST_URL)?;
+    let body = fetch.get(LATEST_URL, JSON_LIMIT)?;
     let json = std::str::from_utf8(&body).map_err(|e| UpdateError::Json(e.to_string()))?;
     parse_latest(json, current)
 }
@@ -228,10 +316,10 @@ pub fn msi_size_ok(len: usize) -> bool {
 /// is checked again first, and the body must look like an MSI. Written beside and then renamed,
 /// so a failed download never leaves half an installer under the final name.
 pub fn download(fetch: &dyn Fetch, release: &Release, dir: &Path) -> Result<PathBuf, UpdateError> {
-    if !asset_allowed(&release.msi_url) {
+    if !asset_allowed(&release.msi_url, &release.tag()) {
         return Err(UpdateError::Release(format!("{:?} is not a GitHub download over HTTPS", release.msi_url)));
     }
-    let body = fetch.get(&release.msi_url)?;
+    let body = fetch.get(&release.msi_url, MSI_LIMIT)?;
     if !msi_size_ok(body.len()) {
         return Err(UpdateError::Download(format!("{} bytes", body.len())));
     }
@@ -257,19 +345,52 @@ pub fn installer_args(msi: &Path) -> String {
     format!("/i \"{}\" /passive", msi.display())
 }
 
-/// Starts `<System32>\msiexec.exe` on `msi` ([`installer_args`]). It asks for elevation itself
-/// (one UAC prompt) and waits for this process to exit before it replaces the exe. Never called
-/// by tests.
-pub fn run_installer(msi: &Path) -> Result<(), UpdateError> {
-    use std::os::windows::process::CommandExt;
+/// SHA-256 of `bytes` (Windows' CNG).
+pub fn sha256(bytes: &[u8]) -> Result<Digest, UpdateError> {
+    use windows::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
+    let mut out = [0u8; 32];
+    // SAFETY: the SHA-256 pseudo-handle needs no opening; the input and the 32-byte output are
+    // live slices of the lengths passed.
+    let status = unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, bytes, &mut out) };
+    if status.is_ok() { Ok(out) } else { Err(UpdateError::Digest(format!("SHA-256 failed (NTSTATUS {:#x})", status.0))) }
+}
+
+/// The last step before the installer runs: `msi` is checked against the release's digest (read
+/// again now, not trusted from the download) and then `launch`ed. A mismatch deletes the file and
+/// nothing runs; a release without a digest is logged and installed unverified (assets uploaded
+/// before GitHub added digests have none). Off the UI thread in the app.
+pub fn verify_and_launch(
+    msi: &Path,
+    expected: Option<&Digest>,
+    launch: &dyn Fn(&Path) -> Result<(), UpdateError>,
+    log: &dyn Fn(&str),
+) -> Result<(), UpdateError> {
+    match expected {
+        Some(expected) => {
+            let bytes = std::fs::read(msi).map_err(|e| UpdateError::Io(e.to_string()))?;
+            if sha256(&bytes)? != *expected {
+                let _ = std::fs::remove_file(msi);
+                return Err(UpdateError::Digest("its SHA-256 doesn't match the release's digest".into()));
+            }
+        }
+        None => log(&format!("{}: the release gives no SHA-256 digest; installing it unverified", msi.display())),
+    }
+    launch(msi)
+}
+
+/// Starts `<System32>\msiexec.exe` on `msi` ([`installer_args`]) elevated (the `runas` verb: one
+/// UAC prompt, owned by window `owner`), without waiting for it. A declined prompt is
+/// [`UpdateError::Cancelled`] and nothing runs. Negotium exits once this succeeds; msiexec doesn't
+/// wait for it, but the installer asks a still-running Negotium to exit before replacing files
+/// (spec goal 7). Never called by tests.
+pub fn launch_msiexec(msi: &Path, owner: isize) -> Result<(), UpdateError> {
     let msiexec = crate::integrate::system32()
         .map(|dir| dir.join("msiexec.exe"))
         .ok_or_else(|| UpdateError::Start("System32 could not be found".into()))?;
-    std::process::Command::new(msiexec)
-        .raw_arg(installer_args(msi))
-        .spawn()
-        .map(drop)
-        .map_err(|e| UpdateError::Start(e.to_string()))
+    negotium_actions::run_elevated_detached(&msiexec, &installer_args(msi), owner).map_err(|e| match e {
+        negotium_actions::ActionError::Cancelled => UpdateError::Cancelled,
+        e => UpdateError::Start(e.to_string()),
+    })
 }
 
 /// Whether this launch checks for updates on its own: the installed copy with "Check for updates
@@ -280,7 +401,7 @@ pub fn startup_check_wanted(installed: bool, check_updates: bool) -> bool {
 
 /// Plain HTTPS GETs through WinHTTP (Windows' TLS and proxy settings): [`TIMEOUT`] for each
 /// stage, [`user_agent`], no cookies, and redirects followed here only while they stay on GitHub
-/// over HTTPS ([`next_hop`]). A body over [`MAX_MSI_BYTES`] is refused.
+/// over HTTPS ([`next_hop`]). Each request keeps to its [`Limit`] (size and overall deadline).
 pub struct WinHttp;
 
 /// One hop's answer.
@@ -313,13 +434,14 @@ fn network(e: windows::core::Error) -> UpdateError {
 }
 
 impl Fetch for WinHttp {
-    fn get(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+    fn get(&self, url: &str, limit: Limit) -> Result<Vec<u8>, UpdateError> {
         let mut url = url.to_string();
-        if !hop_allowed(&url) {
+        if !first_hop_allowed(&url) {
             return Err(UpdateError::Redirect(format!("{url:?} is not GitHub over HTTPS")));
         }
+        let deadline = std::time::Instant::now() + limit.deadline;
         for _ in 0..=MAX_REDIRECTS {
-            match get_once(&url)? {
+            match get_once(&url, limit, deadline)? {
                 Hop::Body(body) => return Ok(body),
                 Hop::Redirect(location) => url = next_hop(&url, &location)?,
             }
@@ -328,11 +450,17 @@ impl Fetch for WinHttp {
     }
 }
 
-/// One GET of `url` (already [`hop_allowed`]), redirects not followed.
-fn get_once(url: &str) -> Result<Hop, UpdateError> {
+/// One GET of `url` (already allowed), redirects not followed; the body at most `limit.bytes`,
+/// read before `deadline`.
+fn get_once(url: &str, limit: Limit, deadline: std::time::Instant) -> Result<Hop, UpdateError> {
     use windows::Win32::Networking::WinHttp::*;
     use windows::core::{HSTRING, PCWSTR, w};
-    let (host, path) = https_parts(url).ok_or_else(|| UpdateError::Redirect(format!("{url:?}")))?;
+    let parts = https_parts(url).ok_or_else(|| UpdateError::Redirect(format!("{url:?}")))?;
+    let (host, path) = (parts.host, parts.target);
+    let late = || UpdateError::Network(format!("took longer than {} s", limit.deadline.as_secs()));
+    if std::time::Instant::now() > deadline {
+        return Err(late());
+    }
     let ms = TIMEOUT.as_millis() as i32;
     let agent = HSTRING::from(user_agent());
     // SAFETY: WinHTTP calls on handles owned by `Handle`s that outlive every use; the strings
@@ -401,9 +529,12 @@ fn get_once(url: &str) -> Result<Hop, UpdateError> {
             if available == 0 {
                 return Ok(Hop::Body(body));
             }
+            if std::time::Instant::now() > deadline {
+                return Err(late());
+            }
             let start = body.len();
-            if start + available as usize > MAX_MSI_BYTES {
-                return Err(UpdateError::Download(format!("over {MAX_MSI_BYTES} bytes")));
+            if start + available as usize > limit.bytes {
+                return Err(UpdateError::Download(format!("over {} bytes", limit.bytes)));
             }
             body.resize(start + available as usize, 0);
             let mut read = 0u32;
@@ -427,8 +558,18 @@ pub const CHECK_FAILED: &str = "Couldn't check for updates";
 pub type Checked = Box<dyn FnOnce(Result<Option<Release>, UpdateError>)>;
 /// A download's outcome (the saved installer), delivered on the UI thread.
 pub type Downloaded = Box<dyn FnOnce(Result<PathBuf, UpdateError>)>;
-/// [`UpdateIo::run_installer`].
-pub type RunInstaller = dyn Fn(&Path) -> Result<(), UpdateError>;
+/// The installer's start (UAC answered), delivered on the UI thread.
+pub type Installed = Box<dyn FnOnce(Result<(), UpdateError>)>;
+
+/// A downloaded installer to check and start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Installing {
+    pub msi: PathBuf,
+    /// The release's digest, if it gives one.
+    pub sha256: Option<Digest>,
+    /// The UAC prompt's owner window (0: none).
+    pub owner: isize,
+}
 
 /// What [`Updater`] runs. The app passes WinHTTP off the UI thread, msiexec and `begin_exit`
 /// (`main.rs`); tests pass fakes.
@@ -439,8 +580,9 @@ pub struct UpdateIo {
     pub check: Box<dyn Fn(Checked)>,
     /// [`download`] to [`update_dir`], off the UI thread ([`download_in_background`] in the app).
     pub download: Box<dyn Fn(Release, Downloaded)>,
-    /// Starts the installer ([`run_installer`] in the app).
-    pub run_installer: Box<RunInstaller>,
+    /// [`verify_and_launch`] with [`launch_msiexec`], off the UI thread
+    /// ([`install_in_background`] in the app).
+    pub install: Box<dyn Fn(Installing, Installed)>,
     /// Quits Negotium so the installer can replace it (`begin_exit`).
     pub exit: Box<dyn Fn()>,
     /// A log line (the startup check's failures are only logged).
@@ -515,6 +657,10 @@ impl Updater {
     fn checked(&self, result: Result<Option<Release>, UpdateError>) {
         self.checking.set(false);
         let manual = self.manual.take();
+        // An update under way keeps its banner: a check that lands meanwhile changes nothing.
+        if self.updating.get() {
+            return;
+        }
         match result {
             Ok(Some(release)) => {
                 if manual {
@@ -538,8 +684,9 @@ impl Updater {
         }
     }
 
-    /// "Update": download the offered installer, start it and quit. A failure says so and the
-    /// banner offers it again.
+    /// "Update": download the offered installer, check it and start it elevated, then quit. A
+    /// declined UAC prompt or a failure says so, Negotium keeps running and the banner offers the
+    /// update again.
     pub fn accept(self: &Rc<Self>) {
         let Some(release) = self.offered.borrow().clone() else { return };
         if self.updating.replace(true) {
@@ -547,27 +694,44 @@ impl Updater {
         }
         self.show_banner();
         let this = self.clone();
-        let tag = release.tag();
         (self.io.download)(
-            release,
-            Box::new(move |saved| {
-                let started = saved.and_then(|msi| (this.io.run_installer)(&msi).map(|()| msi));
-                match started {
-                    Ok(msi) => {
-                        (this.io.log)(&format!("updating to {tag}: started msiexec on {}", msi.display()));
-                        (this.io.exit)();
-                    }
-                    Err(e) => {
-                        (this.io.log)(&format!("update to {tag} failed: {e}"));
-                        this.updating.set(false);
-                        this.show_banner();
-                        if let Some(ui) = this.weak.upgrade() {
-                            ui.set_toast(format!("Couldn't update to {tag}: {e}.").into());
-                        }
-                    }
+            release.clone(),
+            Box::new(move |saved| match saved {
+                Err(e) => this.update_failed(&release, e),
+                Ok(msi) => {
+                    let owner = this.weak.upgrade().and_then(|ui| crate::platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
+                    let job = Installing { msi: msi.clone(), sha256: release.sha256, owner };
+                    let after = this.clone();
+                    (this.io.install)(
+                        job,
+                        Box::new(move |started| match started {
+                            Ok(()) => {
+                                (after.io.log)(&format!("updating to {}: started msiexec on {}", release.tag(), msi.display()));
+                                (after.io.exit)();
+                            }
+                            Err(e) => after.update_failed(&release, e),
+                        }),
+                    );
                 }
             }),
         );
+    }
+
+    /// The update didn't start: logged, said, and offered again.
+    fn update_failed(&self, release: &Release, e: UpdateError) {
+        let tag = release.tag();
+        self.updating.set(false);
+        self.show_banner();
+        let toast = if e == UpdateError::Cancelled {
+            (self.io.log)(&format!("update to {tag} cancelled at the UAC prompt"));
+            "Update cancelled".to_string()
+        } else {
+            (self.io.log)(&format!("update to {tag} failed: {e}"));
+            format!("Couldn't update to {tag}: {e}.")
+        };
+        if let Some(ui) = self.weak.upgrade() {
+            ui.set_toast(toast.into());
+        }
     }
 
     /// "Dismiss": the banner goes until the next check finds a release.
@@ -610,6 +774,18 @@ pub fn download_in_background(release: Release, done: Downloaded) {
     crate::settingspage::in_background(move || download(&WinHttp, &release, &update_dir()), done);
 }
 
+/// The app's [`UpdateIo::install`]: [`verify_and_launch`] with [`launch_msiexec`] on its own
+/// thread (it waits for the UAC prompt). Never called by tests.
+pub fn install_in_background(job: Installing, done: Installed) {
+    crate::settingspage::in_background(
+        move || {
+            let log = |line: &str| crate::log::Log::new(crate::log::Log::default_path()).warn(line);
+            verify_and_launch(&job.msi, job.sha256.as_ref(), &|msi| launch_msiexec(msi, job.owner), &log)
+        },
+        done,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,6 +793,9 @@ mod tests {
 
     const MSI: &str = "https://github.com/MyndPhreak/Negotium/releases/download/v0.2.0/Negotium-0.2.0.msi";
     const PAGE: &str = "https://github.com/MyndPhreak/Negotium/releases/tag/v0.2.0";
+    /// Shaped like GitHub's signed redirects (S3 for the older store, Azure SAS for the newer).
+    const OBJECTS_SIGNED: &str = "https://objects.githubusercontent.com/github-production-release-asset-2e65be/123456789/0b5e1f2a-3c4d-4e5f-8a9b-0c1d2e3f4a5b?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=releaseassetproduction%2F20251017%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20251017T120000Z&X-Amz-Expires=300&X-Amz-Signature=0f1e2d3c4b5a69788796a5b4c3d2e1f0&X-Amz-SignedHeaders=host&actor_id=0&key_id=0&repo_id=123456789&response-content-disposition=attachment%3B%20filename%3DNegotium-0.2.0.msi&response-content-type=application%2Foctet-stream";
+    const RELEASE_ASSETS_SIGNED: &str = "https://release-assets.githubusercontent.com/github-production-release-asset/123456789/0b5e1f2a-3c4d-4e5f-8a9b-0c1d2e3f4a5b?sp=r&sv=2018-11-09&sr=b&spr=https&se=2025-10-17T12%3A45%3A00Z&rscd=attachment%3B+filename%3DNegotium-0.2.0.msi&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2025-10-17T11%3A44%3A00Z&ske=2025-10-17T12%3A45%3A00Z&sks=b&skv=2018-11-09&sig=AbCdEf%2Fgh%2BIj%3D&jwt=eyJhbGciOiJIUzI1NiJ9.eyJyIjoxfQ.c2ln&response-content-disposition=attachment%3B%20filename%3DNegotium-0.2.0.msi&response-content-type=application%2Foctet-stream";
 
     fn json(tag: &str, draft: bool, prerelease: bool, assets: &[(&str, &str)]) -> String {
         let assets: Vec<_> =
@@ -632,13 +811,14 @@ mod tests {
     }
 
     fn one_msi(tag: &str) -> String {
-        latest(tag, &[("Negotium-0.2.0.msi", MSI)])
+        let url = format!("https://github.com/MyndPhreak/Negotium/releases/download/{tag}/Negotium.msi");
+        latest(tag, &[("Negotium.msi", &url)])
     }
 
     #[test]
     fn a_newer_release_is_offered() {
         let release = parse_latest(&one_msi("v0.2.0"), "0.1.0").unwrap();
-        assert_eq!(release, Some(Release { version: (0, 2, 0), msi_url: MSI.into(), page_url: PAGE.into() }));
+        assert_eq!(release, Some(Release { version: (0, 2, 0), msi_url: "https://github.com/MyndPhreak/Negotium/releases/download/v0.2.0/Negotium.msi".into(), page_url: PAGE.into(), sha256: None }));
         assert_eq!(release.unwrap().tag(), "v0.2.0");
     }
 
@@ -672,10 +852,17 @@ mod tests {
 
     #[test]
     fn the_installer_must_be_on_github_over_https() {
-        let objects = "https://objects.githubusercontent.com/github-production-release-asset/1/abc?x=y";
-        assert!(parse_latest(&latest("v0.2.0", &[("Negotium.msi", objects)]), "0.1.0").unwrap().is_some());
+        for store in [OBJECTS_SIGNED, RELEASE_ASSETS_SIGNED] {
+            assert!(parse_latest(&latest("v0.2.0", &[("Negotium.msi", store)]), "0.1.0").unwrap().is_some(), "{store}");
+        }
         for url in [
             "https://example.com/Negotium-0.2.0.msi",
+            "https://github.com/MyndPhreak/Negotium/releases/download/v0.1.9/Negotium-0.2.0.msi",
+            "https://github.com/MyndPhreak/Negotium/releases/download/Negotium-0.2.0.msi",
+            "https://github.com/MyndPhreak/Negotium/releases/download/v0.2.0/sub/Negotium-0.2.0.msi",
+            "https://github.com/MyndPhreak/Negotium/releases/download/v0.2.0%2FNegotium-0.2.0.msi",
+            "http://release-assets.githubusercontent.com/x?sig=y",
+            "https://release-assets.githubusercontent.com.evil.example/x",
             "http://github.com/MyndPhreak/Negotium/releases/download/v0.2.0/Negotium-0.2.0.msi",
             "https://github.com/Someone/Negotium/releases/download/v0.2.0/Negotium-0.2.0.msi",
             "https://github.com/MyndPhreak/Other/releases/download/v0.2.0/Negotium-0.2.0.msi",
@@ -704,6 +891,95 @@ mod tests {
         assert_eq!(parse_latest(&mixed, "0.1.0").unwrap().unwrap().msi_url, MSI, "other assets are ignored");
     }
 
+    fn with_digest(digest: serde_json::Value) -> String {
+        serde_json::json!({
+            "tag_name": "v0.2.0", "draft": false, "prerelease": false, "html_url": PAGE,
+            "assets": [{ "name": "Negotium-0.2.0.msi", "browser_download_url": MSI, "digest": digest }],
+        })
+        .to_string()
+    }
+
+    /// SHA-256("abc").
+    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn the_assets_digest_is_read() {
+        let release = parse_latest(&with_digest(format!("sha256:{ABC}").into()), "0.1.0").unwrap().unwrap();
+        assert_eq!(release.sha256, Some(sha256(b"abc").unwrap()));
+        assert_eq!(parse_latest(&with_digest(serde_json::Value::Null), "0.1.0").unwrap().unwrap().sha256, None, "null: none");
+        assert_eq!(parse_latest(&one_msi("v0.2.0"), "0.1.0").unwrap().unwrap().sha256, None, "absent: none");
+        for bad in [
+            format!("sha256:{}", &ABC[1..]),
+            format!("sha256:{ABC}0"),
+            format!("sha256:{}", ABC.replace('b', "g")),
+            format!("sha512:{ABC}"),
+            format!("SHA256 {ABC}"),
+            ABC.to_string(),
+            String::new(),
+        ] {
+            let got = parse_latest(&with_digest(bad.clone().into()), "0.1.0");
+            assert!(matches!(got, Err(UpdateError::Release(_))), "{bad:?}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn sha256_is_sha256() {
+        let hex: String = sha256(b"abc").unwrap().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, ABC);
+    }
+
+    /// `verify_and_launch` with a recording launcher that answers `answer`; returns the result,
+    /// what was launched and the log.
+    fn verify(msi: &Path, expected: Option<&Digest>, answer: Result<(), UpdateError>) -> (Result<(), UpdateError>, Vec<PathBuf>, Vec<String>) {
+        let launched = RefCell::new(Vec::new());
+        let log = RefCell::new(Vec::new());
+        let result = verify_and_launch(
+            msi,
+            expected,
+            &|m| {
+                launched.borrow_mut().push(m.to_path_buf());
+                answer.clone()
+            },
+            &|l| log.borrow_mut().push(l.to_string()),
+        );
+        (result, launched.into_inner(), log.into_inner())
+    }
+
+    #[test]
+    fn the_installer_is_checked_right_before_it_runs() {
+        let dir = scratch("verify");
+        std::fs::create_dir_all(&dir).unwrap();
+        let msi = dir.join("Negotium-0.2.0.msi");
+        std::fs::write(&msi, b"abc").unwrap();
+        let good = sha256(b"abc").unwrap();
+
+        let (result, launched, log) = verify(&msi, Some(&good), Ok(()));
+        assert_eq!(result, Ok(()));
+        assert_eq!(launched, std::slice::from_ref(&msi), "a match runs");
+        assert!(log.is_empty());
+
+        let (result, launched, log) = verify(&msi, None, Ok(()));
+        assert_eq!(result, Ok(()));
+        assert_eq!(launched, std::slice::from_ref(&msi), "no digest: runs, unverified");
+        assert_eq!(log.len(), 1, "logged once: {log:?}");
+        assert!(log[0].contains("unverified"));
+
+        let (result, _, _) = verify(&msi, Some(&good), Err(UpdateError::Cancelled));
+        assert_eq!(result, Err(UpdateError::Cancelled), "a declined prompt comes back as such");
+
+        // Swapped after the download: refused, deleted, never run.
+        std::fs::write(&msi, b"abd").unwrap();
+        let (result, launched, _) = verify(&msi, Some(&good), Ok(()));
+        assert!(matches!(result, Err(UpdateError::Digest(_))), "{result:?}");
+        assert!(launched.is_empty(), "a mismatch never runs");
+        assert!(!msi.exists(), "and is deleted");
+
+        let (result, launched, _) = verify(&msi, Some(&good), Ok(()));
+        assert!(matches!(result, Err(UpdateError::Io(_))), "gone: {result:?}");
+        assert!(launched.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn malformed_json_is_an_error() {
         for text in ["", "{", "[]", "null", r#"{"tag_name": 5}"#, r#"{"draft": false}"#] {
@@ -716,6 +992,7 @@ mod tests {
     struct FakeFetch {
         answers: Vec<(String, Result<Vec<u8>, UpdateError>)>,
         asked: RefCell<Vec<String>>,
+        limits: RefCell<Vec<Limit>>,
     }
 
     impl FakeFetch {
@@ -725,8 +1002,9 @@ mod tests {
     }
 
     impl Fetch for FakeFetch {
-        fn get(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+        fn get(&self, url: &str, limit: Limit) -> Result<Vec<u8>, UpdateError> {
             self.asked.borrow_mut().push(url.into());
+            self.limits.borrow_mut().push(limit);
             self.answers.iter().find(|(u, _)| u == url).map(|(_, a)| a.clone()).unwrap_or(Err(UpdateError::Status(404)))
         }
     }
@@ -737,6 +1015,8 @@ mod tests {
         let fetch = FakeFetch::with(LATEST_URL, Ok(one_msi("v0.2.0").into_bytes()));
         assert_eq!(check(&fetch, "0.1.0").unwrap().unwrap().version, (0, 2, 0));
         assert_eq!(*fetch.asked.borrow(), [LATEST_URL]);
+        assert_eq!(*fetch.limits.borrow(), [JSON_LIMIT], "a small cap for JSON");
+        assert_eq!(JSON_LIMIT.bytes, 2 * 1024 * 1024);
         let offline = FakeFetch::with(LATEST_URL, Err(UpdateError::Network("offline".into())));
         assert_eq!(check(&offline, "0.1.0"), Err(UpdateError::Network("offline".into())));
         let garbage = FakeFetch::with(LATEST_URL, Ok(vec![0xff, 0xfe]));
@@ -747,7 +1027,7 @@ mod tests {
     const MSI_BYTES: [u8; 12] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 1, 2, 3, 4];
 
     fn release() -> Release {
-        Release { version: (0, 2, 0), msi_url: MSI.into(), page_url: PAGE.into() }
+        Release { version: (0, 2, 0), msi_url: MSI.into(), page_url: PAGE.into(), sha256: None }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -764,6 +1044,8 @@ mod tests {
         assert_eq!(path, dir.join("Negotium-0.2.0.msi"));
         assert_eq!(std::fs::read(&path).unwrap(), MSI_BYTES);
         assert_eq!(*fetch.asked.borrow(), [MSI]);
+        assert_eq!(*fetch.limits.borrow(), [MSI_LIMIT]);
+        assert_eq!(MSI_LIMIT.deadline, std::time::Duration::from_secs(600), "a trickle ends");
         let mut newer = MSI_BYTES.to_vec();
         newer.push(9);
         let path = download(&FakeFetch::with(MSI, Ok(newer.clone())), &release(), &dir).unwrap();
@@ -798,18 +1080,43 @@ mod tests {
 
     #[test]
     fn redirects_stay_on_github_over_https() {
-        let objects = "https://objects.githubusercontent.com/github-production-release-asset/1?sig=x";
-        assert_eq!(next_hop(MSI, objects), Ok(objects.to_string()));
+        // GitHub's signed download redirects: encoded slashes in the query are normal there.
+        for store in [OBJECTS_SIGNED, RELEASE_ASSETS_SIGNED] {
+            assert_eq!(next_hop(MSI, store), Ok(store.to_string()), "{store}");
+            assert_eq!(next_hop(store, store), Ok(store.to_string()), "store to store");
+        }
         assert_eq!(next_hop(LATEST_URL, "/repos/x"), Ok("https://api.github.com/repos/x".to_string()), "relative");
+        let same_release = "https://github.com/MyndPhreak/Negotium/releases/download/v0.2.0/Other.msi";
+        assert_eq!(next_hop(MSI, same_release), Ok(same_release.to_string()), "the same release's downloads");
         for to in [
             "http://objects.githubusercontent.com/x",
+            "http://release-assets.githubusercontent.com/x?sig=a%2Fb",
             "https://example.com/x",
             "//example.com/x",
             "https://objects.githubusercontent.com.evil.example/x",
+            "https://release-assets.githubusercontent.com/a/%2e%2e/b?sig=x",
+            "https://github.com/MyndPhreak/Negotium/releases/download/v0.1.0/Negotium-0.1.0.msi",
+            "https://github.com/Someone/Negotium/releases/download/v0.2.0/N.msi",
+            "https://github.com/login?return_to=x",
+            "https://api.github.com/repos/x",
             "",
         ] {
             assert!(matches!(next_hop(MSI, to), Err(UpdateError::Redirect(_))), "{to:?}");
         }
+        assert!(next_hop(LATEST_URL, OBJECTS_SIGNED).is_err(), "the API never redirects to a download");
+        assert!(next_hop(OBJECTS_SIGNED, MSI).is_err(), "nor a store back to github.com");
+        assert!(next_hop(OBJECTS_SIGNED, LATEST_URL).is_err());
+    }
+
+    #[test]
+    fn a_request_asks_the_path_and_query_without_the_fragment() {
+        let p = https_parts("https://Release-Assets.githubusercontent.com/a/b?sig=a%2Fb&x=1#frag").unwrap();
+        assert_eq!((p.host.as_str(), p.path, p.target), ("release-assets.githubusercontent.com", "/a/b", "/a/b?sig=a%2Fb&x=1"));
+        assert_eq!(https_parts("https://api.github.com").unwrap().target, "/");
+        assert!(https_parts("https://github.com/a%2fb?x").is_none(), "an encoded slash in the path");
+        assert!(https_parts("https://github.com/a/./b").is_none());
+        assert!(first_hop_allowed(LATEST_URL) && first_hop_allowed(MSI) && first_hop_allowed(OBJECTS_SIGNED));
+        assert!(!first_hop_allowed("https://github.com/MyndPhreak/Negotium") && !first_hop_allowed("https://example.com/"));
     }
 
     #[test]

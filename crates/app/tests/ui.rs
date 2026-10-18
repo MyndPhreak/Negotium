@@ -4528,7 +4528,8 @@ struct FakeUpdates {
     checks: Rc<RefCell<Vec<negotium::update::Checked>>>,
     downloads: Rc<RefCell<Vec<(negotium::update::Release, negotium::update::Downloaded)>>>,
     installers: Rc<RefCell<Vec<std::path::PathBuf>>>,
-    installer_fails: Rc<std::cell::Cell<bool>>,
+    /// The installer start fails with this (none: it starts).
+    installer_fails: Rc<RefCell<Option<negotium::update::UpdateError>>>,
     exits: Rc<std::cell::Cell<usize>>,
     log: Rc<RefCell<Vec<String>>>,
 }
@@ -4546,11 +4547,12 @@ impl FakeUpdates {
                 let downloads = f.downloads.clone();
                 move |release, done| downloads.borrow_mut().push((release, done))
             }),
-            run_installer: Box::new({
+            // The injected launcher: answers at once (`installer_fails`).
+            install: Box::new({
                 let (installers, fails) = (f.installers.clone(), f.installer_fails.clone());
-                move |msi| {
-                    installers.borrow_mut().push(msi.to_path_buf());
-                    if fails.get() { Err(negotium::update::UpdateError::Start("not found".into())) } else { Ok(()) }
+                move |job, done| {
+                    installers.borrow_mut().push(job.msi.clone());
+                    done(fails.borrow().clone().map_or(Ok(()), Err));
                 }
             }),
             exit: Box::new({
@@ -4577,6 +4579,7 @@ fn release_v(version: (u64, u64, u64)) -> negotium::update::Release {
         version,
         msi_url: "https://github.com/MyndPhreak/Negotium/releases/download/v9.9.9/Negotium-9.9.9.msi".into(),
         page_url: "https://github.com/MyndPhreak/Negotium/releases/tag/v9.9.9".into(),
+        sha256: None,
     }
 }
 
@@ -4690,13 +4693,48 @@ fn a_failed_update_says_so_and_offers_it_again() {
     assert_eq!(ui.get_update_banner(), "Update to v9.9.9");
     assert!(!ui.get_update_busy());
     // The installer won't start: the same.
-    fake.installer_fails.set(true);
+    *fake.installer_fails.borrow_mut() = Some(negotium::update::UpdateError::Start("not found".into()));
     updater.accept();
     let (_, done) = fake.downloads.borrow_mut().pop().unwrap();
     done(Ok("x.msi".into()));
     assert_eq!(fake.exits.get(), 0);
     assert_eq!(ui.get_update_banner(), "Update to v9.9.9");
     assert!(fake.log.borrow().iter().any(|l| l.contains("update to v9.9.9 failed")));
+}
+
+#[test]
+fn a_declined_uac_prompt_keeps_negotium_running() {
+    let ui = shown_window();
+    let (updater, fake) = FakeUpdates::wire(&ui, true);
+    updater.startup(true);
+    let digest = [7u8; 32];
+    fake.answer(Ok(Some(negotium::update::Release { sha256: Some(digest), ..release_v((9, 9, 9)) })));
+    *fake.installer_fails.borrow_mut() = Some(negotium::update::UpdateError::Cancelled);
+    updater.accept();
+    let (release, done) = fake.downloads.borrow_mut().pop().unwrap();
+    assert_eq!(release.sha256, Some(digest));
+    done(Ok("x.msi".into()));
+    assert_eq!(*fake.installers.borrow(), [std::path::PathBuf::from("x.msi")], "msiexec was asked to start");
+    assert_eq!(fake.exits.get(), 0, "declined: Negotium stays");
+    assert_eq!(ui.get_toast(), "Update cancelled");
+    assert_eq!(ui.get_update_banner(), "Update to v9.9.9", "offered again");
+    assert!(!ui.get_update_busy());
+}
+
+#[test]
+fn a_check_landing_during_the_download_changes_nothing() {
+    let ui = settings_window(1000, 1700);
+    negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: INSTALLED_EXE.into(), installed: true });
+    let (updater, fake) = FakeUpdates::wire(&ui, true);
+    updater.startup(true);
+    fake.answer(Ok(Some(release_v((9, 9, 9)))));
+    updater.startup(true); // another check, still out when Update is clicked
+    updater.accept();
+    updater.check_now(); // ignored while updating
+    fake.answer(Ok(Some(release_v((10, 0, 0)))));
+    assert_eq!(ui.get_update_banner(), "Downloading v9.9.9…");
+    assert_eq!(ui.get_settings_update_status(), "");
+    assert!(fake.checks.borrow().is_empty());
 }
 
 #[test]
