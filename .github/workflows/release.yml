@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  WIX_VERSION_TAG: wix3141rtm
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches the workspace version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $pkg = $meta.packages | Where-Object { $_.name -eq 'negotium' }
+          if (-not $pkg) { throw "package 'negotium' not found in cargo metadata" }
+          $expected = "v$($pkg.version)"
+          if ($env:TAG -ne $expected) {
+            throw "Tag '$env:TAG' does not match the workspace version (expected '$expected'). Bump the version in Cargo.toml or retag."
+          }
+          Write-Host "Tag $env:TAG matches version $($pkg.version)"
+          "VERSION=$($pkg.version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release
+        run: cargo build --release -p negotium
+
+      - name: Install WiX Toolset v3.14
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'wix314'
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/$env:WIX_VERSION_TAG/wix314-binaries.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir
+          foreach ($exe in 'candle.exe', 'light.exe') {
+            if (-not (Test-Path (Join-Path $dir $exe))) { throw "$exe missing from the WiX archive" }
+          }
+          "WIX_BIN=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --version 0.3.9 --locked
+
+      - name: Build the MSI
+        run: cargo wix -p negotium --bin-path "$env:WIX_BIN" --nocapture
+
+      - name: Locate the MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem target/wix -Filter '*.msi'
+          if ($msi.Count -ne 1) { throw "expected exactly one MSI in target/wix, found $($msi.Count)" }
+          $expected = "negotium-$env:VERSION-x86_64.msi"
+          if ($msi[0].Name -ne $expected) { throw "unexpected MSI name $($msi[0].Name), expected $expected" }
+          "MSI_PATH=$($msi[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Create the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create $env:TAG $env:MSI_PATH --repo $env:GITHUB_REPOSITORY --title $env:TAG --notes "Negotium $env:TAG. Install with the attached MSI (per-machine, Windows 64-bit)."
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
