@@ -175,7 +175,11 @@ pub fn load(path: &Path) -> (Settings, Loaded) {
 
 /// [`load`], setting a bad file aside through `writes` (elevated: copied, never renamed).
 pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
-    let text = match std::fs::read_to_string(path) {
+    // Elevated, read through the guarded open (no link followed), like the save.
+    let read = writes.read(path).and_then(|bytes| {
+        String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    });
+    let text = match read {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), Loaded::Defaults),
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
@@ -241,9 +245,10 @@ fn set_aside(writes: &Writes, path: &Path, reason: &str) -> Loaded {
     }
 }
 
-/// Copies the file's bytes to settings.json.bad (replacing an older one) through `writes`.
+/// Copies the file's bytes to settings.json.bad (replacing an older one) through `writes`, read
+/// through it too (elevated: a linked file is never read, so never copied into the user's folder).
 fn copy_aside(writes: &Writes, path: &Path) -> std::io::Result<()> {
-    let bytes = std::fs::read(path)?;
+    let bytes = writes.read(path)?;
     writes.write_all(&path.with_extension("json.bad"), &bytes)
 }
 
@@ -390,6 +395,27 @@ mod tests {
         save_with(&guarded, &dir.file(), &changed).unwrap();
         assert!(!dir.file().with_extension("json.tmp").exists(), "no temporary file");
         assert_eq!(load_with(&guarded, &dir.file()), (changed.normalized(), Loaded::File));
+    }
+
+    /// Elevated: a settings.json that is another name of some other file (here a hard link to a
+    /// "secret" that isn't JSON) is neither read nor copied to settings.json.bad; defaults are used
+    /// and both files stay as they were.
+    #[test]
+    fn elevated_a_linked_file_is_never_read_or_copied_aside() {
+        let dir = TempDir::new("elevated-link");
+        let elsewhere = TempDir::new("elevated-link-target");
+        let secret = elsewhere.0.join("secret.txt");
+        std::fs::write(&secret, b"admin-only secret").unwrap();
+        std::fs::hard_link(&secret, dir.file()).unwrap();
+        let guarded = Writes::Guarded(Some(dir.0.clone()));
+        let (s, loaded) = load_with(&guarded, &dir.file());
+        assert!(matches!(loaded, Loaded::Unreadable(_)), "{loaded:?}");
+        assert_eq!(s, Settings::default());
+        assert!(!dir.file().with_extension("json.bad").exists(), "nothing copied aside");
+        assert_eq!(std::fs::read(&secret).unwrap(), b"admin-only secret");
+        // Not elevated, the same user's own link is read (and set aside) as before.
+        let (_, loaded) = load_with(&Writes::Plain, &dir.file());
+        assert!(matches!(loaded, Loaded::Recovered(_)), "{loaded:?}");
     }
 
     /// A fresh directory under the temp dir, removed when dropped (also when a test fails).

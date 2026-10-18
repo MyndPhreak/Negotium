@@ -10,6 +10,9 @@
 //!   symlink, a mount point), each checked through a handle that doesn't follow links; the file
 //!   must have no other hard link; and once opened, the file's final path must still be where it
 //!   was asked for (nothing swapped in between). Anything else refuses the write;
+//! - a file read there (settings.json, read and copied aside) is opened through the same checks
+//!   ([`Writes::read`]), so a link can't make the elevated copy read, and copy into the user's
+//!   folder, a file only an administrator may read;
 //! - nothing there is renamed, rotated or deleted (each of those would act on whatever a planted
 //!   link names): files are appended to or overwritten in place.
 //!
@@ -106,6 +109,16 @@ impl Writes {
             }
             Writes::Guarded(None) => Err(refused("LocalAppData's known folder couldn't be read")),
             Writes::Guarded(Some(base)) => open_guarded(base, path, how),
+        }
+    }
+
+    /// Reads the whole of `path`: plainly, or elevated through the same checks as a write
+    /// ([`read_guarded`]: no link on the way, a single-name file whose final path is `path`).
+    pub fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        match self {
+            Writes::Plain => std::fs::read(path),
+            Writes::Guarded(None) => Err(refused("LocalAppData's known folder couldn't be read")),
+            Writes::Guarded(Some(base)) => read_guarded(base, path),
         }
     }
 
@@ -219,19 +232,6 @@ fn final_path(handle: &File) -> io::Result<PathBuf> {
 /// emptied only after the checks ([`Open::Overwrite`]).
 pub fn open_guarded(base: &Path, path: &Path, how: Open) -> io::Result<File> {
     let parts = parts_below(base, path).map_err(refused)?;
-    let (file_name, folders) = parts.split_last().expect("parts_below returns at least one");
-    let mut dir = base.to_path_buf();
-    for name in folders {
-        dir.push(name);
-        let found = match inspect(&dir) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                std::fs::create_dir(&dir).or_else(|e| if e.kind() == io::ErrorKind::AlreadyExists { Ok(()) } else { Err(e) })?;
-                inspect(&dir)?
-            }
-            other => other?,
-        };
-        folder_ok(&found).map_err(refused)?;
-    }
     let mut options = std::fs::OpenOptions::new();
     // Never truncated on open: emptied below, once the file is known to be the right one.
     options.create(true).share_mode(FILE_SHARE_READ_WRITE).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
@@ -239,6 +239,45 @@ pub fn open_guarded(base: &Path, path: &Path, how: Open) -> io::Result<File> {
         Open::Append => options.append(true),
         Open::Overwrite => options.write(true),
     };
+    let file = open_checked(base, &parts, true, &options)?;
+    if how == Open::Overwrite {
+        file.set_len(0)?;
+    }
+    Ok(file)
+}
+
+/// The elevated read: `path` under `base` opened through [`open_guarded`]'s checks (every part
+/// below `base` a plain folder, none created; a plain single-name file whose final path is the one
+/// asked for), then read whole. A missing file or folder is `NotFound`.
+pub fn read_guarded(base: &Path, path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let parts = parts_below(base, path).map_err(refused)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).share_mode(FILE_SHARE_READ_WRITE).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut file = open_checked(base, &parts, false, &options)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Opens `base` + `parts` with `options` (which must not follow a link: OPEN_REPARSE_POINT) once
+/// every folder on the way is a plain folder (`create`: made one level at a time when missing),
+/// and returns the file only if it is a plain single-name file whose final path is `base`'s final
+/// path plus `parts`.
+fn open_checked(base: &Path, parts: &[&std::ffi::OsStr], create: bool, options: &std::fs::OpenOptions) -> io::Result<File> {
+    let (file_name, folders) = parts.split_last().expect("parts_below returns at least one");
+    let mut dir = base.to_path_buf();
+    for name in folders {
+        dir.push(name);
+        let found = match inspect(&dir) {
+            Err(e) if create && e.kind() == io::ErrorKind::NotFound => {
+                std::fs::create_dir(&dir).or_else(|e| if e.kind() == io::ErrorKind::AlreadyExists { Ok(()) } else { Err(e) })?;
+                inspect(&dir)?
+            }
+            other => other?,
+        };
+        folder_ok(&found).map_err(refused)?;
+    }
     let file = options.open(dir.join(file_name))?;
     file_ok(&entry(&file)?).map_err(refused)?;
     let base_handle = std::fs::OpenOptions::new()
@@ -250,9 +289,6 @@ pub fn open_guarded(base: &Path, path: &Path, how: Open) -> io::Result<File> {
     let got = final_path(&file)?;
     if !same_final_path(&expected, &got) {
         return Err(refused(format!("{} opened as {}", expected.display(), got.display())));
-    }
-    if how == Open::Overwrite {
-        file.set_len(0)?;
     }
     Ok(file)
 }
@@ -387,5 +423,30 @@ mod tests {
         let w = Writes::Guarded(Some(base.0.clone()));
         assert!(w.write_all(&marker, b"x").is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep me", "not emptied either");
+        assert!(w.read(&marker).is_err(), "nor read through the other name");
+    }
+
+    /// The elevated read takes a plain file, reports a missing one (or a missing folder, which it
+    /// doesn't create) as NotFound, and refuses one reached through a junction or outside
+    /// LocalAppData.
+    #[test]
+    fn a_guarded_read_reads_only_a_plain_file() {
+        let base = Scratch::new("read");
+        let w = Writes::Guarded(Some(base.0.clone()));
+        let settings = base.0.join("Negotium").join("settings.json");
+        assert_eq!(w.read(&settings).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(!base.0.join("Negotium").exists(), "a read creates no folder");
+        w.write_all(&settings, b"{}").unwrap();
+        assert_eq!(w.read(&settings).unwrap(), b"{}");
+        assert!(w.read(&std::env::temp_dir().join("negotium-outside.txt")).is_err());
+
+        let base = Scratch::new("read-junction");
+        let elsewhere = Scratch::new("read-target");
+        std::fs::write(elsewhere.0.join("settings.json"), b"secret").unwrap();
+        junction(&base.0.join("Negotium"), &elsewhere.0);
+        let w = Writes::Guarded(Some(base.0.clone()));
+        let err = w.read(&base.0.join("Negotium").join("settings.json")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(Writes::Plain.read(&base.0.join("Negotium").join("settings.json")).unwrap(), b"secret");
     }
 }
