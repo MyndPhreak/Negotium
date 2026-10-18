@@ -93,6 +93,14 @@ fn make_tray(
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Elevated, DLLs loaded by name come only from System32 and the install dir, never the
+    // current directory or a user-controlled PATH folder (platform::restrict_dll_search); first,
+    // before anything can load a library.
+    if platform::restricts_dll_search(negotium::appdata::elevated())
+        && let Err(e) = platform::restrict_dll_search()
+    {
+        warn(&format!("couldn't restrict the DLL search path: {e}"));
+    }
     // Elevated (admin mode), nothing the user's environment says may choose what this process
     // loads or writes: every SLINT_* (the backend, font files) and NEGOTIUM_* variable is removed
     // first, before Slint or any other thread can read one (platform::untrusted_env).

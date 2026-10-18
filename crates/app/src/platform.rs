@@ -757,15 +757,38 @@ pub fn terminate_self() -> ! {
 /// them: every `SLINT_*` (Slint's: `SLINT_BACKEND` picks the renderer code, `SLINT_DEFAULT_FONT`
 /// and `SLINT_FONT_PATH` name font files it parses, the rest change its behaviour) and every
 /// `NEGOTIUM_*` (Negotium's own: `NEGOTIUM_FRAME_STATS` names a file written at exit,
-/// `NEGOTIUM_SIMULATE_STALL` hangs the UI thread). Windows compares names case-insensitively.
+/// `NEGOTIUM_SIMULATE_STALL` hangs the UI thread) and every `GLUTIN_*` (glutin's
+/// `GLUTIN_WGL_OPENGL_DLL` names the OpenGL DLL it loads, a full path included). Windows compares
+/// names case-insensitively.
 pub fn untrusted_env(names: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     names
         .into_iter()
         .filter(|name| {
             let upper = name.to_string_lossy().to_ascii_uppercase();
-            upper.starts_with("SLINT_") || upper.starts_with("NEGOTIUM_")
+            upper.starts_with("SLINT_") || upper.starts_with("NEGOTIUM_") || upper.starts_with("GLUTIN_")
         })
         .collect()
+}
+
+/// Whether this process limits where DLLs loaded by name come from ([`restrict_dll_search`]):
+/// only elevated. There the default search (the current directory and every `PATH` folder, which
+/// the user's own `HKCU\Environment` can extend) would let a same-user process plant a DLL a
+/// library loads by name (glutin tries `libEGL.dll` before OpenGL) in the elevated copy.
+/// Unelevated nothing crosses a privilege boundary, so a user's own GL/EGL setup keeps working.
+pub fn restricts_dll_search(elevated: bool) -> bool {
+    elevated
+}
+
+/// Makes every later load by name search only System32 and this exe's folder (the install dir,
+/// admin-only): `SetDefaultDllDirectories`. GPU drivers still load (opengl32.dll is in System32,
+/// it loads the ICD by the full path the driver registered); `libEGL.dll` (ANGLE) is no longer
+/// found, so glutin falls back to WGL. Call it first in `main`, before anything loads a library.
+pub fn restrict_dll_search() -> windows::core::Result<()> {
+    use windows::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
+    // SAFETY: plain process-wide setting with valid flags; it only narrows later searches.
+    unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR) }
 }
 
 /// Removes an environment variable from this process, so processes it starts don't inherit it.
@@ -782,9 +805,49 @@ mod tests {
 
     #[test]
     fn elevated_every_slint_and_negotium_variable_is_dropped() {
-        let names = ["SLINT_BACKEND", "slint_default_font", "SLINT_FONT_PATH", "NEGOTIUM_FRAME_STATS", "Negotium_Simulate_Stall", "PATH", "LOCALAPPDATA", "SLINTX", "TEMP"];
+        let names = ["SLINT_BACKEND", "slint_default_font", "SLINT_FONT_PATH", "NEGOTIUM_FRAME_STATS", "Negotium_Simulate_Stall", "GLUTIN_WGL_OPENGL_DLL", "PATH", "LOCALAPPDATA", "SLINTX", "TEMP", "GLUTINX"];
         let dropped = untrusted_env(names.iter().map(std::ffi::OsString::from));
-        assert_eq!(dropped, ["SLINT_BACKEND", "slint_default_font", "SLINT_FONT_PATH", "NEGOTIUM_FRAME_STATS", "Negotium_Simulate_Stall"]);
+        assert_eq!(dropped, ["SLINT_BACKEND", "slint_default_font", "SLINT_FONT_PATH", "NEGOTIUM_FRAME_STATS", "Negotium_Simulate_Stall", "GLUTIN_WGL_OPENGL_DLL"]);
+    }
+
+    #[test]
+    fn only_an_elevated_copy_restricts_the_dll_search() {
+        assert!(restricts_dll_search(true));
+        assert!(!restricts_dll_search(false));
+    }
+
+    /// In a child process (the setting is process-wide): after restricting, a DLL by name is found
+    /// in System32 but not in a `PATH` folder, and opengl32.dll (the WGL path) still loads.
+    #[test]
+    fn a_restricted_search_skips_path_but_finds_system32() {
+        const CHILD: &str = "NEGOTIUM_TEST_DLL_SEARCH_CHILD";
+        use windows::Win32::System::LibraryLoader::LoadLibraryW;
+        if let Some(dir) = std::env::var_os(CHILD) {
+            restrict_dll_search().unwrap();
+            // SAFETY: loads by name; the modules stay loaded until the child exits.
+            let gl = unsafe { LoadLibraryW(w!("opengl32.dll")) };
+            // SAFETY: as above; the planted file is not a real DLL, so a load from PATH errors.
+            let planted = unsafe { LoadLibraryW(w!("negotium-planted-test.dll")) };
+            println!("GL={} PLANTED={} DIR={}", gl.is_ok(), planted.is_ok(), Path::new(&dir).display());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("negotium-dll-search-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Copied from System32 under a new name: loadable if the search reached this folder.
+        let src = PathBuf::from(negotium_collector::windows_dir()).join("System32").join("version.dll");
+        std::fs::copy(&src, dir.join("negotium-planted-test.dll")).unwrap();
+        let mut path = std::ffi::OsString::from(&dir);
+        path.push(";");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "platform::tests::a_restricted_search_skips_path_but_finds_system32", "--nocapture", "--test-threads=1"])
+            .env(CHILD, &dir)
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("GL=true PLANTED=false"), "{text}");
     }
 
     /// A running instance is shown; a hung one never is (the launch goes on as if none ran); none
