@@ -104,7 +104,9 @@ fn same_path(a: &Path, b: &Path) -> bool {
     !b.as_os_str().is_empty() && norm(a) == norm(b)
 }
 
-/// An exec action's stored path as a file path: unquoted, `%VARIABLES%` expanded.
+/// An exec action's stored path as a file path: unquoted, `%VARIABLES%` expanded from the process
+/// environment (elevated, Negotium has set SystemRoot, windir, SystemDrive and PATH from Windows
+/// itself first: the app's `platform::trusted_env`).
 fn action_path(stored: &str) -> PathBuf {
     let path = stored.trim().trim_matches('"');
     PathBuf::from(crate::startup::expand_env(path, |name| std::env::var(name).ok()))

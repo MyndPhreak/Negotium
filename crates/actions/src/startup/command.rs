@@ -39,6 +39,9 @@ pub fn exe_from_command(command: &str, system_root: &str) -> Option<String> {
     } else {
         first
     };
+    // The process environment: elevated, Negotium has already set SystemRoot, windir,
+    // SystemDrive and PATH from Windows itself (the app's `platform::trusted_env`), so a planted
+    // `%SystemRoot%` doesn't steer this.
     let path = expand_env(raw.trim(), |name| std::env::var(name).ok());
     if path.is_empty() {
         None

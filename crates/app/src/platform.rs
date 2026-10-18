@@ -791,6 +791,35 @@ pub fn restrict_dll_search() -> windows::core::Result<()> {
     unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR) }
 }
 
+/// The variables an elevated Negotium sets from Windows itself (`windows`: the Windows directory,
+/// `negotium_collector::windows_dir`), replacing whatever the user's `HKCU\Environment` planted:
+/// `SystemRoot` and `windir` (which this process, the children it starts and COM expand in
+/// `%SystemRoot%` paths), `SystemDrive` (its drive) and `PATH` (System32, Windows, Wbem and
+/// Windows PowerShell only), so nothing elevated finds a program or file in a folder the user
+/// picked, one hop later included.
+pub fn trusted_env(windows: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
+    let sys32 = windows.join("System32");
+    let path = [sys32.clone(), windows.to_path_buf(), sys32.join("Wbem"), sys32.join("WindowsPowerShell").join("v1.0")]
+        .iter()
+        .map(|p| p.as_os_str().to_owned())
+        .collect::<Vec<_>>()
+        .join(std::ffi::OsStr::new(";"));
+    let mut vars = vec![("SystemRoot", windows.as_os_str().to_owned()), ("windir", windows.as_os_str().to_owned())];
+    if let Some(std::path::Component::Prefix(drive)) = windows.components().next() {
+        vars.push(("SystemDrive", drive.as_os_str().to_owned()));
+    }
+    vars.push(("PATH", path));
+    vars
+}
+
+/// Sets an environment variable in this process (and so for the processes it starts). Call it
+/// only while no other thread can be reading the environment (early in `main`).
+pub fn set_env_var(name: &str, value: &std::ffi::OsStr) {
+    // SAFETY: called from `main` before any other thread is started; on Windows the environment
+    // block is also guarded by the process environment lock.
+    unsafe { std::env::set_var(name, value) };
+}
+
 /// Removes an environment variable from this process, so processes it starts don't inherit it.
 /// Call it only while no other thread can be reading the environment (early in `main`).
 pub fn remove_env_var(name: &str) {
@@ -817,16 +846,21 @@ mod tests {
     }
 
     /// In a child process (the setting is process-wide): after restricting, a DLL by name is found
-    /// in System32 but not in a `PATH` folder, and opengl32.dll (the WGL path) still loads.
+    /// in System32 but not in a `PATH` folder, and opengl32.dll (the WGL path) still loads. The
+    /// control child, unrestricted, does load the planted DLL from `PATH`: the test can tell.
     #[test]
     fn a_restricted_search_skips_path_but_finds_system32() {
         const CHILD: &str = "NEGOTIUM_TEST_DLL_SEARCH_CHILD";
+        const RESTRICT: &str = "NEGOTIUM_TEST_DLL_SEARCH_RESTRICT";
         use windows::Win32::System::LibraryLoader::LoadLibraryW;
         if let Some(dir) = std::env::var_os(CHILD) {
-            restrict_dll_search().unwrap();
+            if std::env::var_os(RESTRICT).is_some() {
+                restrict_dll_search().unwrap();
+            }
             // SAFETY: loads by name; the modules stay loaded until the child exits.
             let gl = unsafe { LoadLibraryW(w!("opengl32.dll")) };
-            // SAFETY: as above; the planted file is not a real DLL, so a load from PATH errors.
+            // SAFETY: as above; the planted file is a renamed copy of System32's version.dll, a
+            // real DLL, so it loads whenever the search reaches the PATH folder holding it.
             let planted = unsafe { LoadLibraryW(w!("negotium-planted-test.dll")) };
             println!("GL={} PLANTED={} DIR={}", gl.is_ok(), planted.is_ok(), Path::new(&dir).display());
             return;
@@ -839,15 +873,77 @@ mod tests {
         let mut path = std::ffi::OsString::from(&dir);
         path.push(";");
         path.push(std::env::var_os("PATH").unwrap_or_default());
+        let run = |restrict: bool| {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", "platform::tests::a_restricted_search_skips_path_but_finds_system32", "--nocapture", "--test-threads=1"])
+                .env(CHILD, &dir)
+                .env("PATH", &path)
+                .env_remove(RESTRICT);
+            if restrict {
+                cmd.env(RESTRICT, "1");
+            }
+            String::from_utf8_lossy(&cmd.output().unwrap().stdout).into_owned()
+        };
+        let (control, restricted) = (run(false), run(true));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(control.contains("GL=true PLANTED=true"), "control: the planted DLL is found on PATH: {control}");
+        assert!(restricted.contains("GL=true PLANTED=false"), "{restricted}");
+    }
+
+    #[test]
+    fn the_trusted_environment_comes_from_the_windows_directory() {
+        let vars = trusted_env(Path::new(r"D:\Win"));
+        let get = |n: &str| vars.iter().find(|(k, _)| *k == n).map(|(_, v)| v.to_string_lossy().into_owned());
+        assert_eq!(get("SystemRoot").as_deref(), Some(r"D:\Win"));
+        assert_eq!(get("windir").as_deref(), Some(r"D:\Win"));
+        assert_eq!(get("SystemDrive").as_deref(), Some("D:"));
+        assert_eq!(
+            get("PATH").as_deref(),
+            Some(r"D:\Win\System32;D:\Win;D:\Win\System32\Wbem;D:\Win\System32\WindowsPowerShell\v1.0")
+        );
+    }
+
+    /// In a child process started with a planted SystemRoot, windir, SystemDrive and PATH: after
+    /// the reset `main` does when elevated, this process's environment, and so what its children
+    /// inherit and what `%SystemRoot%` expands to, holds the real values.
+    #[test]
+    fn the_reset_replaces_planted_variables() {
+        const CHILD: &str = "NEGOTIUM_TEST_TRUSTED_ENV_CHILD";
+        let real = PathBuf::from(negotium_collector::windows_dir());
+        if std::env::var_os(CHILD).is_some() {
+            for (name, value) in trusted_env(&real) {
+                set_env_var(name, &value);
+            }
+            let expanded = negotium_actions::startup::expand_env(r"%SystemRoot%\explorer.exe", |n| std::env::var(n).ok());
+            for name in ["SystemRoot", "windir", "SystemDrive", "PATH"] {
+                println!("{name}={}", std::env::var(name).unwrap_or_default());
+            }
+            println!("EXPANDED={expanded}");
+            return;
+        }
+        let fake = std::env::temp_dir().join("negotium-planted-root");
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "platform::tests::a_restricted_search_skips_path_but_finds_system32", "--nocapture", "--test-threads=1"])
-            .env(CHILD, &dir)
-            .env("PATH", &path)
+            .args(["--exact", "platform::tests::the_reset_replaces_planted_variables", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("SystemRoot", &fake)
+            .env("windir", &fake)
+            .env("SystemDrive", "Z:")
+            .env("PATH", &fake)
             .output()
             .unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("GL=true PLANTED=false"), "{text}");
+        let get = |n: &str| {
+            text.lines()
+                .find_map(|l| l.split_once(&format!("{n}=")).map(|(_, v)| v))
+                .unwrap_or_else(|| panic!("no {n} line in {text}"))
+                .to_string()
+        };
+        let want: Vec<_> = trusted_env(&real).into_iter().map(|(k, v)| (k, v.to_string_lossy().into_owned())).collect();
+        for (name, value) in &want {
+            assert_eq!(&get(name), value, "{name}");
+        }
+        assert_eq!(PathBuf::from(get("EXPANDED")), real.join("explorer.exe"));
+        assert!(!text.contains(&*fake.to_string_lossy()), "{text}");
     }
 
     /// A running instance is shown; a hung one never is (the launch goes on as if none ran); none

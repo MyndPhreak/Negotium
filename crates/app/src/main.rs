@@ -103,10 +103,17 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // Elevated (admin mode), nothing the user's environment says may choose what this process
     // loads or writes: every SLINT_* (the backend, font files) and NEGOTIUM_* variable is removed
-    // first, before Slint or any other thread can read one (platform::untrusted_env).
+    // first, before Slint or any other thread can read one (platform::untrusted_env). SystemRoot,
+    // windir, SystemDrive and PATH are set from Windows itself (platform::trusted_env), so neither
+    // this process, nor a child it starts (Explorer, Task Manager, msiexec, an elevated re-run),
+    // nor COM expanding `%SystemRoot%` paths reaches a folder the user planted.
     if negotium::appdata::elevated() {
         for name in platform::untrusted_env(std::env::vars_os().map(|(name, _)| name)) {
             platform::remove_env_var(&name.to_string_lossy());
+        }
+        let windows = std::path::PathBuf::from(negotium_collector::windows_dir());
+        for (name, value) in platform::trusted_env(&windows) {
+            platform::set_env_var(name, &value);
         }
     }
     // Negotium's own arguments: started by the Ctrl+Shift+Esc redirect, Windows appends Task
