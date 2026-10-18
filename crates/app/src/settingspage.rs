@@ -81,13 +81,21 @@ pub struct Integration {
     /// The user is in Administrators (`integration::is_admin_member`): admin mode is offered
     /// only then.
     pub admin_member: bool,
-    /// This user's admin task (`integrate::Machine::task_state`); read only for the installed
-    /// copy of an administrator.
-    pub task_state: Box<dyn Fn() -> TaskState>,
+    /// Reads this user's admin task (`integrate::Machine::task_state`, a Task Scheduler call)
+    /// off the UI thread and hands the state back on it ([`read_task_in_background`] in the
+    /// app); asked only for the installed copy of an administrator.
+    pub read_task: Box<dyn Fn(TaskRead)>,
+    /// This instance runs elevated.
+    pub elevated: bool,
+    /// Starts the admin task with `--restarted` and the current page and, once it has started,
+    /// quits this instance (`main.rs`): admin mode just turned on in a non-elevated copy, which
+    /// the elevated copy replaces.
+    pub restart_elevated: Box<dyn Fn()>,
     /// Runs the exe with the arguments elevated (one UAC prompt; the `isize` is the window's
     /// HWND, 0 for none) off the UI thread; the outcome comes back on the UI thread
-    /// ([`elevate_in_background`] in the app).
-    pub elevate: Box<dyn Fn(PathBuf, Vec<String>, isize, ElevatedDone)>,
+    /// ([`elevate_in_background`] in the app). A command still running when the wait runs out
+    /// is watched, and the [`LateExit`] runs on the UI thread once it exits.
+    pub elevate: Box<Elevate>,
     /// Starts Windows' own Task Manager when no redirect of ours is in the way
     /// ([`start_task_manager_in_background`] in the app).
     pub start_task_manager: Box<dyn Fn()>,
@@ -98,6 +106,13 @@ pub struct Integration {
 
 /// An elevated command's outcome, delivered on the UI thread.
 pub type ElevatedDone = Box<dyn FnOnce(Result<(), ActionError>)>;
+/// [`Integration::elevate`]: the exe, its arguments, the prompt's owner, then the outcome and
+/// a late exit.
+pub type Elevate = dyn Fn(PathBuf, Vec<String>, isize, ElevatedDone, LateExit);
+/// An elevated command that outlasted its wait has exited (on the UI thread).
+pub type LateExit = Box<dyn FnOnce()>;
+/// The admin task's state, delivered on the UI thread.
+pub type TaskRead = Box<dyn FnOnce(TaskState)>;
 
 /// The Ctrl+Shift+Esc and admin mode switches and "Open Windows Task Manager", wired. One
 /// elevated command at a time: a click while a UAC prompt (or its command) is still open does
@@ -108,6 +123,11 @@ pub struct Integrations {
     settings: Rc<RefCell<Settings>>,
     weak: slint::Weak<MainWindow>,
     busy: Cell<bool>,
+    /// The admin mode row's last known state, shown while Task Scheduler is read again.
+    admin_state: Cell<i32>,
+    /// A task read is running; `read_again`: another was asked for meanwhile.
+    reading: Cell<bool>,
+    read_again: Cell<bool>,
 }
 
 /// The admin mode row's state (`settings-admin-mode-state`): 0 off, 1 on, 2 needs repair, 3 not
@@ -140,13 +160,16 @@ impl Integrations {
         (self.io.redirect)().is_some_and(|exe| names(&exe)).then(|| installed.to_path_buf())
     }
 
-    /// Reads the machine again and shows it: the switches, and the tray menu.
-    pub fn show(&self) {
+    /// Reads the machine again and shows it: the switches, and the tray menu. The redirect is
+    /// one registry value, read here; the admin task is read off the UI thread, and the row
+    /// shows its last known state until the answer comes.
+    pub fn show(self: &Rc<Self>) {
         let ours = self.redirect_is_ours();
         let admin = if !self.io.admin_member {
             admin_mode_state(false, &TaskState::Missing)
         } else if self.io.install.installed {
-            admin_mode_state(true, &(self.io.task_state)())
+            self.read_task();
+            self.admin_state.get()
         } else {
             0
         };
@@ -157,9 +180,29 @@ impl Integrations {
         (self.io.redirect_shown)(ours);
     }
 
+    /// Asks for the admin task's state; one read at a time, and one more if asked meanwhile (the
+    /// answer must reflect the latest change).
+    fn read_task(self: &Rc<Self>) {
+        if self.reading.replace(true) {
+            self.read_again.set(true);
+            return;
+        }
+        let this = self.clone();
+        (self.io.read_task)(Box::new(move |task| {
+            this.reading.set(false);
+            this.admin_state.set(admin_mode_state(true, &task));
+            if let Some(ui) = this.weak.upgrade() {
+                ui.set_settings_admin_mode_state(this.admin_state.get());
+            }
+            if this.read_again.take() {
+                this.read_task();
+            }
+        }));
+    }
+
     /// A page was shown: the Settings page reads the machine again, so a change made outside
     /// Negotium (or by the installer) shows.
-    pub fn page_shown(&self, page: Page) {
+    pub fn page_shown(self: &Rc<Self>, page: Page) {
         if page == Page::Settings {
             self.show();
         }
@@ -174,12 +217,14 @@ impl Integrations {
             return;
         }
         let action = if on { Action::HotkeyOn } else { Action::HotkeyOff };
-        self.run_elevated(action, |e| e.message("Open on Ctrl+Shift+Esc", false));
+        self.run_elevated(action, |e| e.message("Open on Ctrl+Shift+Esc", false), |_| {});
     }
 
     /// The admin mode switch asked for `on`: the elevated admin-on (with `--logon` while Start
     /// with Windows is on) or admin-off. Turning it on also repairs a broken task (it is
-    /// recreated). As for the hotkey, the switch then shows what Task Scheduler says.
+    /// recreated). As for the hotkey, the switch then shows what Task Scheduler says. Turned on
+    /// in a non-elevated copy, the task then starts the elevated copy, which replaces this one:
+    /// otherwise every later launch would just show this non-elevated window.
     pub fn toggle_admin_mode(self: &Rc<Self>, on: bool) {
         if !self.io.install.installed || !self.io.admin_member {
             self.show();
@@ -190,7 +235,12 @@ impl Integrations {
         } else {
             Action::AdminOff
         };
-        self.run_elevated(action, |e| e.message("Admin mode", false));
+        let restart = on && !self.io.elevated;
+        self.run_elevated(action, |e| e.message("Admin mode", false), move |this| {
+            if restart {
+                (this.io.restart_elevated)();
+            }
+        });
     }
 
     /// "Open Windows Task Manager" (Settings, the tray): with a Negotium redirect set, the
@@ -198,25 +248,39 @@ impl Integrations {
     /// starts.
     pub fn open_task_manager(self: &Rc<Self>) {
         if let Some(exe) = self.redirect_lifter() {
-            self.run_elevated_as(exe, Action::OpenTaskManager, |e| {
+            let failure = |e: &ActionError| {
                 format!("Couldn't open Windows Task Manager: {}.", e.to_string().trim_end_matches('.'))
-            });
+            };
+            self.run_elevated_as(exe, Action::OpenTaskManager, failure, |_| {});
         } else if !self.busy.get() {
             (self.io.start_task_manager)();
         }
     }
 
-    fn run_elevated(self: &Rc<Self>, action: Action, failure: fn(&ActionError) -> String) {
-        self.run_elevated_as(self.io.install.exe.clone(), action, failure);
+    fn run_elevated(
+        self: &Rc<Self>,
+        action: Action,
+        failure: fn(&ActionError) -> String,
+        succeeded: impl FnOnce(&Rc<Self>) + 'static,
+    ) {
+        self.run_elevated_as(self.io.install.exe.clone(), action, failure, succeeded);
     }
 
-    fn run_elevated_as(self: &Rc<Self>, exe: PathBuf, action: Action, failure: fn(&ActionError) -> String) {
+    /// Runs `action` as `exe`, elevated; the switches show the machine again once it returns
+    /// (and again if it outlasted the wait, once it exits), and `succeeded` follows a success.
+    fn run_elevated_as(
+        self: &Rc<Self>,
+        exe: PathBuf,
+        action: Action,
+        failure: fn(&ActionError) -> String,
+        succeeded: impl FnOnce(&Rc<Self>) + 'static,
+    ) {
         if self.busy.replace(true) {
             self.show();
             return;
         }
         let owner = self.weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
-        let this = self.clone();
+        let (this, late) = (self.clone(), self.clone());
         (self.io.elevate)(
             exe,
             action.to_args(),
@@ -224,43 +288,112 @@ impl Integrations {
             Box::new(move |result| {
                 this.busy.set(false);
                 this.show();
-                if let Err(e) = result
-                    && !matches!(e, ActionError::Cancelled)
-                    && let Some(ui) = this.weak.upgrade()
-                {
-                    ui.set_toast(failure(&e).into());
+                match result {
+                    Ok(()) => succeeded(&this),
+                    Err(ActionError::Cancelled) => {}
+                    Err(e) => {
+                        if let Some(ui) = this.weak.upgrade() {
+                            ui.set_toast(failure(&e).into());
+                        }
+                    }
                 }
             }),
+            Box::new(move || late.show()),
         );
     }
 }
 
+/// A handler waiting for its value, type-erased ([`pending`]).
+type Waiting = Box<dyn FnOnce(Box<dyn std::any::Any>)>;
+
 thread_local! {
-    /// The elevated command's outcome handler, waiting on the UI thread (`Integrations` runs one
-    /// command at a time).
-    static ELEVATED_DONE: RefCell<Option<ElevatedDone>> = const { RefCell::new(None) };
+    /// Handlers waiting on the UI thread for work done elsewhere ([`Pending`]), by id.
+    static WAITING: RefCell<std::collections::HashMap<u64, Waiting>> =
+        RefCell::new(std::collections::HashMap::new());
+    static NEXT_WAITING: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A handler waiting on the UI thread for a `T` from another thread. [`Pending::deliver`] (from
+/// any thread) runs it on the UI thread; dropped undelivered, it is forgotten there.
+pub struct Pending<T> {
+    id: Option<u64>,
+    _value: std::marker::PhantomData<fn(T)>,
+}
+
+/// Registers `done` (on the UI thread) for a value another thread will deliver.
+pub fn pending<T: Send + 'static>(done: impl FnOnce(T) + 'static) -> Pending<T> {
+    let id = NEXT_WAITING.with(|n| n.replace(n.get() + 1));
+    let handler: Box<dyn FnOnce(Box<dyn std::any::Any>)> = Box::new(move |value| {
+        if let Ok(value) = value.downcast::<T>() {
+            done(*value);
+        }
+    });
+    WAITING.with(|w| w.borrow_mut().insert(id, handler));
+    Pending { id: Some(id), _value: std::marker::PhantomData }
+}
+
+impl<T: Send + 'static> Pending<T> {
+    /// Hands `value` to the handler on the UI thread. Fails only once the event loop is gone
+    /// (quitting): nothing left to show.
+    pub fn deliver(mut self, value: T) {
+        if let Some(id) = self.id.take() {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(done) = WAITING.with(|w| w.borrow_mut().remove(&id)) {
+                    done(Box::new(value));
+                }
+            });
+        }
+    }
+}
+
+impl<T> Drop for Pending<T> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let _ = slint::invoke_from_event_loop(move || {
+                WAITING.with(|w| w.borrow_mut().remove(&id));
+            });
+        }
+    }
+}
+
+/// `work` on its own thread, then `done` with its result on the UI thread. Called on the UI
+/// thread.
+pub fn in_background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(T) + 'static) {
+    let done = pending(done);
+    std::thread::spawn(move || done.deliver(work()));
+}
+
+/// The app's [`Integration::read_task`]: user `sid`'s task (no SID: missing) from Task
+/// Scheduler on its own thread, so a slow or hung Schedule service never holds up the window.
+pub fn read_task_in_background(sid: Option<String>, done: TaskRead) {
+    in_background(
+        move || match sid {
+            Some(sid) => crate::integrate::Machine::task_state(&crate::integrate::System::new(), &sid),
+            None => TaskState::Missing,
+        },
+        done,
+    );
 }
 
 /// The app's [`Integration::elevate`]: `negotium_actions::run_elevated_exe` on its own thread (it
-/// waits for the UAC prompt and, bounded, the command), then `done` on the UI thread. A failure
-/// is logged (the command logs its own reason). Called on the UI thread; never by tests.
-pub fn elevate_in_background(exe: PathBuf, args: Vec<String>, owner: isize, done: ElevatedDone) {
-    ELEVATED_DONE.with(|d| *d.borrow_mut() = Some(done));
-    std::thread::spawn(move || {
-        let command = args.join(" ");
-        let result = negotium_actions::run_elevated_exe(&exe, &command, owner);
-        if let Err(e) = &result
-            && !matches!(e, ActionError::Cancelled)
-        {
-            crate::log::Log::new(crate::log::Log::default_path()).warn(&format!("{command} failed: {e}"));
-        }
-        // Fails only once the event loop is gone (quitting): nothing left to show.
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(done) = ELEVATED_DONE.with(|d| d.borrow_mut().take()) {
-                done(result);
+/// waits for the UAC prompt and, bounded, the command), then `done` on the UI thread; `late` too
+/// if the command outlasts the wait and exits later. A failure is logged (the command logs its
+/// own reason). Called on the UI thread; never by tests.
+pub fn elevate_in_background(exe: PathBuf, args: Vec<String>, owner: isize, done: ElevatedDone, late: LateExit) {
+    let late = pending(move |()| late());
+    in_background(
+        move || {
+            let command = args.join(" ");
+            let result = negotium_actions::run_elevated_exe(&exe, &command, owner, move || late.deliver(()));
+            if let Err(e) = &result
+                && !matches!(e, ActionError::Cancelled)
+            {
+                crate::log::Log::new(crate::log::Log::default_path()).warn(&format!("{command} failed: {e}"));
             }
-        });
-    });
+            result
+        },
+        done,
+    );
 }
 
 /// The app's [`Integration::start_task_manager`]: Windows' own Task Manager through the shell (so
@@ -293,6 +426,9 @@ impl SettingsWiring {
             settings: self.settings.clone(),
             weak: ui.as_weak(),
             busy: Cell::new(false),
+            admin_state: Cell::new(0),
+            reading: Cell::new(false),
+            read_again: Cell::new(false),
         });
         integrations.show();
         {

@@ -117,6 +117,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let (from_task, args) = negotium::integrate::task_args(args);
     let has_arg = |flag: &str| args.iter().any(|a| a == flag);
     let install = negotium::install::current();
+    let user_sid = negotium_actions::integration::current_user_sid().ok();
     let elevated = negotium_actions::is_elevated();
     let admin_member = negotium_actions::integration::is_admin_member();
     // Admin mode: a non-elevated launch of the installed copy starts the user's task (an elevated
@@ -126,7 +127,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // copy the task starts (`--from-task`) never starts it again.
     {
         let machine = negotium::integrate::System::new();
-        let user_sid = || negotium_actions::integration::current_user_sid().ok();
+        let user_sid = || user_sid.clone();
         let activate_running = || platform::activate_existing_instance(Duration::ZERO);
         let ctx = negotium::integrate::LaunchCtx {
             installed: install.installed,
@@ -134,6 +135,13 @@ fn main() -> Result<(), slint::PlatformError> {
             admin_member,
             from_task,
             user_sid: &user_sid,
+            // Bounded: a hung Schedule service must not hold up the launch.
+            read_task: &|sid| {
+                let sid = sid.to_string();
+                negotium::integrate::bounded(negotium::integrate::TASK_READ_BOUND, move || {
+                    negotium::integrate::Machine::task_state(&negotium::integrate::System::new(), &sid)
+                })
+            },
             machine: &machine,
             activate_running: &activate_running,
             allow_foreground: &platform::allow_any_foreground,
@@ -297,11 +305,33 @@ fn main() -> Result<(), slint::PlatformError> {
             // wired, each time it is shown and after each elevated command.
             redirect: Box::new(|| negotium::integrate::Machine::ifeo(&negotium::integrate::System::new())),
             admin_member,
-            task_state: Box::new({
-                let sid = negotium_actions::integration::current_user_sid().ok();
-                move || match &sid {
-                    Some(sid) => negotium::integrate::Machine::task_state(&negotium::integrate::System::new(), sid),
-                    None => negotium::integrate::TaskState::Missing,
+            read_task: Box::new({
+                let sid = user_sid.clone();
+                move |done| negotium::settingspage::read_task_in_background(sid.clone(), done)
+            }),
+            elevated,
+            // Admin mode just turned on here, non-elevated: the task starts the elevated copy
+            // (which waits for this one's lock, `--restarted`) on the page shown, then this one
+            // quits. If the task won't start, this copy carries on and says so.
+            restart_elevated: Box::new({
+                let (controls, weak, saver, sid) = (controls.clone(), ui.as_weak(), saver.clone(), user_sid.clone());
+                move || {
+                    let Some(sid) = sid.clone() else { return };
+                    let args: Vec<String> =
+                        negotium::controls::restart_args(controls.page()).split(' ').map(str::to_string).collect();
+                    let (controls, weak, saver) = (controls.clone(), weak.clone(), saver.clone());
+                    negotium::settingspage::in_background(
+                        move || negotium::integrate::Machine::start_task(&negotium::integrate::System::new(), &sid, &args),
+                        move |started| match started {
+                            Ok(()) => begin_exit(&controls, &weak, &saver),
+                            Err(e) => {
+                                warn(&format!("admin mode: the task couldn't be started after turning it on: {e}"));
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_toast("Admin mode is on. It takes effect when Negotium restarts.".into());
+                                }
+                            }
+                        },
+                    );
                 }
             }),
             elevate: Box::new(negotium::settingspage::elevate_in_background),

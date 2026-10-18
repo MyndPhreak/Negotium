@@ -340,7 +340,7 @@ export component SettingsPage inherits VerticalLayout {
             }
             admin-row := SettingRow {
                 title: "Admin mode";
-                description: "Start with admin rights without a prompt. Anything that can start Negotium then gets it with admin rights.";
+                description: "Start with admin rights without a prompt. Anything that can start Negotium can then open it with admin rights, without a prompt.";
                 note: !root.installed ? "Install Negotium to use this"
                     : root.admin-mode-state == 2 ? "Needs repair. Turn on again to repair"
                     : root.admin-mode-state == 3 ? "Needs an administrator account" : "";

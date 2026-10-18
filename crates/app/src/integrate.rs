@@ -13,6 +13,7 @@ use negotium_actions::integration::{self, Roots, TaskStatus};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The flag that selects the integration command instead of the window.
 pub const FLAG: &str = "--integrate";
@@ -399,6 +400,20 @@ pub fn task_args(args: Vec<OsString>) -> (bool, Vec<OsString>) {
     }
 }
 
+/// How long a launch waits for Task Scheduler to report the admin task before it gives up and
+/// runs non-elevated: a hung Schedule service must not hold up Ctrl+Shift+Esc.
+pub const TASK_READ_BOUND: Duration = Duration::from_millis(750);
+
+/// `read` on its own thread, waited for at most `bound`: `None` if it hasn't finished by then
+/// (the thread is left to finish on its own; its result is dropped).
+pub fn bounded<T: Send + 'static>(bound: Duration, read: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read());
+    });
+    rx.recv_timeout(bound).ok()
+}
+
 /// What [`hand_off`] decides with.
 pub struct LaunchCtx<'a> {
     /// This is the installed copy (`install::current`).
@@ -410,31 +425,47 @@ pub struct LaunchCtx<'a> {
     pub from_task: bool,
     /// This user's SID, read only when the task is consulted.
     pub user_sid: &'a dyn Fn() -> Option<String>,
+    /// User `sid`'s task state, or `None` when Task Scheduler didn't answer in time
+    /// ([`bounded`] by [`TASK_READ_BOUND`] in the app).
+    pub read_task: &'a dyn Fn(&str) -> Option<TaskState>,
+    /// Starts the task (`Machine::start_task`).
     pub machine: &'a dyn Machine,
     /// Shows an instance that is already running, if there is one (true: there was, and it was
-    /// asked to show itself), so the task isn't started for nothing.
+    /// asked to show itself), so neither Task Scheduler is asked nor the task started.
     pub activate_running: &'a dyn Fn() -> bool,
     /// Lets the copy the task starts take the foreground (this launch has it).
     pub allow_foreground: &'a dyn Fn(),
 }
 
 /// Admin mode at launch, before the window and the single-instance lock (so the elevated copy
-/// the task starts can claim it): with [`Launch::HandOff`], an instance already running is shown,
-/// or the task is started with `args` (the page and the rest of this command line). Returns true
-/// when this process should exit. A task that is disabled or broken, or one that can't be
-/// started, is logged once and the launch runs here, non-elevated.
+/// the task starts can claim it): an instance already running is shown, or, with
+/// [`Launch::HandOff`], the task is started with `args` (the page and the rest of this command
+/// line). Returns true when this process should exit. A task that is disabled, broken or slow to
+/// read, or one that can't be started, is logged once and the launch runs here, non-elevated.
 pub fn hand_off(ctx: &LaunchCtx, args: &[String], log: &mut dyn FnMut(&str)) -> bool {
     if ctx.from_task && !ctx.elevated {
         log("admin mode: the task started Negotium without admin rights; carrying on without them");
         return false;
     }
+    // `launch_plan`'s conditions apart from the task, checked first: the task is read (a Task
+    // Scheduler call) only when nothing else rules the hand-off out.
     if !ctx.installed || ctx.elevated || !ctx.admin_member || ctx.from_task {
         return false;
     }
     let Some(sid) = (ctx.user_sid)().filter(|sid| integration::is_account_sid(sid)) else {
         return false;
     };
-    let task = ctx.machine.task_state(&sid);
+    // The normal launch would show a running instance too; doing it first spares the read.
+    if (ctx.activate_running)() {
+        return true;
+    }
+    let Some(task) = (ctx.read_task)(&sid) else {
+        log(&format!(
+            "admin mode: Task Scheduler didn't report the task within {} ms; starting without admin rights",
+            TASK_READ_BOUND.as_millis()
+        ));
+        return false;
+    };
     match launch_plan(ctx.installed, ctx.elevated, ctx.admin_member, task.clone(), ctx.from_task) {
         Launch::RunHere => {
             match task {
@@ -447,10 +478,10 @@ pub fn hand_off(ctx: &LaunchCtx, args: &[String], log: &mut dyn FnMut(&str)) -> 
             false
         }
         Launch::HandOff => {
-            if (ctx.activate_running)() {
-                return true;
-            }
             (ctx.allow_foreground)();
+            // Task Scheduler accepting the start is all this sees: if the elevated copy then
+            // fails to run (its exe gone, a bad action), the task's last result records it and
+            // the next launch reads the task as Broken and runs here, so this never loops.
             match ctx.machine.start_task(&sid, args) {
                 Ok(()) => true,
                 Err(e) => {
@@ -1074,6 +1105,9 @@ mod tests {
         running: bool,
         activated: std::cell::Cell<usize>,
         allowed: std::cell::Cell<usize>,
+        /// How often the task was read, and a reader in place of the fake's.
+        reads: std::cell::Cell<usize>,
+        read: Option<Box<dyn Fn() -> Option<TaskState>>>,
         log: RefCell<Vec<String>>,
     }
 
@@ -1083,7 +1117,15 @@ mod tests {
         }
 
         fn with(fake: Fake) -> Launcher {
-            Launcher { fake, running: false, activated: Default::default(), allowed: Default::default(), log: Default::default() }
+            Launcher {
+                fake,
+                running: false,
+                activated: Default::default(),
+                allowed: Default::default(),
+                reads: Default::default(),
+                read: None,
+                log: Default::default(),
+            }
         }
 
         fn launch(&self, elevated: bool, from_task: bool, args: &[&str]) -> bool {
@@ -1093,12 +1135,20 @@ mod tests {
                 self.running
             };
             let allow = || self.allowed.set(self.allowed.get() + 1);
+            let read = |sid: &str| {
+                self.reads.set(self.reads.get() + 1);
+                match &self.read {
+                    Some(read) => read(),
+                    None => Some(self.fake.task_state(sid)),
+                }
+            };
             let ctx = LaunchCtx {
                 installed: true,
                 elevated,
                 admin_member: true,
                 from_task,
                 user_sid: &sid,
+                read_task: &read,
                 machine: &self.fake,
                 activate_running: &activate,
                 allow_foreground: &allow,
@@ -1115,11 +1165,12 @@ mod tests {
         assert_eq!(*l.fake.started.borrow(), [vec!["--page=startup".to_string()]]);
         assert_eq!(l.allowed.get(), 1, "the elevated copy may take the foreground");
         assert!(l.log.borrow().is_empty());
-        // An instance already running is shown instead; nothing is started.
+        // An instance already running is shown instead; Task Scheduler isn't even asked.
         let l = Launcher { running: true, ..Launcher::new(TaskState::Ready) };
         assert!(l.launch(false, false, &[]));
         assert!(l.fake.started.borrow().is_empty());
         assert_eq!(l.activated.get(), 1);
+        assert_eq!(l.reads.get(), 0);
         // Elevated already (the copy the task started, a restart as admin): run here.
         let l = Launcher::new(TaskState::Ready);
         assert!(!l.launch(true, false, &[]));
@@ -1160,6 +1211,29 @@ mod tests {
         }
     }
 
+    /// A hung Schedule service: the launch runs here once the bound has passed, logged once.
+    #[test]
+    fn a_slow_task_read_runs_here_within_the_bound() {
+        let l = Launcher {
+            read: Some(Box::new(|| {
+                bounded(Duration::from_millis(50), || {
+                    std::thread::sleep(Duration::from_secs(5));
+                    TaskState::Ready
+                })
+            })),
+            ..Launcher::new(TaskState::Ready)
+        };
+        let started = std::time::Instant::now();
+        assert!(!l.launch(false, false, &[]));
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(l.fake.started.borrow().is_empty());
+        assert_eq!(l.log.borrow().len(), 1, "{:?}", l.log.borrow());
+        assert!(l.log.borrow()[0].contains("didn't report the task"), "{:?}", l.log.borrow());
+        // A quick read comes back.
+        assert_eq!(bounded(Duration::from_secs(5), || 7), Some(7));
+        assert_eq!(TASK_READ_BOUND, Duration::from_millis(750));
+    }
+
     #[test]
     fn only_the_installed_copy_of_an_administrator_hands_off() {
         let fake = Fake { state: Some(TaskState::Ready), ..Fake::default() };
@@ -1168,6 +1242,7 @@ mod tests {
         let unknown = || None;
         let running = || true;
         let nothing = || {};
+        let read = |_: &str| -> Option<TaskState> { panic!("not read") };
         type Sid<'a> = &'a dyn Fn() -> Option<String>;
         let cases: [(bool, bool, Sid); 4] =
             [(false, true, &sid), (true, false, &sid), (true, true, &service), (true, true, &unknown)];
@@ -1178,6 +1253,7 @@ mod tests {
                 admin_member,
                 from_task: false,
                 user_sid,
+                read_task: &read,
                 machine: &fake,
                 activate_running: &running,
                 allow_foreground: &nothing,

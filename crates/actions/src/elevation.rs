@@ -8,7 +8,7 @@ use windows::Win32::Security::{
     SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
 };
 use windows::Win32::Foundation::{WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, WaitForSingleObject};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject};
 use std::time::Duration;
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -94,38 +94,67 @@ pub const ELEVATED_WAIT: Duration = Duration::from_secs(30);
 /// [`restart_as_admin`].
 pub fn run_elevated(args: &str, owner: isize) -> Result<(), ActionError> {
     let exe = std::env::current_exe().map_err(|e| ActionError::Other(e.to_string()))?;
-    run_elevated_exe(&exe, args, owner)
+    run_elevated_exe(&exe, args, owner, || {})
 }
 
-/// [`run_elevated`] for another executable (a development build asks the installed copy).
-pub fn run_elevated_exe(exe: &Path, args: &str, owner: isize) -> Result<(), ActionError> {
+/// The elevated process, watched from another thread after the wait has run out.
+struct Watched(OwnedHandle);
+
+// SAFETY: a process handle may be waited on and closed from any thread; only the watcher thread
+// uses it once it is moved there.
+unsafe impl Send for Watched {}
+
+/// [`run_elevated`] for `exe` (a development build asks the installed copy). A command still
+/// running after [`ELEVATED_WAIT`] is watched on its own thread, and `exited_late` runs there once
+/// it exits (the caller reads the machine again).
+pub fn run_elevated_exe(
+    exe: &Path,
+    args: &str,
+    owner: isize,
+    exited_late: impl FnOnce() + Send + 'static,
+) -> Result<(), ActionError> {
     let process = shell_execute(w!("runas"), exe.as_os_str(), args, owner, true)?
         .ok_or_else(|| ActionError::Other("the elevated process could not be watched".into()))?;
+    let handle = process.0;
     finish(
-        // SAFETY: `process` is the live process handle ShellExecuteEx returned; waiting has no
-        // other effect.
-        |timeout| unsafe { WaitForSingleObject(process.0, timeout.as_millis() as u32) },
+        // SAFETY: `handle` is the live process handle ShellExecuteEx returned (owned by
+        // `process`, alive for this call); waiting has no other effect.
+        |timeout| unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) },
         || {
             let mut code = 0u32;
-            // SAFETY: `process` has exited (waited); `code` is writable.
-            unsafe { GetExitCodeProcess(process.0, &mut code) }.map_err(|e| ActionError::from_win(&e))?;
+            // SAFETY: the process has exited (waited); `code` is writable.
+            unsafe { GetExitCodeProcess(handle, &mut code) }.map_err(|e| ActionError::from_win(&e))?;
             Ok(code)
+        },
+        move || {
+            let watched = Watched(process);
+            std::thread::spawn(move || {
+                // SAFETY: the handle is owned by `watched` (closed when it drops, after the
+                // wait); waiting has no other effect.
+                let _ = unsafe { WaitForSingleObject(watched.0.0, INFINITE) };
+                drop(watched);
+                exited_late();
+            });
         },
     )
 }
 
 /// An elevated command's outcome: `wait` for it (at most [`ELEVATED_WAIT`]), then its exit code.
-/// A process still running then is left to finish on its own.
+/// A process still running then is handed to `still_running` (to be watched until it exits).
 fn finish(
     wait: impl FnOnce(Duration) -> WAIT_EVENT,
     exit_code: impl FnOnce() -> Result<u32, ActionError>,
+    still_running: impl FnOnce(),
 ) -> Result<(), ActionError> {
     match wait(ELEVATED_WAIT) {
         WAIT_OBJECT_0 => exit_status(exit_code()?),
-        WAIT_TIMEOUT => Err(ActionError::Other(format!(
-            "the elevated command didn't finish within {} seconds",
-            ELEVATED_WAIT.as_secs()
-        ))),
+        WAIT_TIMEOUT => {
+            still_running();
+            Err(ActionError::Other(format!(
+                "the elevated command didn't finish within {} seconds",
+                ELEVATED_WAIT.as_secs()
+            )))
+        }
         _ => Err(ActionError::Other("waiting for the elevated process failed".into())),
     }
 }
@@ -177,17 +206,21 @@ mod tests {
     }
 
     #[test]
-    fn a_hung_elevated_command_ends_the_wait() {
+    fn a_hung_elevated_command_ends_the_wait_and_is_watched() {
+        let watched = std::cell::Cell::new(false);
         let timed_out = finish(
             |timeout| {
                 assert_eq!(timeout, Duration::from_secs(30));
                 WAIT_TIMEOUT
             },
             || panic!("no exit code while it still runs"),
+            || watched.set(true),
         );
         assert_eq!(timed_out, Err(ActionError::Other("the elevated command didn't finish within 30 seconds".into())));
-        assert_eq!(finish(|_| WAIT_OBJECT_0, || Ok(0)), Ok(()));
-        assert!(finish(|_| WAIT_OBJECT_0, || Ok(3)).is_err());
-        assert!(finish(|_| windows::Win32::Foundation::WAIT_FAILED, || Ok(0)).is_err());
+        assert!(watched.get(), "it is watched until it exits");
+        let never = || panic!("only a running command is watched");
+        assert_eq!(finish(|_| WAIT_OBJECT_0, || Ok(0), never), Ok(()));
+        assert!(finish(|_| WAIT_OBJECT_0, || Ok(3), never).is_err());
+        assert!(finish(|_| windows::Win32::Foundation::WAIT_FAILED, || Ok(0), never).is_err());
     }
 }

@@ -2256,8 +2256,13 @@ struct FakeIntegration {
     redirect: Rc<RefCell<Option<std::path::PathBuf>>>,
     /// The user's admin task (none set: missing).
     task: Rc<RefCell<Option<negotium::integrate::TaskState>>>,
-    /// How often the task was read.
+    /// How often the task was asked for, and the reads not yet answered (`read`).
     task_reads: Rc<std::cell::Cell<usize>>,
+    reads: Rc<RefCell<Vec<negotium::settingspage::TaskRead>>>,
+    /// The late-exit handler of each elevated command.
+    late: Rc<RefCell<Vec<negotium::settingspage::LateExit>>>,
+    /// How often the elevated copy was asked to replace this one.
+    restarts: Rc<std::cell::Cell<usize>>,
     asked: Rc<RefCell<Vec<String>>>,
     /// The exe each elevated command ran as.
     exes: Rc<RefCell<Vec<std::path::PathBuf>>>,
@@ -2272,6 +2277,10 @@ impl FakeIntegration {
     }
 
     fn for_account(installed: bool, admin_member: bool) -> (negotium::settingspage::Integration, FakeIntegration) {
+        FakeIntegration::with(installed, admin_member, false)
+    }
+
+    fn with(installed: bool, admin_member: bool, elevated: bool) -> (negotium::settingspage::Integration, FakeIntegration) {
         let fake = FakeIntegration::default();
         let f = fake.clone();
         let exe = if installed { INSTALLED_EXE } else { DEV_EXE };
@@ -2283,18 +2292,25 @@ impl FakeIntegration {
                 move || r.borrow().clone()
             }),
             admin_member,
-            task_state: Box::new({
-                let (task, reads) = (f.task.clone(), f.task_reads.clone());
-                move || {
-                    reads.set(reads.get() + 1);
-                    task.borrow().clone().unwrap_or(negotium::integrate::TaskState::Missing)
+            // Like the app's: the answer comes later (`read`), never during the call.
+            read_task: Box::new({
+                let (count, reads) = (f.task_reads.clone(), f.reads.clone());
+                move |done| {
+                    count.set(count.get() + 1);
+                    reads.borrow_mut().push(done);
                 }
             }),
+            elevated,
+            restart_elevated: Box::new({
+                let restarts = f.restarts.clone();
+                move || restarts.set(restarts.get() + 1)
+            }),
             elevate: Box::new({
-                let (asked, exes, pending) = (f.asked.clone(), f.exes.clone(), f.pending.clone());
-                move |exe, args, _owner, done| {
+                let (asked, exes, pending, late) = (f.asked.clone(), f.exes.clone(), f.pending.clone(), f.late.clone());
+                move |exe, args, _owner, done, exited_late| {
                     asked.borrow_mut().push(args.join(" "));
                     exes.borrow_mut().push(exe);
+                    late.borrow_mut().push(exited_late);
                     assert!(pending.borrow_mut().replace(done).is_none(), "one elevated command at a time");
                 }
             }),
@@ -2322,6 +2338,19 @@ impl FakeIntegration {
 
     fn set_task(&self, state: negotium::integrate::TaskState) {
         *self.task.borrow_mut() = Some(state);
+    }
+
+    /// Task Scheduler answers every read asked for (and any asked meanwhile).
+    fn read(&self) {
+        loop {
+            let reads: Vec<_> = self.reads.borrow_mut().drain(..).collect();
+            if reads.is_empty() {
+                return;
+            }
+            for done in reads {
+                done(self.task.borrow().clone().unwrap_or(negotium::integrate::TaskState::Missing));
+            }
+        }
     }
 }
 
@@ -2457,11 +2486,13 @@ fn the_admin_mode_switch_shows_the_task_and_runs_the_elevated_command() {
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
     ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    fake.read();
     let checked = || switch(&ui, ADMIN).accessible_checked();
     assert_eq!(checked(), Some(false), "no task");
     assert_eq!(switch(&ui, ADMIN).accessible_enabled(), Some(true));
     fake.set_task(TaskState::Ready);
     integrations.show();
+    fake.read();
     assert_eq!(checked(), Some(true));
     assert_eq!(ui.get_settings_admin_mode_state(), 1);
 
@@ -2473,12 +2504,14 @@ fn the_admin_mode_switch_shows_the_task_and_runs_the_elevated_command() {
     assert_eq!(fake.asked.borrow().len(), 1, "one elevated command at a time");
     fake.set_task(TaskState::Missing);
     fake.finish(Ok(()));
+    fake.read();
     assert_eq!(checked(), Some(false));
 
     // On; a declined prompt snaps it back, quietly.
     switch(&ui, ADMIN).invoke_accessible_default_action();
     assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate admin-on"));
     fake.finish(Err(negotium_actions::ActionError::Cancelled));
+    fake.read();
     assert_eq!(checked(), Some(false));
     assert_eq!(ui.get_toast(), "");
 
@@ -2487,8 +2520,86 @@ fn the_admin_mode_switch_shows_the_task_and_runs_the_elevated_command() {
     switch(&ui, ADMIN).invoke_accessible_default_action();
     assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate admin-on --logon"));
     fake.finish(Err(negotium_actions::ActionError::Other("the elevated command failed (exit code 1)".into())));
+    fake.read();
     assert_eq!(checked(), Some(false));
     assert_eq!(ui.get_toast(), "Couldn't change Admin mode: the elevated command failed (exit code 1).");
+    assert_eq!(fake.restarts.get(), 0, "nothing turned on: this copy stays");
+}
+
+/// Task Scheduler is never asked on the UI thread: the row shows the last known state until the
+/// (background) answer comes, and a read asked for meanwhile is made once the first returns.
+#[test]
+fn the_admin_task_is_read_off_the_ui_thread() {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("admin-async");
+    let (integration, fake) = FakeIntegration::new(true);
+    fake.set_task(TaskState::Ready);
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    assert_eq!(fake.task_reads.get(), 1, "asked for when wired");
+    assert_eq!(ui.get_settings_admin_mode_state(), 0, "not known yet");
+    integrations.show();
+    integrations.page_shown(Page::Settings);
+    assert_eq!(fake.task_reads.get(), 1, "one read at a time");
+    fake.read();
+    assert_eq!(ui.get_settings_admin_mode_state(), 1);
+    assert_eq!(fake.task_reads.get(), 2, "and one more for the shows meanwhile");
+    // Shown again: the last known state stays until the new answer.
+    fake.set_task(TaskState::Disabled);
+    integrations.show();
+    assert_eq!(ui.get_settings_admin_mode_state(), 1);
+    fake.read();
+    assert_eq!(ui.get_settings_admin_mode_state(), 2);
+
+    // The app's reader runs the read on another thread.
+    let (tx, rx) = std::sync::mpsc::channel();
+    negotium::settingspage::in_background(move || tx.send(std::thread::current().id()).unwrap(), |_| {});
+    let worker = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert_ne!(worker, std::thread::current().id());
+}
+
+/// Turned on in a running non-elevated copy, admin mode hands over to the elevated copy at once
+/// (otherwise every later launch would just show this window); an elevated copy stays.
+#[test]
+fn turning_admin_mode_on_hands_over_to_the_elevated_copy() {
+    hands_over_when_turned_on(false);
+}
+
+#[test]
+fn an_elevated_copy_keeps_running_when_admin_mode_turns_on() {
+    hands_over_when_turned_on(true);
+}
+
+fn hands_over_when_turned_on(elevated: bool) {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("admin-restart");
+    let (integration, fake) = FakeIntegration::with(true, true, elevated);
+    let (_ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    fake.read();
+    integrations.toggle_admin_mode(true);
+    fake.set_task(TaskState::Ready);
+    fake.finish(Ok(()));
+    assert_eq!(fake.restarts.get(), usize::from(!elevated), "elevated: {elevated}");
+    // Off never restarts.
+    integrations.toggle_admin_mode(false);
+    fake.finish(Ok(()));
+    assert_eq!(fake.restarts.get(), usize::from(!elevated), "elevated: {elevated}");
+}
+
+/// A command that outlasts the wait reports a failure, and the switches are read again when it
+/// finally exits.
+#[test]
+fn a_command_that_outlasts_the_wait_refreshes_the_switches_when_it_exits() {
+    let dir = Scratch::new("hotkey-late");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    integrations.toggle_hotkey(true);
+    fake.finish(Err(negotium_actions::ActionError::Other("the elevated command didn't finish within 30 seconds".into())));
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
+    fake.set_redirect(Some(INSTALLED_EXE));
+    let late = fake.late.borrow_mut().pop().expect("a late-exit handler");
+    late();
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(true));
 }
 
 #[test]
@@ -2502,6 +2613,7 @@ fn admin_mode_needs_repair_when_the_task_is_broken() {
     for state in [TaskState::Broken("its exe is gone".into()), TaskState::Disabled] {
         fake.set_task(state.clone());
         integrations.show();
+        fake.read();
         assert_eq!(ui.get_settings_admin_mode_state(), 2, "{state:?}");
         let s = switch(&ui, ADMIN);
         assert_eq!(s.accessible_checked(), Some(false), "{state:?}");
@@ -2514,12 +2626,13 @@ fn admin_mode_needs_repair_when_the_task_is_broken() {
     assert_eq!(*fake.asked.borrow(), ["--integrate admin-on"]);
     fake.set_task(TaskState::Ready);
     fake.finish(Ok(()));
+    fake.read();
     assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(true));
     assert_eq!(switch(&ui, ADMIN).accessible_description().as_deref(), Some(ADMIN_DESCRIPTION));
 }
 
 const ADMIN_DESCRIPTION: &str =
-    "Start with admin rights without a prompt. Anything that can start Negotium then gets it with admin rights.";
+    "Start with admin rights without a prompt. Anything that can start Negotium can then open it with admin rights, without a prompt.";
 
 #[test]
 fn a_standard_account_cannot_turn_on_admin_mode() {
@@ -2564,14 +2677,18 @@ fn the_switches_read_the_machine_when_the_settings_page_is_shown() {
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
     ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    fake.read();
     assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
     assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(false));
     // Changed outside Negotium (the installer, another copy).
     fake.set_redirect(Some(INSTALLED_EXE));
     fake.set_task(TaskState::Ready);
     integrations.page_shown(Page::Overview);
+    fake.read();
     assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false), "only the Settings page reads it");
+    assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(false));
     integrations.page_shown(Page::Settings);
+    fake.read();
     assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(true));
     assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(true));
     assert_eq!(fake.tray.borrow().last(), Some(&true));
