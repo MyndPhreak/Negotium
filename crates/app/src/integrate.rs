@@ -39,6 +39,9 @@ pub const ELEVATE: &str = "--elevate";
 /// Asks every running instance of this exe in this session to exit, and waits for them
 /// (the installer, before it replaces or removes the files).
 pub const EXIT_RUNNING: &str = "--exit-running";
+/// The installer's last step after an update: start the new version as the user would get it
+/// ([`relaunch`]).
+pub const RELAUNCH: &str = "--relaunch";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -437,11 +440,16 @@ pub fn elevate_request(args: &[OsString]) -> Option<&[OsString]> {
 /// of this exe started with the same command (`elevate`: `negotium_actions::run_elevated`, one UAC
 /// prompt, waited for), so the task is this user's, as when Settings turns it on. Returns the exit
 /// code: 0 done, 1 declined or failed (logged), 2 not a valid command line (nothing runs).
+///
+/// When that fails (or the prompt is declined), the [`fallback`] action, if any, runs here
+/// without elevation (`run_fallback`, [`command_unelevated`] in the app): admin mode with Start
+/// with Windows still leaves Start with Windows on, in its Run value form.
 pub fn elevated_command(
     args: &[OsString],
     elevated: bool,
     run_here: &dyn Fn(&[OsString]) -> i32,
     elevate: &dyn Fn(&str) -> Result<(), ActionError>,
+    run_fallback: &dyn Fn(Action) -> i32,
     log: &mut dyn FnMut(&str),
 ) -> i32 {
     let Some(action) = Action::parse(args) else {
@@ -449,20 +457,112 @@ pub fn elevated_command(
         log(&format!("integrate: not a valid command line: {ELEVATE} {}", shown.join(" ")));
         return 2;
     };
-    if elevated {
-        return run_here(args);
+    let code = if elevated {
+        run_here(args)
+    } else {
+        match elevate(&action.to_args().join(" ")) {
+            Ok(()) => 0,
+            Err(ActionError::Cancelled) => {
+                log(&format!("integrate {}: the UAC prompt was declined; nothing changed", action.name()));
+                1
+            }
+            Err(e) => {
+                log(&format!("integrate {} (elevated): {e}", action.name()));
+                1
+            }
+        }
+    };
+    if code != 0
+        && let Some(instead) = fallback(action)
+    {
+        log(&format!("integrate {}: not set up; {} instead", action.name(), instead.name()));
+        run_fallback(instead);
     }
-    match elevate(&action.to_args().join(" ")) {
+    code
+}
+
+/// What still runs, without elevation, when elevated `action` didn't: admin mode with its logon
+/// trigger (Start with Windows) falls back to Start with Windows alone. Nothing else does.
+pub fn fallback(action: Action) -> Option<Action> {
+    match action {
+        Action::AdminOn { logon: true } => Some(Action::StartupOn),
+        _ => None,
+    }
+}
+
+/// [`command`] for an already parsed `action` run without elevation ([`run_unelevated`]): the
+/// exit code, a failure logged.
+pub fn command_unelevated(action: Action, machine: &dyn Machine, user_sid: String, log: &mut dyn FnMut(&str)) -> i32 {
+    let ctx = Ctx {
+        exe: std::env::current_exe().unwrap_or_default(),
+        program_files: install::program_files(),
+        user_sid,
+        machine,
+        start_task_manager: &start_task_manager,
+    };
+    match run_unelevated(action, &ctx) {
         Ok(()) => 0,
-        Err(ActionError::Cancelled) => {
-            log(&format!("integrate {}: the UAC prompt was declined; nothing changed", action.name()));
-            1
-        }
         Err(e) => {
-            log(&format!("integrate {} (elevated): {e}", action.name()));
+            log(&format!("integrate {}: {e}", action.name()));
             1
         }
     }
+}
+
+/// The installer's last step after an update (`--relaunch`, run elevated by msiexec): start the
+/// new version the way the user would get it, then exit (no window here). With admin mode (the
+/// user is an administrator and their task is ready) that is the task's elevated copy;
+/// otherwise, or when the task won't start, a plain start through the desktop shell
+/// (`shell_start`: `platform::shell_start` in the app, not elevated whatever this process is), so
+/// an update never leaves Negotium elevated that wouldn't otherwise be. Refused (1) unless this is
+/// the installed exe; 1 too when nothing could be started.
+pub fn relaunch(
+    ctx: &Ctx,
+    admin_member: bool,
+    shell_start: &dyn Fn(&Path) -> Result<(), IntegrateError>,
+    log: &mut dyn FnMut(&str),
+) -> i32 {
+    let exe = match installed_exe(ctx) {
+        Ok(exe) => exe,
+        Err(e) => {
+            log(&format!("relaunch: {e}"));
+            return 1;
+        }
+    };
+    if admin_member
+        && let Ok(sid) = user_sid(ctx)
+        && ctx.machine.task_state(&sid) == TaskState::Ready
+    {
+        match ctx.machine.start_task(&sid, &[SHOW.to_string()]) {
+            Ok(()) => return 0,
+            Err(e) => log(&format!("relaunch: the admin task couldn't be started ({e}); starting without admin rights")),
+        }
+    }
+    match shell_start(&exe) {
+        Ok(()) => 0,
+        Err(e) => {
+            log(&format!("relaunch: {e}"));
+            1
+        }
+    }
+}
+
+/// [`relaunch`] for `main`: as the running exe, against the real machine and shell.
+pub fn relaunch_command(
+    machine: &dyn Machine,
+    user_sid: String,
+    admin_member: bool,
+    shell_start: &dyn Fn(&Path) -> Result<(), IntegrateError>,
+    log: &mut dyn FnMut(&str),
+) -> i32 {
+    let ctx = Ctx {
+        exe: std::env::current_exe().unwrap_or_default(),
+        program_files: install::program_files(),
+        user_sid,
+        machine,
+        start_task_manager: &start_task_manager,
+    };
+    relaunch(&ctx, admin_member, shell_start, log)
 }
 
 /// Windows' own Task Manager, `<System32>\Taskmgr.exe` ([`system32`]).
@@ -1558,6 +1658,10 @@ egotium.exe"), ..root.ctx(&fake) };
         assert!(fake.tasks.borrow().contains_key(&sid));
     }
 
+    fn no_fallback(action: Action) -> i32 {
+        panic!("no fallback for {action:?}")
+    }
+
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
@@ -1579,7 +1683,7 @@ egotium.exe"), ..root.ctx(&fake) };
         };
         let elevate = |_: &str| -> Result<(), ActionError> { panic!("no prompt when already elevated") };
         let args = os(&[FLAG, "admin-on", LOGON]);
-        assert_eq!(elevated_command(&args, true, &run_here, &elevate, &mut |_| {}), 0);
+        assert_eq!(elevated_command(&args, true, &run_here, &elevate, &no_fallback, &mut |_| {}), 0);
         assert_eq!(*ran.borrow(), [args]);
     }
 
@@ -1597,11 +1701,11 @@ egotium.exe"), ..root.ctx(&fake) };
             answers.borrow_mut().pop().unwrap()
         };
         let mut lines = Vec::new();
-        let args = os(&[FLAG, "admin-on", LOGON]);
-        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 0);
-        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 1, "declined");
-        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 1, "failed");
-        assert_eq!(*asked.borrow(), ["--integrate admin-on --logon"; 3]);
+        let args = os(&[FLAG, "admin-on"]);
+        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &no_fallback, &mut |l| lines.push(l.to_string())), 0);
+        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &no_fallback, &mut |l| lines.push(l.to_string())), 1, "declined");
+        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &no_fallback, &mut |l| lines.push(l.to_string())), 1, "failed");
+        assert_eq!(*asked.borrow(), ["--integrate admin-on"; 3]);
         assert_eq!(lines.len(), 2, "{lines:?}");
     }
 
@@ -1612,8 +1716,84 @@ egotium.exe"), ..root.ctx(&fake) };
         for elevated in [false, true] {
             let mut lines = Vec::new();
             let args = os(&[FLAG, "admin-on", "--bogus"]);
-            assert_eq!(elevated_command(&args, elevated, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 2);
+            assert_eq!(elevated_command(&args, elevated, &run_here, &elevate, &no_fallback, &mut |l| lines.push(l.to_string())), 2);
             assert_eq!(lines.len(), 1);
         }
+    }
+
+    #[test]
+    fn start_with_windows_survives_a_declined_or_failed_admin_mode() {
+        assert_eq!(fallback(Action::AdminOn { logon: true }), Some(Action::StartupOn));
+        for action in Action::ALL.into_iter().filter(|a| *a != Action::AdminOn { logon: true }) {
+            assert_eq!(fallback(action), None, "{action:?}");
+        }
+        let args = os(&[FLAG, "admin-on", LOGON]);
+        let fell_back = RefCell::new(Vec::new());
+        let fallback_here = |action: Action| {
+            fell_back.borrow_mut().push(action);
+            0
+        };
+        let declined = |_: &str| Err(ActionError::Cancelled);
+        let failed_here = |_: &[OsString]| 1;
+        let never_here = |_: &[OsString]| -> i32 { panic!("not elevated") };
+        let never_asked = |_: &str| -> Result<(), ActionError> { panic!("already elevated") };
+        assert_eq!(elevated_command(&args, false, &never_here, &declined, &fallback_here, &mut |_| {}), 1, "admin mode is still off");
+        assert_eq!(elevated_command(&args, true, &failed_here, &never_asked, &fallback_here, &mut |_| {}), 1);
+        assert_eq!(*fell_back.borrow(), [Action::StartupOn; 2]);
+        // Admin mode set up: no fallback.
+        let ok = |_: &str| Ok(());
+        assert_eq!(elevated_command(&args, false, &never_here, &ok, &no_fallback, &mut |_| {}), 0);
+    }
+
+    fn shell_never(_: &Path) -> Result<(), IntegrateError> {
+        panic!("the task starts it")
+    }
+
+    #[test]
+    fn a_relaunch_starts_the_ready_admin_task() {
+        let root = Root::new();
+        let fake = Fake::default();
+        fake.tasks.borrow_mut().insert(SID.into(), (root.exe(), false));
+        assert_eq!(relaunch(&root.ctx(&fake), true, &shell_never, &mut |_| {}), 0);
+        assert_eq!(*fake.started.borrow(), [vec![SHOW.to_string()]]);
+    }
+
+    #[test]
+    fn a_relaunch_otherwise_starts_through_the_shell_unelevated() {
+        let root = Root::new();
+        let shell = |exe: &Path| -> Result<(), IntegrateError> {
+            assert_eq!(exe, root.exe());
+            Ok(())
+        };
+        // No task, a task that isn't ready, or not an administrator.
+        let none = Fake::default();
+        let disabled = Fake { state: Some(TaskState::Disabled), ..Fake::default() };
+        let member_ready = Fake::default();
+        member_ready.tasks.borrow_mut().insert(SID.into(), (root.exe(), false));
+        for (fake, admin_member) in [(&none, true), (&disabled, true), (&member_ready, false)] {
+            assert_eq!(relaunch(&root.ctx(fake), admin_member, &shell, &mut |_| {}), 0);
+            assert!(fake.started.borrow().is_empty());
+        }
+        // The task won't start: the shell start instead.
+        let failing = Fake { failing: vec!["start_task"], ..Fake::default() };
+        failing.tasks.borrow_mut().insert(SID.into(), (root.exe(), false));
+        let mut lines = Vec::new();
+        assert_eq!(relaunch(&root.ctx(&failing), true, &shell, &mut |l| lines.push(l.to_string())), 0);
+        assert_eq!(lines.len(), 1);
+        // The shell failing is a failure (nothing is started elevated instead).
+        let broken = |_: &Path| Err(IntegrateError::Failed("no shell".into()));
+        assert_eq!(relaunch(&root.ctx(&none), true, &broken, &mut |_| {}), 1);
+    }
+
+    #[test]
+    fn only_the_installed_copy_relaunches() {
+        let root = Root::new();
+        let fake = Fake::default();
+        let ctx = Ctx { exe: PathBuf::from(r"C:\dev	arget
+elease
+egotium.exe"), ..root.ctx(&fake) };
+        let shell = |_: &Path| -> Result<(), IntegrateError> { panic!("refused first") };
+        assert_eq!(relaunch(&ctx, true, &shell, &mut |_| {}), 1);
+        assert!(fake.calls.borrow().is_empty() && fake.started.borrow().is_empty());
     }
 }

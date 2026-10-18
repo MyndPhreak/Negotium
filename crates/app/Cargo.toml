@@ -26,8 +26,10 @@ windows = { workspace = true, features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -43,5 +45,7 @@ roxmltree = "0.21.1"
 # The installer: `cargo wix -p negotium` (WiX Toolset v3) builds wix/main.wxs. ICE43 and ICE57
 # assume a per-user install (a Start menu shortcut in a component keyed by a file in Program
 # Files); this one is per-machine (ALLUSERS=1), where the Start menu folder is the machine's.
+# Re-check both suppressions whenever main.wxs's components change: they hide every ICE43/ICE57
+# finding, not only this one.
 [package.metadata.wix]
 linker-args = ["-sice:ICE43", "-sice:ICE57"]

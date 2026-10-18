@@ -21,16 +21,26 @@
                               InstallFinalize as the installing user, through Negotium's own
                               elevation (one more UAC prompt unless setup already runs elevated):
                               the task is named by the user's SID, which a LocalSystem step doesn't
-                              have and an impersonated deferred step can't create elevated.
+                              have and an impersonated deferred step can't create elevated. If
+                              that is declined or fails, Start with Windows still goes on (its Run
+                              value form).
+    A first install that fails or is cancelled after the deferred steps rolls them back
+    (hotkey-off, startup-off) before its files go, so the redirect never names a removed exe.
   - A real uninstall only (not the old version's removal during an upgrade): uninstall as
     LocalSystem (the redirect and every user's task folder), then startup-off as the uninstalling
     user (their Run value). Other users' Run values are left naming the removed exe; Windows skips
-    a Run entry whose file is missing.
+    a Run entry whose file is missing. An uninstall that fails or is cancelled after these steps
+    puts back the redirect and the uninstalling user's Run value if AppSearch found Negotium's
+    there, once the files are back. It can't put back admin-mode tasks (which users had one, and
+    with which trigger, isn't known to the installer): admin mode is then off, and Settings turns
+    it on again.
   - Before anything is replaced or removed, the installed exe asks every running copy of itself in
     this session to exit (-exit-running) and waits for them, so no file is in use. REBOOT is
     suppressed: a copy that still holds the file (another user's session) gets it replaced at the
     next restart, without a prompt.
-  - The in-app updater passes NEGOTIUM_RELAUNCH=1: the new version starts when the install is done.
+  - The in-app updater passes NEGOTIUM_RELAUNCH=1: when the install is done, the new exe's
+    -relaunch starts the new version as the user gets it (the admin task when it is ready,
+    otherwise an unelevated start through Explorer), never elevated because msiexec is.
     A first install offers "Launch Negotium" on the last page.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -59,6 +69,7 @@
     <!-- Inside the install transaction: a failed upgrade rolls back to the old version. -->
     <MajorUpgrade
         Schedule="afterInstallInitialize"
+        AllowSameVersionUpgrades="yes"
         DowngradeErrorMessage="A newer version of [ProductName] is already installed. Setup will now exit."/>
 
     <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" DiskPrompt="CD-ROM #1"/>
@@ -116,11 +127,26 @@
       </DirectorySearch>
     </Property>
 
+    <!-- What a cancelled uninstall puts back: the redirect and this user's Run value, when they
+         are Negotium's. -->
+    <Property Id="NEGOTIUM_IFEO">
+      <RegistrySearch Id="NegotiumIfeoSearch" Root="HKLM" Win64="yes" Type="raw" Name="Debugger"
+          Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe"/>
+    </Property>
+    <Property Id="NEGOTIUM_RUN">
+      <RegistrySearch Id="NegotiumRunSearch" Root="HKCU" Type="raw" Name="Negotium"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"/>
+    </Property>
+
     <!-- Every step that runs Negotium ignores its exit code: a failed integration step must not
          roll back the install (or block an uninstall). Negotium logs why; Settings shows the
          state and can turn each one on again. -->
     <CustomAction Id="CloseRunningNegotium" Property="NEGOTIUM_INSTALLED_EXE" ExeCommand="--exit-running"
         Execute="immediate" Return="ignore"/>
+    <CustomAction Id="RollbackHotkeyOn" FileKey="NegotiumExe" ExeCommand="--integrate hotkey-off"
+        Execute="rollback" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="RollbackStartupOn" FileKey="NegotiumExe" ExeCommand="--integrate startup-off"
+        Execute="rollback" Impersonate="yes" Return="ignore"/>
     <CustomAction Id="IntegrateHotkeyOn" FileKey="NegotiumExe" ExeCommand="--integrate hotkey-on"
         Execute="deferred" Impersonate="no" Return="ignore"/>
     <CustomAction Id="IntegrateStartupOn" FileKey="NegotiumExe" ExeCommand="--integrate startup-on"
@@ -129,20 +155,33 @@
         Execute="immediate" Return="ignore"/>
     <CustomAction Id="IntegrateAdminOnLogon" FileKey="NegotiumExe" ExeCommand="--elevate --integrate admin-on --logon"
         Execute="immediate" Return="ignore"/>
+    <CustomAction Id="RollbackUninstallHotkey" FileKey="NegotiumExe" ExeCommand="--integrate hotkey-on"
+        Execute="rollback" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="RollbackUninstallStartup" FileKey="NegotiumExe" ExeCommand="--integrate startup-on"
+        Execute="rollback" Impersonate="yes" Return="ignore"/>
     <CustomAction Id="IntegrateUninstall" FileKey="NegotiumExe" ExeCommand="--integrate uninstall"
         Execute="deferred" Impersonate="no" Return="ignore"/>
     <CustomAction Id="IntegrateUninstallStartup" FileKey="NegotiumExe" ExeCommand="--integrate startup-off"
         Execute="deferred" Impersonate="yes" Return="ignore"/>
-    <CustomAction Id="RelaunchNegotium" FileKey="NegotiumExe" ExeCommand="--show"
+    <!-- Not waited for: it asks Task Scheduler or Explorer, which must never hold up the end of
+         the install; its result is ignored like every other step's. -->
+    <CustomAction Id="RelaunchNegotium" FileKey="NegotiumExe" ExeCommand="--relaunch"
         Execute="immediate" Return="asyncNoWait"/>
 
     <InstallExecuteSequence>
       <Custom Action="CloseRunningNegotium" Before="InstallValidate">NEGOTIUM_INSTALLED_EXE</Custom>
 
-      <Custom Action="IntegrateHotkeyOn" After="InstallFiles">
+      <!-- A rollback step goes just before the step it undoes. -->
+      <Custom Action="RollbackHotkeyOn" After="InstallFiles">
         HOTKEY AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
       </Custom>
-      <Custom Action="IntegrateStartupOn" After="IntegrateHotkeyOn">
+      <Custom Action="IntegrateHotkeyOn" After="RollbackHotkeyOn">
+        HOTKEY AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
+      </Custom>
+      <Custom Action="RollbackStartupOn" After="IntegrateHotkeyOn">
+        STARTUP AND NOT ADMINMODE AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
+      </Custom>
+      <Custom Action="IntegrateStartupOn" After="RollbackStartupOn">
         STARTUP AND NOT ADMINMODE AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
       </Custom>
       <Custom Action="IntegrateAdminOn" After="InstallFinalize">
@@ -152,8 +191,14 @@
         ADMINMODE AND STARTUP AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
       </Custom>
 
-      <Custom Action="IntegrateUninstall" Before="IntegrateUninstallStartup">
+      <Custom Action="RollbackUninstallHotkey" Before="IntegrateUninstall">
+        REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NEGOTIUM_IFEO ~&gt;&lt; "\Negotium\negotium.exe"
+      </Custom>
+      <Custom Action="IntegrateUninstall" Before="RollbackUninstallStartup">
         REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
+      </Custom>
+      <Custom Action="RollbackUninstallStartup" Before="IntegrateUninstallStartup">
+        REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NEGOTIUM_RUN ~&gt;&lt; "\Negotium\negotium.exe"
       </Custom>
       <Custom Action="IntegrateUninstallStartup" Before="RemoveFiles">
         REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE

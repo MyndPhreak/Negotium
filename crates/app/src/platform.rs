@@ -471,14 +471,16 @@ fn main_windows_where(accept: impl Fn(HWND) -> bool, first_only: bool) -> Vec<HW
 }
 
 /// Whether the instance in process `pid`, running `image`, is one [`exit_instances_of`] asks to
-/// exit: another process (never this one) running `exe` itself. A dev build, or an image that
-/// can't be read, is left alone.
+/// exit: another process (never this one) whose window is marked as Negotium's, running `exe`
+/// itself, or whose image can't be read (`None`: it can't be told apart, and an instance left
+/// running would hold the files). A dev build that can be read is left alone.
 fn asked_to_exit(pid: u32, me: u32, image: Option<&Path>, exe: &Path) -> bool {
-    pid != me && image.is_some_and(|image| crate::integrate::same_path(image, exe))
+    pid != me && image.is_none_or(|image| crate::integrate::same_path(image, exe))
 }
 
-/// The process owning `hwnd`, opened to wait for it, and its image.
-fn window_process(hwnd: HWND) -> Option<(u32, OwnedHandle, Option<PathBuf>)> {
+/// The process owning `hwnd`: its id, a handle to wait for it (`None` if it couldn't be opened)
+/// and its image (`None` if it couldn't be read).
+fn window_process(hwnd: HWND) -> Option<(u32, Option<OwnedHandle>, Option<PathBuf>)> {
     let mut pid = 0u32;
     // SAFETY: plain call; a window that has gone leaves `pid` 0.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
@@ -488,7 +490,9 @@ fn window_process(hwnd: HWND) -> Option<(u32, OwnedHandle, Option<PathBuf>)> {
     // A limited query and SYNCHRONIZE: what an elevated instance's process also grants the same
     // user's non-elevated token.
     // SAFETY: plain call; the handle is owned (and closed) by the OwnedHandle below.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) }.ok()?;
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) }) else {
+        return Some((pid, None, None));
+    };
     // SAFETY: a live handle this function just opened, owned by nothing else.
     let process = unsafe { OwnedHandle::from_raw_handle(process.0) };
     let mut buf = vec![0u16; 32 * 1024];
@@ -499,14 +503,15 @@ fn window_process(hwnd: HWND) -> Option<(u32, OwnedHandle, Option<PathBuf>)> {
     }
     .ok()
     .map(|()| PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])));
-    Some((pid, process, image))
+    Some((pid, Some(process), image))
 }
 
 /// Asks every running instance of `exe` in this session (its main window, on screen or hidden in
 /// the tray) to exit the way the tray's Exit does ([`ShellEvent::Exit`]), then waits up to
-/// `timeout` for those processes to end. Returns how many were still running then. This process,
-/// dev builds and instances in other sessions are left alone (the installer runs this, as the
-/// installed exe, before it replaces the files). Never called by tests: it reaches real windows.
+/// `timeout` for those processes to end. Returns how many were still running then (one that
+/// couldn't be opened is asked but not waited for, so not counted). This process, dev builds and
+/// instances in other sessions are left alone (the installer runs this, as the installed exe,
+/// before it replaces the files). Never called by tests: it reaches real windows.
 pub fn exit_instances_of(exe: &Path, timeout: Duration) -> usize {
     // SAFETY: plain call.
     let me = unsafe { GetCurrentProcessId() };
@@ -517,7 +522,9 @@ pub fn exit_instances_of(exe: &Path, timeout: Duration) -> usize {
             continue;
         }
         // SAFETY: plain call; a window that has gone meanwhile only makes it fail.
-        if unsafe { PostMessageW(Some(hwnd), exit_message(), WPARAM(0), LPARAM(0)) }.is_ok() {
+        if unsafe { PostMessageW(Some(hwnd), exit_message(), WPARAM(0), LPARAM(0)) }.is_ok()
+            && let Some(process) = process
+        {
             asked.push(process);
         }
     }
@@ -531,6 +538,47 @@ pub fn exit_instances_of(exe: &Path, timeout: Duration) -> usize {
             waited != WAIT_OBJECT_0
         })
         .count()
+}
+
+/// Starts `exe` (no arguments) through the desktop shell, so it runs as Explorer does (not
+/// elevated) whatever this process is: the shell's own `ShellExecute` (`IShellDispatch2`),
+/// reached through the desktop window's view (Raymond Chen's documented way to start an
+/// unelevated process from an elevated one). Fails, starting nothing, when there is no desktop
+/// shell to ask (Explorer not running). Never called by tests.
+pub fn shell_start(exe: &Path) -> Result<(), String> {
+    use windows::Win32::System::Com::{
+        CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IServiceProvider,
+    };
+    use windows::Win32::System::Variant::VARIANT;
+    use windows::Win32::UI::Shell::{
+        IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellView, IShellWindows, SID_STopLevelBrowser,
+        SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
+    };
+    use windows::core::{BSTR, Interface};
+    // SAFETY: COM is entered on this thread for the calls below and left once they are done
+    // (this short-lived process's only COM use).
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok().map_err(|e| e.message())?;
+    let start = || -> windows::core::Result<()> {
+        // SAFETY: plain COM calls on interfaces owned here; each is released when dropped,
+        // before COM is left.
+        unsafe {
+            let windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)?;
+            // CSIDL_DESKTOP (0): the desktop window, which Explorer always has.
+            let (location, root) = (VARIANT::from(0i32), VARIANT::default());
+            let mut hwnd = 0i32;
+            let desktop = windows.FindWindowSW(&location, &root, SWC_DESKTOP, &mut hwnd, SWFO_NEEDDISPATCH)?;
+            let browser: IShellBrowser = desktop.cast::<IServiceProvider>()?.QueryService(&SID_STopLevelBrowser)?;
+            let view: IShellView = browser.QueryActiveShellView()?;
+            let folder: IShellFolderViewDual = view.GetItemObject(SVGIO_BACKGROUND)?;
+            let shell: IShellDispatch2 = folder.Application()?.cast()?;
+            let none = VARIANT::default();
+            shell.ShellExecute(&BSTR::from(exe.to_string_lossy().as_ref()), &none, &none, &none, &none)
+        }
+    };
+    let started = start().map_err(|e| e.message());
+    // SAFETY: pairs the successful CoInitializeEx above; every interface has been dropped.
+    unsafe { CoUninitialize() };
+    started
 }
 
 /// Asks the running instance to show itself, waiting up to `timeout` for its window to exist
@@ -697,7 +745,9 @@ mod tests {
         assert!(!asked_to_exit(me, me, Some(exe), exe), "not this process");
         let dev = Path::new(r"C:\dev\Negotium\target\release\negotium.exe");
         assert!(!asked_to_exit(20, me, Some(dev), exe), "a dev build");
-        assert!(!asked_to_exit(20, me, None, exe), "an image that can't be read");
+        // Marked as Negotium's main window, but its process can't be opened or read: still
+        // asked (only the wait is skipped).
+        assert!(asked_to_exit(20, me, None, exe), "an image that can't be read");
     }
 
     #[test]

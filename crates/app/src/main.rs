@@ -108,6 +108,21 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         std::process::exit(i32::from(left > 0));
     }
+    // `--relaunch` (the installer, once an update is installed; msiexec runs it elevated): start
+    // the new version as the user gets it (the admin task, or a plain unelevated start through
+    // the shell) and exit. Refused unless this is the installed exe. No window, no lock.
+    if args.len() == 1 && args[0] == negotium::integrate::RELAUNCH {
+        let mut log = negotium::log::Log::new(negotium::log::Log::default_path());
+        let sid = negotium_actions::integration::current_user_sid().unwrap_or_default();
+        let code = negotium::integrate::relaunch_command(
+            &negotium::integrate::System::new(),
+            sid,
+            negotium_actions::integration::is_admin_member(),
+            &|exe| platform::shell_start(exe).map_err(negotium::integrate::IntegrateError::Failed),
+            &mut |line| log.warn(line),
+        );
+        std::process::exit(code);
+    }
     // `--integrate <action>` (the installer and the Settings switches): no window, no renderer, no
     // instance lock, no settings; the exit code says whether it worked, a failure is logged.
     if negotium::integrate::requested(&args) {
@@ -135,6 +150,16 @@ fn main() -> Result<(), slint::PlatformError> {
                     negotium_actions::is_elevated(),
                     &run_here,
                     &|command| negotium_actions::run_elevated(command, 0),
+                    // Not elevated: only the Run value, which the registry guard allows.
+                    &|action| {
+                        let mut log = negotium::log::Log::new(negotium::log::Log::default_path());
+                        negotium::integrate::command_unelevated(
+                            action,
+                            &negotium::integrate::System::new(),
+                            sid.clone(),
+                            &mut |line| log.warn(line),
+                        )
+                    },
                     &mut |line| log.warn(line),
                 )
             }
