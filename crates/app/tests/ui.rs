@@ -2257,6 +2257,8 @@ struct FakeIntegration {
     /// The user's admin task (none set: missing), and whether it has the logon trigger.
     task: Rc<RefCell<Option<negotium::integrate::TaskState>>>,
     logon: Rc<std::cell::Cell<bool>>,
+    /// Task Scheduler can't report the trigger.
+    logon_unreadable: Rc<std::cell::Cell<bool>>,
     /// The HKCU Run value.
     run: Rc<RefCell<Option<String>>>,
     /// How often the task was asked for, and the reads not yet answered (`read`).
@@ -2365,7 +2367,8 @@ impl FakeIntegration {
             }
             for done in reads {
                 let state = self.task.borrow().clone().unwrap_or(negotium::integrate::TaskState::Missing);
-                done(negotium::settingspage::AdminTask { state, logon: self.logon.get() });
+                let logon = (!self.logon_unreadable.get()).then(|| self.logon.get());
+                done(negotium::settingspage::AdminTask { state, logon });
             }
         }
     }
@@ -2456,6 +2459,9 @@ fn start_with_windows_is_the_tasks_trigger_in_admin_mode() {
     fake.logon.set(false);
     *fake.run.borrow_mut() = Some(our_run_value());
     fake.finish(Ok(()));
+    // This user's own Run value is set here too (the prompt may have been another account's).
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("here --integrate startup-on"));
+    fake.finish(Ok(()));
     fake.read();
     assert_eq!(checked(), Some(true), "now the Run value");
     // And on again: the task takes it back (--logon).
@@ -2474,6 +2480,58 @@ fn start_with_windows_is_the_tasks_trigger_in_admin_mode() {
     switch(&ui, STARTUP).invoke_accessible_default_action();
     assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate startup-off"));
     assert_eq!(fake.exes.borrow().len(), 4, "every one elevated");
+}
+
+/// Task Scheduler couldn't report the trigger (or the task at all): the saved choice stands, is
+/// not overwritten, and a repair keeps the startup (--logon).
+#[test]
+fn an_unreadable_trigger_keeps_the_saved_start_with_windows() {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("startup-unknown");
+    let path = dir.0.join("settings.json");
+    let (integration, fake) = FakeIntegration::new(true);
+    fake.logon_unreadable.set(true);
+    fake.set_task(TaskState::Broken("it couldn't be read: the service is not running".into()));
+    let s = Settings { start_with_windows: true, ..Settings::default() };
+    let (ui, _, settings, integrations) = settings_wired_integrated(&dir, s, false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    fake.read();
+    integrations.show();
+    fake.read();
+    assert_eq!(switch(&ui, STARTUP).accessible_checked(), Some(true), "the saved choice");
+    assert!(settings.borrow().start_with_windows);
+    assert!(!path.exists(), "nothing was saved");
+    // Repairing admin mode keeps the startup.
+    switch(&ui, ADMIN).invoke_accessible_default_action();
+    assert_eq!(*fake.asked.borrow(), ["--integrate admin-on --logon"]);
+    // Ready, trigger still unreadable: the same.
+    fake.set_task(TaskState::Ready);
+    fake.finish(Ok(()));
+    fake.read();
+    assert_eq!(switch(&ui, STARTUP).accessible_checked(), Some(true));
+    assert!(settings.borrow().start_with_windows);
+    // Readable again: the machine wins.
+    fake.logon_unreadable.set(false);
+    integrations.show();
+    fake.read();
+    assert_eq!(switch(&ui, STARTUP).accessible_checked(), Some(false));
+    assert!(!settings.borrow().start_with_windows);
+}
+
+/// Before an administrator's task has been read, the form (Run value or trigger) isn't known:
+/// the switch does nothing and snaps back.
+#[test]
+fn start_with_windows_waits_for_the_first_task_read() {
+    let dir = Scratch::new("startup-early");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, _, _) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    switch(&ui, STARTUP).invoke_accessible_default_action();
+    assert!(fake.asked.borrow().is_empty(), "nothing runs");
+    assert_eq!(switch(&ui, STARTUP).accessible_checked(), Some(false), "snapped back");
+    fake.read();
+    switch(&ui, STARTUP).invoke_accessible_default_action();
+    assert_eq!(*fake.asked.borrow(), ["here --integrate startup-on"]);
 }
 
 #[test]

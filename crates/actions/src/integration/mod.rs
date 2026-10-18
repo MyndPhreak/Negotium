@@ -17,7 +17,7 @@ pub use run::{RUN_VALUE, read_run, set_run};
 pub use sid::{ADMINISTRATORS, current_user_sid, is_account_sid, is_admin_member, is_string_sid};
 pub use tasks::{
     ARG_PLACEHOLDER, TaskStatus, TaskView, create_task, delete_task, delete_task_folder, join_args,
-    start_task, task_logon, task_state, task_status, task_xml,
+    read_task, start_task, task_logon, task_state, task_status, task_xml,
 };
 
 use crate::startup::registry::{Hive, IFEO_TASKMGR, RegKey, USER_RUN};

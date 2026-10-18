@@ -240,7 +240,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Armed before the window is created: creating it already probes OpenGL.
     // The relaunch (exe path, arguments) is resolved now, so the stall path only spawns.
     let watchdog = decision.watchdog.then(|| {
-        let relaunch = renderer::SoftwareRelaunch::resolve();
+        let relaunch = renderer::SoftwareRelaunch::resolve(in_tray);
         renderer::Watchdog::arm(renderer::WATCHDOG_TIMEOUT, move || relaunch.run()).0
     });
     // Whether the tray icon may be created: not while the watchdog could still replace this
@@ -746,6 +746,12 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Started in the tray: the window is created far off screen, so the moment before it can be
+    // hidden (below) shows nothing.
+    if in_tray {
+        let (x, y) = platform::OFF_SCREEN;
+        ui.window().set_position(slint::PhysicalPosition::new(x, y));
+    }
     ui.show()?;
     // The native HWND is created lazily once the event loop runs, so poll until it exists; then,
     // once: apply the chrome, hook the window (tray re-creation, activation by a second launch)
@@ -815,10 +821,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 chromed = true;
                 // Started in the tray: the native window exists now (hooked and marked, so the tray
                 // and a second launch can show it), and goes out of sight as closing it to the
-                // tray would. Slint creates the window only once the event loop runs, so it may
-                // be on screen for a moment first.
+                // tray would. It was created off screen, so the moment before this showed
+                // nothing; hidden, it moves to the middle of the primary screen, where the tray
+                // or a second launch shows it.
                 if in_tray {
                     let _ = ui.hide();
+                    if let Some((x, y)) = platform::centered_position(hwnd) {
+                        ui.window().set_position(slint::PhysicalPosition::new(x, y));
+                    }
                 }
             }
             if !tray_allowed() {

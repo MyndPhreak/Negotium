@@ -130,10 +130,12 @@ pub fn clear_fallback_at(path: &Path) -> std::io::Result<()> {
 }
 
 /// The relaunch's arguments: this launch's own, plus [`RESTARTED_ARG`] and [`FALLBACK_ARG`]
-/// (each once).
-pub fn relaunch_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+/// (each once), and `--tray` when this launch started in the tray (a start by the admin task's
+/// logon trigger has no arguments to say so, and the added flags would hide that).
+pub fn relaunch_args(args: impl IntoIterator<Item = OsString>, in_tray: bool) -> Vec<OsString> {
     let mut out: Vec<OsString> = args.into_iter().collect();
-    for flag in [RESTARTED_ARG, FALLBACK_ARG] {
+    let tray = in_tray.then_some(crate::integrate::TRAY);
+    for flag in [RESTARTED_ARG, FALLBACK_ARG].into_iter().chain(tray) {
         if !out.iter().any(|a| a == flag) {
             out.push(flag.into());
         }
@@ -298,14 +300,15 @@ pub struct SoftwareRelaunch {
 }
 
 impl SoftwareRelaunch {
-    /// This exe, this launch's arguments plus [`RESTARTED_ARG`] and [`FALLBACK_ARG`], the marker
-    /// at [`fallback_path`] and the default log.
-    pub fn resolve() -> Self {
+    /// This exe, this launch's arguments plus [`RESTARTED_ARG`] and [`FALLBACK_ARG`] (and
+    /// `--tray` for a launch that started in the tray), the marker at [`fallback_path`] and the
+    /// default log.
+    pub fn resolve(in_tray: bool) -> Self {
         Self {
             exe: std::env::current_exe().map_err(|e| e.to_string()),
             // Without a Task Manager command line the redirect appended (`integrate::own_args`),
             // which would hide the fallback flag from the relaunched instance.
-            args: relaunch_args(crate::integrate::own_args(std::env::args_os().skip(1))),
+            args: relaunch_args(crate::integrate::own_args(std::env::args_os().skip(1)), in_tray),
             marker: fallback_path(),
             log: crate::log::Log::default_path(),
         }
@@ -442,8 +445,23 @@ mod tests {
     #[test]
     fn the_relaunch_adds_its_flags_once() {
         let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
-        assert_eq!(relaunch_args(args(&["--exit-on-close"])), args(&["--exit-on-close", RESTARTED_ARG, FALLBACK_ARG]));
-        assert_eq!(relaunch_args(args(&[RESTARTED_ARG])), args(&[RESTARTED_ARG, FALLBACK_ARG]));
+        assert_eq!(relaunch_args(args(&["--exit-on-close"]), false), args(&["--exit-on-close", RESTARTED_ARG, FALLBACK_ARG]));
+        assert_eq!(relaunch_args(args(&[RESTARTED_ARG]), false), args(&[RESTARTED_ARG, FALLBACK_ARG]));
+    }
+
+    /// A launch in the tray relaunches in the tray: the logon trigger's start (no arguments) would
+    /// otherwise come back with the flags only, and show the window.
+    #[test]
+    fn a_relaunch_of_a_tray_start_stays_in_the_tray() {
+        use crate::integrate::{TRAY, starts_in_tray, task_args};
+        let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        for launch in [&["--from-task"][..], &["--from-task", "$(Arg0)"], &["--tray"]] {
+            let relaunched = relaunch_args(args(launch), true);
+            assert_eq!(relaunched.iter().filter(|a| *a == TRAY).count(), 1, "{launch:?}");
+            let (from_task, rest) = task_args(relaunched);
+            assert!(starts_in_tray(from_task, &rest), "{launch:?}");
+        }
+        assert!(!relaunch_args(args(&[]), false).iter().any(|a| a == TRAY));
     }
 
     fn counting() -> (Arc<std::sync::atomic::AtomicUsize>, impl FnOnce() -> bool + Send + 'static) {
@@ -558,7 +576,7 @@ mod tests {
 
     #[test]
     fn the_relaunch_is_resolved_up_front_with_its_flags() {
-        let r = SoftwareRelaunch::resolve();
+        let r = SoftwareRelaunch::resolve(false);
         assert!(r.exe.is_ok());
         assert!(r.args.ends_with(&[OsString::from(RESTARTED_ARG), OsString::from(FALLBACK_ARG)]));
     }
@@ -569,7 +587,7 @@ mod tests {
     #[test]
     fn the_relaunched_instance_selects_software_without_slint_backend() {
         let exe = std::env::temp_dir().join("negotium.exe");
-        let cmd = relaunch_command(&exe, &relaunch_args(std::iter::empty()));
+        let cmd = relaunch_command(&exe, &relaunch_args(std::iter::empty(), false));
         let env_backend_set = cmd.get_envs().any(|(k, v)| k == "SLINT_BACKEND" && v.is_some());
         assert!(!env_backend_set, "no SLINT_BACKEND is passed");
         assert!(

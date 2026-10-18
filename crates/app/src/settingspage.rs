@@ -128,8 +128,9 @@ pub type RunHere = dyn Fn(Action, ElevatedDone);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminTask {
     pub state: TaskState,
-    /// It has the logon trigger: Start with Windows in admin mode.
-    pub logon: bool,
+    /// It has the logon trigger: Start with Windows in admin mode. `None`: it couldn't be read
+    /// (the saved choice then stands).
+    pub logon: Option<bool>,
 }
 
 /// The Ctrl+Shift+Esc and admin mode switches and "Open Windows Task Manager", wired. One
@@ -146,7 +147,7 @@ pub struct Integrations {
     /// The admin mode row's last known state, shown while Task Scheduler is read again, and
     /// whether the task has the logon trigger; `task_known`: the task has been read once.
     admin_state: Cell<i32>,
-    task_logon: Cell<bool>,
+    task_logon: Cell<Option<bool>>,
     task_known: Cell<bool>,
     /// A task read is running; `read_again`: another was asked for meanwhile.
     reading: Cell<bool>,
@@ -190,15 +191,16 @@ impl Integrations {
     }
 
     /// Whether Start with Windows is on, as the machine says: the task's trigger in admin mode,
-    /// the Run value otherwise. `None` until it is known (a development build, or the task not
-    /// read yet for an administrator's installed copy): the saved choice stands meanwhile.
+    /// the Run value otherwise. `None` while it isn't known (a development build, the task not
+    /// read yet for an administrator's installed copy, or a trigger Task Scheduler couldn't
+    /// report): the saved choice stands meanwhile and is not overwritten.
     fn startup_on(&self) -> Option<bool> {
         let install = &self.io.install;
         if !install.installed || (self.io.admin_member && !self.task_known.get()) {
             return None;
         }
         if self.admin_mode() {
-            return Some(self.task_logon.get());
+            return self.task_logon.get();
         }
         Some((self.io.run_value)().is_some_and(|v| crate::integrate::run_value_starts(&v, &install.exe)))
     }
@@ -296,9 +298,16 @@ impl Integrations {
             Action::AdminOff
         };
         let restart = on && !self.io.elevated;
+        // Off while Start with Windows is on: the elevated admin-off sets the Run value of the
+        // account that approved the prompt; this user's own Run value is set here too, in case
+        // that was another account (over-the-shoulder credentials).
+        let startup = !on && self.settings.borrow().start_with_windows;
         self.run_elevated(action, |e| e.message("Admin mode", false), move |this| {
             if restart {
                 (this.io.restart_elevated)();
+            }
+            if startup {
+                this.run_command(Runner::Here, Action::StartupOn, |e| e.message("Start with Windows", false), |_| {});
             }
         });
     }
@@ -307,7 +316,8 @@ impl Integrations {
     /// (`integrate::run`). Without admin mode that is the Run value, run here without a prompt;
     /// with it, the task's logon trigger, run elevated. The switch then shows the machine again.
     pub fn toggle_start_with_windows(self: &Rc<Self>, on: bool) {
-        if !self.io.install.installed {
+        // An administrator's task not read yet: the form (and so the runner) isn't known.
+        if !self.io.install.installed || (self.io.admin_member && !self.task_known.get()) {
             self.show();
             return;
         }
@@ -453,22 +463,22 @@ pub fn in_background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stati
 /// The app's [`Integration::read_task`]: user `sid`'s task (no SID: missing) from Task
 /// Scheduler on its own thread, so a slow or hung Schedule service never holds up the window.
 pub fn read_task_in_background(sid: Option<String>, done: TaskRead) {
-    use crate::integrate::{Machine, System};
+    use crate::integrate::System;
     in_background(
         move || match sid {
             Some(sid) => {
-                let machine = System::new();
-                AdminTask { state: machine.task_state(&sid), logon: machine.task_logon(&sid) }
+                let (state, logon) = System::new().read_task(&sid);
+                AdminTask { state, logon }
             }
-            None => AdminTask { state: TaskState::Missing, logon: false },
+            None => AdminTask { state: TaskState::Missing, logon: Some(false) },
         },
         done,
     );
 }
 
-/// The app's [`Integration::run_here`]: `action` through `integrate::run` as this exe, for user
-/// `sid`, on its own thread (it reads Task Scheduler), then `done` on the UI thread. A failure is
-/// logged. Called on the UI thread; never by tests.
+/// The app's [`Integration::run_here`]: `action` through `integrate::run_unelevated` (the Run
+/// value only) as this exe, for user `sid`, on its own thread, then `done` on the UI thread. A
+/// failure is logged. Called on the UI thread; never by tests.
 pub fn run_here_in_background(sid: Option<String>, action: Action, done: ElevatedDone) {
     in_background(
         move || {
@@ -480,7 +490,7 @@ pub fn run_here_in_background(sid: Option<String>, action: Action, done: Elevate
                 machine: &machine,
                 start_task_manager: &crate::integrate::start_task_manager,
             };
-            crate::integrate::run(action, &ctx).map_err(|e| {
+            crate::integrate::run_unelevated(action, &ctx).map_err(|e| {
                 let command = action.to_args().join(" ");
                 crate::log::Log::new(crate::log::Log::default_path()).warn(&format!("{command} failed: {e}"));
                 ActionError::Other(e.to_string())
@@ -543,7 +553,7 @@ impl SettingsWiring {
             weak: ui.as_weak(),
             busy: Cell::new(false),
             admin_state: Cell::new(0),
-            task_logon: Cell::new(false),
+            task_logon: Cell::new(None),
             task_known: Cell::new(false),
             reading: Cell::new(false),
             read_again: Cell::new(false),

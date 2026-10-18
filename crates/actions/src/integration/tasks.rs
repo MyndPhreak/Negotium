@@ -335,17 +335,29 @@ fn view(task: &IRegisteredTask) -> windows::core::Result<TaskView> {
 /// User `sid`'s task state. Anything that stops it being read (a bad SID or folder name, COM,
 /// Task Scheduler not running, access) is `Broken` with that reason.
 pub fn task_state(roots: &Roots, sid: &str) -> TaskStatus {
+    read_task(roots, sid).0
+}
+
+/// User `sid`'s task state (as [`task_state`]) and whether it has the logon trigger (as
+/// [`task_logon`]), read in one Task Scheduler session.
+pub fn read_task(roots: &Roots, sid: &str) -> (TaskStatus, Option<bool>) {
     let _com = ComApartment::enter();
-    let read = || -> Result<Option<TaskView>, ActionError> {
-        // Names first: a bad one never reaches Task Scheduler.
+    // Names first: a bad one never reaches Task Scheduler.
+    let registered = || -> Result<Option<IRegisteredTask>, ActionError> {
         task_name(sid)?;
         folder_path(roots)?;
-        let service = service()?;
-        registered(&service, roots, sid)?.map(|t| view(&t).map_err(com)).transpose()
+        registered(&service()?, roots, sid)
     };
-    match read() {
-        Ok(v) => task_status(v.as_ref(), Path::is_file),
-        Err(e) => TaskStatus::Broken(format!("it couldn't be read: {e}")),
+    match registered() {
+        Ok(None) => (TaskStatus::Missing, Some(false)),
+        Ok(Some(task)) => {
+            let status = match view(&task) {
+                Ok(v) => task_status(Some(&v), Path::is_file),
+                Err(e) => TaskStatus::Broken(format!("it couldn't be read: {}", com(e))),
+            };
+            (status, has_logon_trigger(&task).ok())
+        }
+        Err(e) => (TaskStatus::Broken(format!("it couldn't be read: {e}")), None),
     }
 }
 
@@ -368,20 +380,9 @@ fn has_logon_trigger(task: &IRegisteredTask) -> windows::core::Result<bool> {
 }
 
 /// Whether user `sid`'s task also starts at sign-in (has a logon trigger): Start with Windows in
-/// admin mode. A missing or unreadable task has none.
-pub fn task_logon(roots: &Roots, sid: &str) -> bool {
-    if task_name(sid).is_err() || folder_path(roots).is_err() {
-        return false;
-    }
-    let _com = ComApartment::enter();
-    let read = || -> Result<bool, ActionError> {
-        let service = service()?;
-        match registered(&service, roots, sid)? {
-            Some(task) => has_logon_trigger(&task).map_err(com),
-            None => Ok(false),
-        }
-    };
-    read().unwrap_or(false)
+/// admin mode. A missing task has none; `None` when it couldn't be read (not known).
+pub fn task_logon(roots: &Roots, sid: &str) -> Option<bool> {
+    read_task(roots, sid).1
 }
 
 /// Starts user `sid`'s task now, with `args` as its `$(Arg0)` (`join_args`).
@@ -593,7 +594,7 @@ mod tests {
             assert!(matches!(delete_task(&Roots::system(), bad), Err(ActionError::Other(_))), "{bad}");
             assert!(matches!(create_task(&Roots::system(), bad, Path::new(EXE), "", false), Err(ActionError::Other(_))), "{bad}");
             assert!(matches!(start_task(&Roots::system(), bad, &[]), Err(ActionError::Other(_))), "{bad}");
-            assert!(!task_logon(&Roots::system(), bad), "{bad}");
+            assert_eq!(task_logon(&Roots::system(), bad), None, "{bad}: not known");
         }
         assert_eq!(folder_path(&Roots::system()).unwrap(), "\\Negotium");
     }
@@ -620,14 +621,14 @@ mod tests {
         assert_eq!(task_state(&roots, &sid), TaskStatus::Missing);
         create_task(&roots, &sid, &cmd, "/c", false).unwrap();
         assert_eq!(task_state(&roots, &sid), TaskStatus::Ready);
-        assert!(!task_logon(&roots, &sid), "no logon trigger");
+        assert_eq!(task_logon(&roots, &sid), Some(false), "no logon trigger");
         start_task(&roots, &sid, &["exit".to_string(), "0".to_string()]).unwrap();
         // Replaced in place, now with the logon trigger.
         create_task(&roots, &sid, &cmd, "/c", true).unwrap();
         assert_ne!(task_state(&roots, &sid), TaskStatus::Missing);
-        assert!(task_logon(&roots, &sid), "the logon trigger reads back");
+        assert_eq!(read_task(&roots, &sid).1, Some(true), "the logon trigger reads back");
         delete_task(&roots, &sid).unwrap();
-        assert!(!task_logon(&roots, &sid), "a missing task has none");
+        assert_eq!(task_logon(&roots, &sid), Some(false), "a missing task has none");
         assert_eq!(task_state(&roots, &sid), TaskStatus::Missing);
         delete_task(&roots, &sid).unwrap();
         // A task whose exe is gone reads as broken.

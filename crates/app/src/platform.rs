@@ -222,6 +222,41 @@ pub fn bring_to_front(ui: &MainWindow) {
     }
 }
 
+/// Where a launch in the tray first creates the window: far off every screen, so the moment it
+/// is on screen before it can be hidden shows nothing (Slint creates the native window only once
+/// the event loop runs). [`centered_position`] puts it back once it is hidden.
+pub const OFF_SCREEN: (i32, i32) = (-32000, -32000);
+
+/// The top-left that centres a window of `size` (width, height) in `work` (left, top, right,
+/// bottom), kept inside it when the window is larger.
+pub fn centered(work: (i32, i32, i32, i32), size: (i32, i32)) -> (i32, i32) {
+    let (left, top, right, bottom) = work;
+    let x = left + ((right - left) - size.0) / 2;
+    let y = top + ((bottom - top) - size.1) / 2;
+    (x.max(left), y.max(top))
+}
+
+/// The position that centres `hwnd` in the primary monitor's work area (the window started off
+/// screen, [`OFF_SCREEN`]), or `None` if Windows doesn't say.
+pub fn centered_position(hwnd: HWND) -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let mut rect = RECT::default();
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: plain queries on our own window and the primary monitor; the out-parameters are
+    // writable locals, `info.cbSize` set as GetMonitorInfoW requires.
+    unsafe {
+        GetWindowRect(hwnd, &mut rect).ok()?;
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+    }
+    let w = info.rcWork;
+    Some(centered((w.left, w.top, w.right, w.bottom), (rect.right - rect.left, rect.bottom - rect.top)))
+}
+
 /// Whether `hwnd` is minimised now: a launch from a shortcut set to "Minimized" starts so, before
 /// the window hooks can hear WM_SIZE.
 pub fn is_minimised(hwnd: HWND) -> bool {
@@ -640,6 +675,14 @@ mod tests {
         assert!(!tray_hung(Some(false)), "it answers");
         assert!(!tray_hung(None), "no taskbar (Explorer restarting): nothing to wait on");
         let _ = shell_tray_hung(); // the real query returns without blocking
+    }
+
+    #[test]
+    fn a_window_is_centred_in_the_work_area() {
+        assert_eq!(centered((0, 0, 1920, 1040), (1000, 600)), (460, 220));
+        assert_eq!(centered((-1920, 0, 0, 1080), (920, 80)), (-1420, 500), "a monitor left of the primary");
+        assert_eq!(centered((0, 0, 800, 600), (1000, 700)), (0, 0), "too large: its corner stays on screen");
+        assert!(OFF_SCREEN.0 <= -30000 && OFF_SCREEN.1 <= -30000, "beyond any desktop");
     }
 
     #[test]

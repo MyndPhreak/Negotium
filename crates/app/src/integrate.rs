@@ -29,7 +29,9 @@ pub const FROM_TASK: &str = "--from-task";
 /// What [`hand_off`] passes the task for a launch with no arguments of its own: every start
 /// Negotium asks of the task carries at least one argument, so a start with none is the logon
 /// trigger's (Task Scheduler gives a trigger start no `$(Arg0)` value), which starts in the tray
-/// ([`starts_in_tray`]). Otherwise ignored.
+/// ([`starts_in_tray`]). Otherwise ignored. Any start of the task with no arguments counts as
+/// that, so "Run" on the task in Task Scheduler (or `schtasks /run`) also starts hidden in the
+/// tray.
 pub const SHOW: &str = "--show";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,8 +191,9 @@ pub trait Machine {
     /// Creates (or replaces) user `sid`'s admin task in `\Negotium\`: highest privileges, action
     /// `exe` with [`FROM_TASK`], and with `logon` a trigger at that user's sign-in.
     fn create_task(&self, sid: &str, exe: &Path, logon: bool) -> Result<(), IntegrateError>;
-    /// Whether user `sid`'s task has the logon trigger (false when it is missing or unreadable).
-    fn task_logon(&self, sid: &str) -> bool;
+    /// Whether user `sid`'s task has the logon trigger (false when it is missing; `None` when it
+    /// couldn't be read).
+    fn task_logon(&self, sid: &str) -> Option<bool>;
     /// Deletes user `sid`'s admin task (absent is fine).
     fn delete_task(&self, sid: &str) -> Result<(), IntegrateError>;
     fn task_state(&self, sid: &str) -> TaskState;
@@ -341,7 +344,8 @@ pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
         }
         Action::StartupOff => {
             let sid = user_sid(ctx)?;
-            if machine.task_state(&sid) != TaskState::Missing && machine.task_logon(&sid) {
+            // A trigger that couldn't be read may be there: recreated without, to be sure.
+            if machine.task_state(&sid) != TaskState::Missing && machine.task_logon(&sid) != Some(false) {
                 machine.create_task(&sid, &exe, false)?;
             }
             machine.set_run(None)
@@ -352,7 +356,7 @@ pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
         }
         Action::AdminOff => {
             let sid = user_sid(ctx)?;
-            let logon = machine.task_logon(&sid);
+            let logon = machine.task_logon(&sid) == Some(true);
             machine.delete_task(&sid)?;
             if logon { machine.set_run(Some(&run_command(&exe))) } else { Ok(()) }
         }
@@ -361,6 +365,25 @@ pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
         Action::Uninstall => [clear_redirect(machine, &exe), machine.set_run(None), machine.delete_task_folder()]
             .into_iter()
             .collect(),
+    }
+}
+
+/// Start with Windows in its Run value form, for Settings without admin mode (run here, without
+/// elevation): startup-on/off set or remove the Run value and nothing else; Task Scheduler is
+/// never asked (a hung Schedule service can't hold it up). Every other action needs [`run`]
+/// elevated and is refused.
+pub fn run_unelevated(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
+    let exe = installed_exe(ctx)?;
+    match action {
+        Action::StartupOn => {
+            user_sid(ctx)?;
+            ctx.machine.set_run(Some(&run_command(&exe)))
+        }
+        Action::StartupOff => {
+            user_sid(ctx)?;
+            ctx.machine.set_run(None)
+        }
+        _ => Err(IntegrateError::NotImplemented("this action without elevation")),
     }
 }
 
@@ -577,6 +600,15 @@ impl System {
     }
 }
 
+impl System {
+    /// User `sid`'s task state and whether it has the logon trigger (`None`: not known), read in
+    /// one Task Scheduler session (Settings).
+    pub fn read_task(&self, sid: &str) -> (TaskState, Option<bool>) {
+        let (status, logon) = integration::read_task(&self.roots, sid);
+        (task_state(status), logon)
+    }
+}
+
 impl Default for System {
     fn default() -> Self {
         Self::new()
@@ -603,7 +635,7 @@ impl Machine for System {
     fn create_task(&self, sid: &str, exe: &Path, logon: bool) -> Result<(), IntegrateError> {
         integration::create_task(&self.roots, sid, exe, FROM_TASK, logon).map_err(failed)
     }
-    fn task_logon(&self, sid: &str) -> bool {
+    fn task_logon(&self, sid: &str) -> Option<bool> {
         integration::task_logon(&self.roots, sid)
     }
     fn delete_task(&self, sid: &str) -> Result<(), IntegrateError> {
@@ -651,6 +683,10 @@ mod tests {
         state: Option<TaskState>,
         /// Every `start_task`'s arguments.
         started: RefCell<Vec<Vec<String>>>,
+        /// `task_logon` can't read the trigger.
+        unreadable_trigger: bool,
+        /// Task Scheduler hangs: `task_state` takes 10 s.
+        hung: bool,
     }
 
     impl Fake {
@@ -687,10 +723,16 @@ mod tests {
             self.tasks.borrow_mut().remove(sid);
             Ok(())
         }
-        fn task_logon(&self, sid: &str) -> bool {
-            self.tasks.borrow().get(sid).is_some_and(|(_, logon)| *logon)
+        fn task_logon(&self, sid: &str) -> Option<bool> {
+            if self.unreadable_trigger {
+                return None;
+            }
+            Some(self.tasks.borrow().get(sid).is_some_and(|(_, logon)| *logon))
         }
         fn task_state(&self, sid: &str) -> TaskState {
+            if self.hung {
+                std::thread::sleep(Duration::from_secs(10));
+            }
             if let Some(state) = &self.state {
                 return state.clone();
             }
@@ -836,7 +878,7 @@ mod tests {
         *fake.run.borrow_mut() = Some(run_command(&root.exe()));
         run(Action::StartupOn, &root.ctx(&fake)).unwrap();
         assert_eq!(fake.tasks.borrow().get(SID), Some(&(root.exe(), true)));
-        assert!(fake.task_logon(SID));
+        assert_eq!(fake.task_logon(SID), Some(true));
         assert_eq!(fake.run_value(), None);
         run(Action::StartupOff, &root.ctx(&fake)).unwrap();
         assert_eq!(fake.tasks.borrow().get(SID), Some(&(root.exe(), false)), "admin mode stays, without the trigger");
@@ -852,6 +894,43 @@ mod tests {
         run(Action::StartupOn, &root.ctx(&broken)).unwrap();
         assert_eq!(broken.tasks.borrow().get(SID), Some(&(root.exe(), true)));
         assert_eq!(broken.run_value(), None);
+    }
+
+    /// A trigger that couldn't be read is never taken for "off" when it matters: startup-off
+    /// still recreates the task without it; admin-off doesn't invent a Run value.
+    #[test]
+    fn an_unreadable_trigger_is_not_known() {
+        let root = Root::new();
+        let fake = Fake { unreadable_trigger: true, ..Fake::default() };
+        fake.tasks.borrow_mut().insert(SID.into(), (root.exe(), true));
+        run(Action::StartupOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.tasks.borrow().get(SID), Some(&(root.exe(), false)));
+        run(Action::AdminOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.run_value(), None);
+    }
+
+    /// Settings' in-process startup-on/off (no admin mode) touch the Run value only: a hung Task
+    /// Scheduler can't hold them up; anything else is refused there.
+    #[test]
+    fn startup_without_elevation_never_asks_task_scheduler() {
+        let root = Root::new();
+        let fake = Fake { hung: true, ..Fake::default() };
+        let started = std::time::Instant::now();
+        run_unelevated(Action::StartupOn, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.run_value(), Some(run_command(&root.exe())));
+        run_unelevated(Action::StartupOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.run_value(), None);
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        for action in Action::ALL.into_iter().filter(|a| !matches!(a, Action::StartupOn | Action::StartupOff)) {
+            assert!(matches!(run_unelevated(action, &root.ctx(&fake)), Err(IntegrateError::NotImplemented(_))), "{action:?}");
+        }
+        assert_eq!(*fake.calls.borrow(), ["set_run", "set_run"]);
+        // Still only the installed exe, and only a user's.
+        let ctx = Ctx { user_sid: "S-1-5-18".into(), ..root.ctx(&fake) };
+        assert!(matches!(run_unelevated(Action::StartupOn, &ctx), Err(IntegrateError::BadSid(_))));
+        let ctx = Ctx { exe: PathBuf::from(r"C:\elsewhere
+egotium.exe"), ..root.ctx(&fake) };
+        assert!(matches!(run_unelevated(Action::StartupOn, &ctx), Err(IntegrateError::NotInstalled(_))));
     }
 
     /// Admin mode turned on or off while Start with Windows is on takes the startup with it.
