@@ -43,7 +43,7 @@ jobs:
       # busy_child_reports_one_core_of_cpu is timing-sensitive under load (known
       # flaky, listed in the plan's follow-ups); it must not block releases.
       - name: Test
-        run: cargo test --workspace -- --skip busy_child_reports_one_core_of_cpu
+        run: cargo test --workspace --no-fail-fast -- --skip busy_child_reports_one_core_of_cpu
 
       - name: Build release
         run: cargo build --release -p negotium

@@ -19,6 +19,14 @@ struct Sandbox {
     roots: StartupRoots,
 }
 
+/// The temp folder in its long form: TEMP can be an 8.3 short path (CI runners use `RUNNER~1`),
+/// while shortcuts resolve to the long one.
+fn long_temp_dir() -> std::path::PathBuf {
+    let t = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let s = t.to_string_lossy();
+    std::path::PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string())
+}
+
 impl Sandbox {
     fn new(name: &str) -> Self {
         let base = RegKey::new(
@@ -26,7 +34,7 @@ impl Sandbox {
             &format!(r"{}\{name}-{}", registry::TEST_ROOT, std::process::id()),
         );
         let _ = registry::delete_test_tree(&base);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = long_temp_dir().join(format!(
             "negotium-startup-test-{name}-{}",
             std::process::id()
         ));
