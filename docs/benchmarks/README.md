@@ -381,7 +381,7 @@ list redesign. CPU is the share of one core (`cpu_one_core_pct.mean`). Files:
 
 ### Elevated tests
 
-- `cargo test -p negotium-collector --lib netetw -- --include-ignored`: 17 passed.
+- `cargo test -p negotium-collector --lib netetw -- --include-ignored`: 21 passed after the final fixes (17 before), including `the_live_feed_counts_this_processes_udp_sends`: the live session counted bytes the test process sent.
 - `cargo test -p negotium-collector --test collector only_an_opted_in`: 1 passed.
 
 ## Manual checks: Per-app network
