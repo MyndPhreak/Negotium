@@ -35,6 +35,9 @@ thread_local! {
 /// How long an exit waits for pending settings writes (the file, the GPU marker) to land.
 const EXIT_FLUSH: Duration = Duration::from_secs(1);
 
+/// How long `--exit-running` (the installer) waits for running instances to finish exiting.
+const EXIT_RUNNING_WAIT: Duration = Duration::from_secs(10);
+
 /// Every quit goes through here. The window mark is removed first, so a launch made while this
 /// instance shuts down never hands its activation to a dying window: it finds no window, waits
 /// for the lock and starts fresh. Pending settings writes land first (bounded), so the next
@@ -93,6 +96,18 @@ fn main() -> Result<(), slint::PlatformError> {
     // Negotium's own arguments: started by the Ctrl+Shift+Esc redirect, Windows appends Task
     // Manager's command line, which is ignored (a normal launch).
     let args = negotium::integrate::own_args(std::env::args_os().skip(1));
+    // `--exit-running` (the installer, before it replaces or removes the files): every running
+    // instance of this exe in this session quits as from the tray's Exit; exit code 0 once they
+    // all have, 1 if any is still running after the wait (Windows Installer then handles the file
+    // in use). No window, no lock.
+    if args.len() == 1 && args[0] == negotium::integrate::EXIT_RUNNING {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let left = platform::exit_instances_of(&exe, EXIT_RUNNING_WAIT);
+        if left > 0 {
+            warn(&format!("{left} running Negotium didn't exit for the installer within {} s", EXIT_RUNNING_WAIT.as_secs()));
+        }
+        std::process::exit(i32::from(left > 0));
+    }
     // `--integrate <action>` (the installer and the Settings switches): no window, no renderer, no
     // instance lock, no settings; the exit code says whether it worked, a failure is logged.
     if negotium::integrate::requested(&args) {
@@ -105,12 +120,28 @@ fn main() -> Result<(), slint::PlatformError> {
             log.warn(&format!("integrate: couldn't read this user's SID: {e}"));
             String::new()
         });
-        let code = negotium::integrate::command(
-            &args,
-            &negotium::integrate::System::new(),
-            sid,
-            &mut |line| log.warn(line),
-        );
+        let code = match negotium::integrate::elevate_request(&args) {
+            // `--elevate --integrate …` (the installer's admin-mode step, as the installing user):
+            // run here when already elevated, else in an elevated copy (one UAC prompt).
+            Some(rest) => {
+                let run_here = |rest: &[std::ffi::OsString]| {
+                    let mut log = negotium::log::Log::new(negotium::log::Log::default_path());
+                    negotium::integrate::command(rest, &negotium::integrate::System::new(), sid.clone(), &mut |line| {
+                        log.warn(line)
+                    })
+                };
+                negotium::integrate::elevated_command(
+                    rest,
+                    negotium_actions::is_elevated(),
+                    &run_here,
+                    &|command| negotium_actions::run_elevated(command, 0),
+                    &mut |line| log.warn(line),
+                )
+            }
+            None => {
+                negotium::integrate::command(&args, &negotium::integrate::System::new(), sid, &mut |line| log.warn(line))
+            }
+        };
         std::process::exit(code);
     }
     // Started by the admin task: `--from-task` (and a logon start's placeholder) set aside.
@@ -181,6 +212,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // The registry helpers refuse writes outside the test sandbox until the real app unlocks them,
     // so tests (which never run `main`) can't reach the user's startup entries.
     negotium_actions::startup::registry::allow_system_writes();
+    // The installers earlier updates left behind (this version is installed now).
+    if install_installed {
+        negotium::update::clean_leftovers_in_background(elevated);
+    }
     // Before the worker starts, so the collector and every action see the privilege.
     if elevated && let Err(e) = negotium_actions::enable_debug_privilege() {
         // Not fatal: actions on other users' processes then report access denied.
@@ -815,6 +850,8 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                             ShellEvent::TaskbarCreated => {}
                             ShellEvent::Activate => show_main(&on_screen, &weak),
+                            // The installer is about to replace the files.
+                            ShellEvent::Exit => begin_exit(&controls, &weak, &tray_wiring.saver),
                             ShellEvent::Minimised(_) => {} // handled above
                             ShellEvent::SettingsChanged => {
                                 if let Some(ui) = weak.upgrade() {

@@ -33,6 +33,12 @@ pub const FROM_TASK: &str = "--from-task";
 /// that, so "Run" on the task in Task Scheduler (or `schtasks /run`) also starts hidden in the
 /// tray.
 pub const SHOW: &str = "--show";
+/// Before [`FLAG`]: run the command elevated, asking for it (a UAC prompt) unless this process
+/// already is (the installer's admin-mode step, which runs as the installing user).
+pub const ELEVATE: &str = "--elevate";
+/// Asks every running instance of this exe in this session to exit, and waits for them
+/// (the installer, before it replaces or removes the files).
+pub const EXIT_RUNNING: &str = "--exit-running";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -412,6 +418,48 @@ where
         Ok(()) => 0,
         Err(e) => {
             log(&format!("integrate {}: {e}", action.name()));
+            1
+        }
+    }
+}
+
+/// The `--integrate` command line after a leading [`ELEVATE`], if `args` starts with it.
+pub fn elevate_request(args: &[OsString]) -> Option<&[OsString]> {
+    match args.split_first() {
+        Some((first, rest)) if first == ELEVATE => Some(rest),
+        _ => None,
+    }
+}
+
+/// `--elevate --integrate <action>` (the installer's admin-mode step, run as the installing user
+/// once the install is done): the command in `args` run elevated, here when this process already
+/// is (`run_here`, [`command`] in the app, returning its exit code), otherwise in an elevated copy
+/// of this exe started with the same command (`elevate`: `negotium_actions::run_elevated`, one UAC
+/// prompt, waited for), so the task is this user's, as when Settings turns it on. Returns the exit
+/// code: 0 done, 1 declined or failed (logged), 2 not a valid command line (nothing runs).
+pub fn elevated_command(
+    args: &[OsString],
+    elevated: bool,
+    run_here: &dyn Fn(&[OsString]) -> i32,
+    elevate: &dyn Fn(&str) -> Result<(), ActionError>,
+    log: &mut dyn FnMut(&str),
+) -> i32 {
+    let Some(action) = Action::parse(args) else {
+        let shown: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        log(&format!("integrate: not a valid command line: {ELEVATE} {}", shown.join(" ")));
+        return 2;
+    };
+    if elevated {
+        return run_here(args);
+    }
+    match elevate(&action.to_args().join(" ")) {
+        Ok(()) => 0,
+        Err(ActionError::Cancelled) => {
+            log(&format!("integrate {}: the UAC prompt was declined; nothing changed", action.name()));
+            1
+        }
+        Err(e) => {
+            log(&format!("integrate {} (elevated): {e}", action.name()));
             1
         }
     }
@@ -1508,5 +1556,64 @@ egotium.exe"), ..root.ctx(&fake) };
         let ctx = Ctx { user_sid: sid.clone(), ..root.ctx(&fake) };
         run(Action::AdminOn { logon: false }, &ctx).unwrap();
         assert!(fake.tasks.borrow().contains_key(&sid));
+    }
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn elevate_prefixes_an_integrate_command_line() {
+        let args = os(&[ELEVATE, FLAG, "admin-on", LOGON]);
+        assert_eq!(elevate_request(&args), Some(&args[1..]));
+        assert_eq!(elevate_request(&os(&[FLAG, "admin-on"])), None);
+        assert_eq!(elevate_request(&os(&[FLAG, "admin-on", ELEVATE])), None, "only in front");
+    }
+
+    #[test]
+    fn an_elevated_request_runs_here_when_already_elevated() {
+        let ran = RefCell::new(Vec::new());
+        let run_here = |args: &[OsString]| {
+            ran.borrow_mut().push(args.to_vec());
+            0
+        };
+        let elevate = |_: &str| -> Result<(), ActionError> { panic!("no prompt when already elevated") };
+        let args = os(&[FLAG, "admin-on", LOGON]);
+        assert_eq!(elevated_command(&args, true, &run_here, &elevate, &mut |_| {}), 0);
+        assert_eq!(*ran.borrow(), [args]);
+    }
+
+    #[test]
+    fn an_elevated_request_asks_for_elevation_with_the_same_command() {
+        let run_here = |_: &[OsString]| -> i32 { panic!("not elevated: never run here") };
+        let asked = RefCell::new(Vec::new());
+        let answers = RefCell::new(vec![
+            Err(ActionError::Other("exit code 1".into())),
+            Err(ActionError::Cancelled),
+            Ok(()),
+        ]);
+        let elevate = |command: &str| {
+            asked.borrow_mut().push(command.to_string());
+            answers.borrow_mut().pop().unwrap()
+        };
+        let mut lines = Vec::new();
+        let args = os(&[FLAG, "admin-on", LOGON]);
+        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 0);
+        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 1, "declined");
+        assert_eq!(elevated_command(&args, false, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 1, "failed");
+        assert_eq!(*asked.borrow(), ["--integrate admin-on --logon"; 3]);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+    }
+
+    #[test]
+    fn an_elevated_request_must_be_a_valid_command_line() {
+        let run_here = |_: &[OsString]| -> i32 { panic!("never run") };
+        let elevate = |_: &str| -> Result<(), ActionError> { panic!("never asked") };
+        for elevated in [false, true] {
+            let mut lines = Vec::new();
+            let args = os(&[FLAG, "admin-on", "--bogus"]);
+            assert_eq!(elevated_command(&args, elevated, &run_here, &elevate, &mut |l| lines.push(l.to_string())), 2);
+            assert_eq!(lines.len(), 1);
+        }
     }
 }

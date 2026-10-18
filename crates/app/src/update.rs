@@ -2,8 +2,10 @@
 //! for the latest release of MyndPhreak/Negotium; a newer `vX.Y.Z` with exactly one `.msi` on
 //! GitHub over HTTPS is offered in a banner ("Update to vX.Y.Z"). Accepting downloads that MSI to
 //! `%TEMP%\Negotium-update`, checks it against the release's SHA-256 digest (when GitHub gives
-//! one), starts `msiexec /i "<msi>" /passive` elevated (one UAC prompt) and quits, so the installer
-//! can replace the exe. A declined prompt keeps Negotium running.
+//! one), starts `msiexec /i "<msi>" /passive NEGOTIUM_RELAUNCH=1` elevated (one UAC prompt) and
+//! quits, so the installer can replace the exe (it also asks a still-running Negotium to exit) and
+//! then start the new version. A declined prompt keeps Negotium running. The next start of the
+//! installed copy deletes the installers earlier updates left behind.
 //!
 //! The pure parts (the release, the URLs, the file) are tested here against a fake [`Fetch`];
 //! [`WinHttp`] is the real one, and [`Updater`] is the window's side. Nothing about the user or
@@ -32,6 +34,8 @@ const API_HOST: &str = "api.github.com";
 /// On `github.com`, the installer is `<ASSET_PATH><the release's tag>/<file>`: a download of that
 /// release of this repository.
 const ASSET_PATH: &str = "/MyndPhreak/Negotium/releases/download/";
+/// The installer property the updater sets: the MSI starts the new version once it is installed.
+pub const RELAUNCH: &str = "NEGOTIUM_RELAUNCH";
 /// A larger "installer" is not Negotium's.
 pub const MAX_MSI_BYTES: usize = 200 * 1024 * 1024;
 /// A release's JSON is a few kilobytes; more is not a release.
@@ -366,9 +370,54 @@ pub fn download(fetch: &dyn Fetch, release: &Release, dir: &Path) -> Result<Path
 }
 
 /// msiexec's arguments: install `msi` with progress only (no choices; upgrades keep the
-/// installed options).
+/// installed options), and start the new version once it is installed ([`RELAUNCH`]).
 pub fn installer_args(msi: &Path) -> String {
-    format!("/i \"{}\" /passive", msi.display())
+    format!("/i \"{}\" /passive {RELAUNCH}=1", msi.display())
+}
+
+/// The installers an earlier update left among `names` (the update folder's file names):
+/// `Negotium-X.Y.Z.msi` ([`download`]'s name), or the `.msi.part` of one, for a version up to
+/// `current`, the one running now: installed, so they are done with. A newer download, anything
+/// else, and everything when `current` can't be read, stay.
+pub fn leftovers<'a>(names: impl IntoIterator<Item = &'a str>, current: &str) -> Vec<&'a str> {
+    let Some(current) = parse_version(current) else { return Vec::new() };
+    names
+        .into_iter()
+        .filter(|name| {
+            let stem = name.strip_suffix(".msi.part").or_else(|| name.strip_suffix(".msi"));
+            stem.and_then(|s| s.strip_prefix("Negotium-")).and_then(parse_version).is_some_and(|v| v <= current)
+        })
+        .collect()
+}
+
+/// Deletes [`leftovers`] for `current` from `dir` (each without following a link). One still in
+/// use (msiexec may hold the installer just after an update) stays for the next start. Returns
+/// how many went; a missing folder is none.
+pub fn remove_leftovers(dir: &Path, current: &str) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let names: Vec<String> = entries.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+    leftovers(names.iter().map(String::as_str), current)
+        .into_iter()
+        .filter(|name| secure::delete_no_follow(&dir.join(name)).is_ok())
+        .count()
+}
+
+/// The installed copy's start: the installers earlier updates left in this process's update
+/// folder ([`secure::update_dir`]) are deleted, on their own thread. Elevated, that is the
+/// admin-only folder, and only while it still is one ([`secure::check_dir`]); not elevated, the
+/// user's `%TEMP%` one (an elevated process never deletes in a folder the user controls). Never
+/// called by tests.
+pub fn clean_leftovers_in_background(elevated: bool) {
+    std::thread::spawn(move || {
+        let Ok(dir) = secure::update_dir(elevated) else { return };
+        if let secure::UpdateDir::Admin(path) = &dir {
+            use secure::DirAcl;
+            if !secure::SystemAcl.read(path).is_ok_and(|security| secure::check_dir(&security).is_ok()) {
+                return;
+            }
+        }
+        remove_leftovers(dir.path(), crate::install::VERSION);
+    });
 }
 
 /// SHA-256 of `bytes` (Windows' CNG).
@@ -1241,9 +1290,44 @@ mod tests {
     }
 
     #[test]
-    fn msiexec_installs_with_progress_only() {
+    fn msiexec_installs_with_progress_only_and_starts_the_new_version() {
         let msi = Path::new(r"C:\Users\Some One\AppData\Local\Temp\Negotium-update\Negotium-0.2.0.msi");
-        assert_eq!(installer_args(msi), r#"/i "C:\Users\Some One\AppData\Local\Temp\Negotium-update\Negotium-0.2.0.msi" /passive"#);
+        assert_eq!(
+            installer_args(msi),
+            r#"/i "C:\Users\Some One\AppData\Local\Temp\Negotium-update\Negotium-0.2.0.msi" /passive NEGOTIUM_RELAUNCH=1"#
+        );
+    }
+
+    #[test]
+    fn installers_up_to_this_version_are_leftovers() {
+        let names = [
+            "Negotium-0.1.0.msi",
+            "Negotium-0.0.9.msi.part",
+            "Negotium-0.2.0.msi",
+            "Negotium-0.1.0.msi.bak",
+            "notes.txt",
+            "Negotium-0.1.msi",
+            "negotium-0.0.1.msi",
+        ];
+        assert_eq!(leftovers(names, "0.1.0"), ["Negotium-0.1.0.msi", "Negotium-0.0.9.msi.part"]);
+        assert_eq!(leftovers(names, "0.3.0"), ["Negotium-0.1.0.msi", "Negotium-0.0.9.msi.part", "Negotium-0.2.0.msi"]);
+        assert!(leftovers(names, "bogus").is_empty(), "an unreadable running version keeps everything");
+    }
+
+    #[test]
+    fn leftovers_are_removed_and_a_newer_download_is_kept() {
+        let dir = scratch("leftovers");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["Negotium-0.0.1.msi", "Negotium-0.0.2.msi.part", "Negotium-99.0.0.msi", "keep.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        assert_eq!(remove_leftovers(&dir, "0.1.0"), 2);
+        let mut left: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["Negotium-99.0.0.msi", "keep.txt"]);
+        assert_eq!(remove_leftovers(&dir.join("missing"), "0.1.0"), 0, "no folder: nothing to do");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

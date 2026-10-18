@@ -7,6 +7,8 @@ use crate::{MainWindow, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::ComponentHandle;
 use std::ffi::c_void;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
@@ -18,7 +20,8 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, ReleaseMutex, TerminateProcess, WaitForSingleObject,
+    CreateMutexW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -28,7 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
 };
-use windows::core::{BOOL, HSTRING, PCWSTR, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 /// `AccentColor` is stored as `0xAABBGGRR`.
 pub fn accent_from_dword(v: u32) -> (u8, u8, u8) {
@@ -298,6 +301,9 @@ pub enum ShellEvent {
     /// The main window was minimised (true) or shown at a size again (false): graphs scroll only
     /// while it is on screen. Sent on every WM_SIZE; the receiver drops repeats.
     Minimised(bool),
+    /// The installer asked this instance to exit ([`exit_instances_of`]), before it replaces the
+    /// files: quit as the tray's Exit does.
+    Exit,
 }
 
 // Cached: the subclass compares every message the main window receives against these.
@@ -313,6 +319,12 @@ pub fn activate_message() -> u32 {
     *MSG.get_or_init(|| unsafe { RegisterWindowMessageW(w!("Negotium.Activate")) })
 }
 
+pub fn exit_message() -> u32 {
+    static MSG: OnceLock<u32> = OnceLock::new();
+    // SAFETY: as above.
+    *MSG.get_or_init(|| unsafe { RegisterWindowMessageW(w!("Negotium.Exit")) })
+}
+
 /// Window property marking the main window, so a second launch can find it even while it is
 /// hidden in the tray.
 const MAIN_WINDOW_PROP: PCWSTR = w!("Negotium.MainWindow");
@@ -321,10 +333,11 @@ const SUBCLASS_ID: usize = 0x4E45_474F; // "NEGO"
 type Hook = Box<dyn Fn(ShellEvent)>;
 
 /// Subclasses the main window: `on_event` runs (on the UI thread, inside the window procedure)
-/// for TaskbarCreated, the activation message and theme or accent changes (both broadcast to
-/// top-level windows, so they need no UIPI exemption). Also lets both messages through UIPI, so a
-/// non-elevated Explorer or second launch can still reach an elevated instance. Returns false
-/// if subclassing failed.
+/// for TaskbarCreated, the activation and exit messages and theme or accent changes (both
+/// broadcast to top-level windows, so they need no UIPI exemption). Also lets TaskbarCreated,
+/// activation and exit through UIPI, so a non-elevated Explorer, second launch or installer step
+/// can still reach an elevated instance (anything in the session can then ask it to exit, as it
+/// could close a non-elevated one). Returns false if subclassing failed.
 pub fn install_window_hooks(hwnd: HWND, on_event: impl Fn(ShellEvent) + 'static) -> bool {
     let hook: *mut Hook = Box::into_raw(Box::new(Box::new(on_event)));
     // SAFETY: `hook` stays valid until WM_NCDESTROY, where the subclass frees it.
@@ -336,7 +349,7 @@ pub fn install_window_hooks(hwnd: HWND, on_event: impl Fn(ShellEvent) + 'static)
     }
     // SAFETY: plain calls on a window of this thread; failure only loses the UIPI exemption.
     unsafe {
-        for msg in [taskbar_created_message(), activate_message()] {
+        for msg in [taskbar_created_message(), activate_message(), exit_message()] {
             let _ = ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, None);
         }
     }
@@ -372,6 +385,10 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == activate_message() {
         // SAFETY: `hook` lives until WM_NCDESTROY.
         unsafe { (*hook)(ShellEvent::Activate) };
+        return LRESULT(0);
+    } else if msg != 0 && msg == exit_message() {
+        // SAFETY: as above.
+        unsafe { (*hook)(ShellEvent::Exit) };
         return LRESULT(0);
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
@@ -425,26 +442,95 @@ pub fn find_main_window() -> Option<HWND> {
 /// The first marked window that `accept` takes (tests narrow it to their own window, so another
 /// running instance can't answer).
 fn find_main_window_where(accept: impl Fn(HWND) -> bool) -> Option<HWND> {
+    main_windows_where(accept, true).into_iter().next()
+}
+
+/// The marked windows `accept` takes, in z-order; only the first with `first_only`.
+fn main_windows_where(accept: impl Fn(HWND) -> bool, first_only: bool) -> Vec<HWND> {
     struct Search<'a> {
         accept: &'a dyn Fn(HWND) -> bool,
-        found: Option<HWND>,
+        first_only: bool,
+        found: Vec<HWND>,
     }
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
         // SAFETY: lparam is the `&mut Search` passed below for the duration of EnumWindows.
         let search = unsafe { &mut *(lparam.0 as *mut Search) };
         // SAFETY: read-only property lookup on a handle supplied by EnumWindows.
         if !unsafe { GetPropW(hwnd, MAIN_WINDOW_PROP) }.is_invalid() && (search.accept)(hwnd) {
-            search.found = Some(hwnd);
-            return false.into();
+            search.found.push(hwnd);
+            return (!search.first_only).into();
         }
         true.into()
     }
-    let mut search = Search { accept: &accept, found: None };
+    let mut search = Search { accept: &accept, first_only, found: Vec::new() };
     // SAFETY: `search` outlives the synchronous enumeration.
     unsafe {
         let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
     }
     search.found
+}
+
+/// Whether the instance in process `pid`, running `image`, is one [`exit_instances_of`] asks to
+/// exit: another process (never this one) running `exe` itself. A dev build, or an image that
+/// can't be read, is left alone.
+fn asked_to_exit(pid: u32, me: u32, image: Option<&Path>, exe: &Path) -> bool {
+    pid != me && image.is_some_and(|image| crate::integrate::same_path(image, exe))
+}
+
+/// The process owning `hwnd`, opened to wait for it, and its image.
+fn window_process(hwnd: HWND) -> Option<(u32, OwnedHandle, Option<PathBuf>)> {
+    let mut pid = 0u32;
+    // SAFETY: plain call; a window that has gone leaves `pid` 0.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
+    // A limited query and SYNCHRONIZE: what an elevated instance's process also grants the same
+    // user's non-elevated token.
+    // SAFETY: plain call; the handle is owned (and closed) by the OwnedHandle below.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) }.ok()?;
+    // SAFETY: a live handle this function just opened, owned by nothing else.
+    let process = unsafe { OwnedHandle::from_raw_handle(process.0) };
+    let mut buf = vec![0u16; 32 * 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: `buf` holds `len` u16s; the call writes at most that many and updates `len`.
+    let image = unsafe {
+        QueryFullProcessImageNameW(HANDLE(process.as_raw_handle()), PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
+    }
+    .ok()
+    .map(|()| PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])));
+    Some((pid, process, image))
+}
+
+/// Asks every running instance of `exe` in this session (its main window, on screen or hidden in
+/// the tray) to exit the way the tray's Exit does ([`ShellEvent::Exit`]), then waits up to
+/// `timeout` for those processes to end. Returns how many were still running then. This process,
+/// dev builds and instances in other sessions are left alone (the installer runs this, as the
+/// installed exe, before it replaces the files). Never called by tests: it reaches real windows.
+pub fn exit_instances_of(exe: &Path, timeout: Duration) -> usize {
+    // SAFETY: plain call.
+    let me = unsafe { GetCurrentProcessId() };
+    let mut asked = Vec::new();
+    for hwnd in main_windows_where(|_| true, false) {
+        let Some((pid, process, image)) = window_process(hwnd) else { continue };
+        if !asked_to_exit(pid, me, image.as_deref(), exe) {
+            continue;
+        }
+        // SAFETY: plain call; a window that has gone meanwhile only makes it fail.
+        if unsafe { PostMessageW(Some(hwnd), exit_message(), WPARAM(0), LPARAM(0)) }.is_ok() {
+            asked.push(process);
+        }
+    }
+    let deadline = Instant::now() + timeout;
+    asked
+        .iter()
+        .filter(|process| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            // SAFETY: a live process handle opened with SYNCHRONIZE; waiting has no other effect.
+            let waited = unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), left.as_millis() as u32) };
+            waited != WAIT_OBJECT_0
+        })
+        .count()
 }
 
 /// Asks the running instance to show itself, waiting up to `timeout` for its window to exist
@@ -593,9 +679,25 @@ mod tests {
             SendMessageW(hwnd, activate_message(), Some(WPARAM(0)), Some(LPARAM(0)));
             SendMessageW(hwnd, taskbar_created_message(), Some(WPARAM(0)), Some(LPARAM(0)));
             SendMessageW(hwnd, WM_DWMCOLORIZATIONCOLORCHANGED, Some(WPARAM(0)), Some(LPARAM(0)));
+            SendMessageW(hwnd, exit_message(), Some(WPARAM(0)), Some(LPARAM(0)));
             let _ = DestroyWindow(hwnd);
         }
-        assert_eq!(*seen.borrow(), [ShellEvent::Activate, ShellEvent::TaskbarCreated, ShellEvent::SettingsChanged]);
+        assert_eq!(
+            *seen.borrow(),
+            [ShellEvent::Activate, ShellEvent::TaskbarCreated, ShellEvent::SettingsChanged, ShellEvent::Exit]
+        );
+    }
+
+    #[test]
+    fn only_other_instances_of_the_same_exe_are_asked_to_exit() {
+        use std::path::Path;
+        let exe = Path::new(r"C:\Program Files\Negotium\negotium.exe");
+        let me = 10;
+        assert!(asked_to_exit(20, me, Some(Path::new(r"c:\program files\negotium\NEGOTIUM.EXE")), exe));
+        assert!(!asked_to_exit(me, me, Some(exe), exe), "not this process");
+        let dev = Path::new(r"C:\dev\Negotium\target\release\negotium.exe");
+        assert!(!asked_to_exit(20, me, Some(dev), exe), "a dev build");
+        assert!(!asked_to_exit(20, me, None, exe), "an image that can't be read");
     }
 
     #[test]

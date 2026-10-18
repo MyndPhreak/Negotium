@@ -37,3 +37,11 @@ slint-build.workspace = true
 
 [dev-dependencies]
 i-slint-backend-testing = { workspace = true, features = ["renderer-software"] }
+# tests/wix.rs reads the installer source (already in the lock through Slint).
+roxmltree = "0.21.1"
+
+# The installer: `cargo wix -p negotium` (WiX Toolset v3) builds wix/main.wxs. ICE43 and ICE57
+# assume a per-user install (a Start menu shortcut in a component keyed by a file in Program
+# Files); this one is per-machine (ALLUSERS=1), where the Start menu folder is the machine's.
+[package.metadata.wix]
+linker-args = ["-sice:ICE43", "-sice:ICE57"]

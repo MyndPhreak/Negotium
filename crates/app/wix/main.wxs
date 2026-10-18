@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  Negotium's installer (WiX Toolset v3), built from the repository root with cargo-wix:
+  `cargo wix -p negotium` (add `-b <WiX bin folder>` when WiX isn't on PATH or in %WIX%), which
+  builds the release exe and writes target\wix\negotium-<version>-x86_64.msi. cargo-wix passes
+  Version (the workspace version) and CargoTargetBinDir, and links WixUIExtension and
+  WixUtilExtension; crates/app/Cargo.toml's [package.metadata.wix] adds the rest.
+
+  Per-machine, to C:\Program Files\Negotium, with a Start menu shortcut. Every release is a major
+  upgrade (a new ProductCode, the fixed UpgradeCode below) that replaces the installed version in
+  place; downgrades are refused.
+
+  Windows integration is Negotium's own command, `negotium.exe -integrate <action>`
+  (crates/app/src/integrate.rs; flags take two dashes, written with one here because an XML
+  comment can't hold two), which refuses unless it runs as the installed exe:
+  - First install only (never on an upgrade, so upgrades keep what the user has), for each ticked
+    box:
+      Open on Ctrl+Shift+Esc  hotkey-on, deferred as LocalSystem (taskmgr.exe's IFEO value, HKLM).
+      Start with Windows      startup-on, deferred and impersonated (the user's HKCU Run value).
+      Admin mode              admin-on [-logon with Start with Windows], immediate after
+                              InstallFinalize as the installing user, through Negotium's own
+                              elevation (one more UAC prompt unless setup already runs elevated):
+                              the task is named by the user's SID, which a LocalSystem step doesn't
+                              have and an impersonated deferred step can't create elevated.
+  - A real uninstall only (not the old version's removal during an upgrade): uninstall as
+    LocalSystem (the redirect and every user's task folder), then startup-off as the uninstalling
+    user (their Run value). Other users' Run values are left naming the removed exe; Windows skips
+    a Run entry whose file is missing.
+  - Before anything is replaced or removed, the installed exe asks every running copy of itself in
+    this session to exit (-exit-running) and waits for them, so no file is in use. REBOOT is
+    suppressed: a copy that still holds the file (another user's session) gets it replaced at the
+    next restart, without a prompt.
+  - The in-app updater passes NEGOTIUM_RELAUNCH=1: the new version starts when the install is done.
+    A first install offers "Launch Negotium" on the last page.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+      Id="*"
+      Name="Negotium"
+      UpgradeCode="7AA728A9-B8BC-4F0D-A154-EC88A6FA4077"
+      Manufacturer="MyndPhreak"
+      Language="1033"
+      Codepage="1252"
+      Version="$(var.Version)">
+
+    <Package
+        Id="*"
+        Keywords="Installer"
+        Description="Negotium, a task manager for Windows"
+        Manufacturer="MyndPhreak"
+        InstallerVersion="500"
+        Languages="1033"
+        Compressed="yes"
+        InstallScope="perMachine"
+        InstallPrivileges="elevated"
+        Platform="x64"
+        SummaryCodepage="1252"/>
+
+    <!-- Inside the install transaction: a failed upgrade rolls back to the old version. -->
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed. Setup will now exit."/>
+
+    <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" DiskPrompt="CD-ROM #1"/>
+    <Property Id="DiskPrompt" Value="Negotium Installation"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Negotium">
+          <Component Id="NegotiumExe" Guid="*" Win64="yes">
+            <File
+                Id="NegotiumExe"
+                Name="negotium.exe"
+                DiskId="1"
+                Source="$(var.CargoTargetBinDir)\negotium.exe"
+                KeyPath="yes">
+              <!-- Not advertised: it starts the exe directly (no Windows Installer check on each
+                   start). -->
+              <Shortcut
+                  Id="NegotiumShortcut"
+                  Name="Negotium"
+                  Description="See and manage what is running"
+                  Directory="ProgramMenuFolder"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Advertise="no"/>
+            </File>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder"/>
+    </Directory>
+
+    <Feature Id="Main" Title="Negotium" Level="1" Absent="disallow" AllowAdvertise="no">
+      <ComponentRef Id="NegotiumExe"/>
+    </Feature>
+
+    <!-- Add/Remove Programs: nothing to change (no features or options after install). -->
+    <Property Id="ARPNOMODIFY" Value="1"/>
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/MyndPhreak/Negotium"/>
+    <Property Id="ARPHELPLINK" Value="https://github.com/MyndPhreak/Negotium/issues"/>
+
+    <!-- The first-install checkboxes: unset (off) unless ticked. Secure, so what the dialog sets
+         reaches the elevated part of the install. -->
+    <Property Id="HOTKEY" Secure="yes"/>
+    <Property Id="ADMINMODE" Secure="yes"/>
+    <Property Id="STARTUP" Secure="yes"/>
+    <!-- Set by the in-app updater (crates/app/src/update.rs, RELAUNCH). -->
+    <Property Id="NEGOTIUM_RELAUNCH" Secure="yes"/>
+    <!-- Never restart or ask to: see the top of this file. -->
+    <Property Id="REBOOT" Value="ReallySuppress"/>
+
+    <!-- The exe installed now (the old version during an upgrade), if any. -->
+    <Property Id="NEGOTIUM_INSTALLED_EXE">
+      <DirectorySearch Id="NegotiumFolderSearch" Path="[ProgramFiles64Folder]Negotium" Depth="0">
+        <FileSearch Id="NegotiumExeSearch" Name="negotium.exe"/>
+      </DirectorySearch>
+    </Property>
+
+    <!-- Every step that runs Negotium ignores its exit code: a failed integration step must not
+         roll back the install (or block an uninstall). Negotium logs why; Settings shows the
+         state and can turn each one on again. -->
+    <CustomAction Id="CloseRunningNegotium" Property="NEGOTIUM_INSTALLED_EXE" ExeCommand="--exit-running"
+        Execute="immediate" Return="ignore"/>
+    <CustomAction Id="IntegrateHotkeyOn" FileKey="NegotiumExe" ExeCommand="--integrate hotkey-on"
+        Execute="deferred" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="IntegrateStartupOn" FileKey="NegotiumExe" ExeCommand="--integrate startup-on"
+        Execute="deferred" Impersonate="yes" Return="ignore"/>
+    <CustomAction Id="IntegrateAdminOn" FileKey="NegotiumExe" ExeCommand="--elevate --integrate admin-on"
+        Execute="immediate" Return="ignore"/>
+    <CustomAction Id="IntegrateAdminOnLogon" FileKey="NegotiumExe" ExeCommand="--elevate --integrate admin-on --logon"
+        Execute="immediate" Return="ignore"/>
+    <CustomAction Id="IntegrateUninstall" FileKey="NegotiumExe" ExeCommand="--integrate uninstall"
+        Execute="deferred" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="IntegrateUninstallStartup" FileKey="NegotiumExe" ExeCommand="--integrate startup-off"
+        Execute="deferred" Impersonate="yes" Return="ignore"/>
+    <CustomAction Id="RelaunchNegotium" FileKey="NegotiumExe" ExeCommand="--show"
+        Execute="immediate" Return="asyncNoWait"/>
+
+    <InstallExecuteSequence>
+      <Custom Action="CloseRunningNegotium" Before="InstallValidate">NEGOTIUM_INSTALLED_EXE</Custom>
+
+      <Custom Action="IntegrateHotkeyOn" After="InstallFiles">
+        HOTKEY AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
+      </Custom>
+      <Custom Action="IntegrateStartupOn" After="IntegrateHotkeyOn">
+        STARTUP AND NOT ADMINMODE AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
+      </Custom>
+      <Custom Action="IntegrateAdminOn" After="InstallFinalize">
+        ADMINMODE AND NOT STARTUP AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
+      </Custom>
+      <Custom Action="IntegrateAdminOnLogon" After="IntegrateAdminOn">
+        ADMINMODE AND STARTUP AND NOT Installed AND NOT WIX_UPGRADE_DETECTED
+      </Custom>
+
+      <Custom Action="IntegrateUninstall" Before="IntegrateUninstallStartup">
+        REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
+      </Custom>
+      <Custom Action="IntegrateUninstallStartup" Before="RemoveFiles">
+        REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
+      </Custom>
+
+      <Custom Action="RelaunchNegotium" After="IntegrateAdminOnLogon">
+        NEGOTIUM_RELAUNCH="1" AND NOT REMOVE
+      </Custom>
+    </InstallExecuteSequence>
+
+    <!-- "Launch Negotium" on the last page of a first install: started by the setup window itself,
+         as the user (not elevated). -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Negotium"/>
+    <Property Id="WixShellExecTarget" Value="[#NegotiumExe]"/>
+    <CustomAction Id="LaunchNegotium" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" Return="ignore"/>
+
+    <UI Id="NegotiumUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8"/>
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12"/>
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes"/>
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal"/>
+      <Property Id="WixUI_Mode" Value="Minimal"/>
+
+      <DialogRef Id="ErrorDlg"/>
+      <DialogRef Id="FatalError"/>
+      <DialogRef Id="FilesInUse"/>
+      <DialogRef Id="MsiRMFilesInUse"/>
+      <DialogRef Id="PrepareDlg"/>
+      <DialogRef Id="ProgressDlg"/>
+      <DialogRef Id="ResumeDlg"/>
+      <DialogRef Id="UserExit"/>
+      <DialogRef Id="WelcomeDlg"/>
+      <DialogRef Id="MaintenanceWelcomeDlg"/>
+      <DialogRef Id="MaintenanceTypeDlg"/>
+      <DialogRef Id="VerifyReadyDlg"/>
+      <DialogRef Id="ExitDialog"/>
+
+      <!-- The three choices, first install only (an upgrade keeps the machine as it is). -->
+      <Dialog Id="OptionsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)"/>
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes"
+            Text="{\WixUI_Font_Title}Options"/>
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+            Text="All off unless you tick them. Settings in Negotium changes them later."/>
+
+        <Control Id="Hotkey" Type="CheckBox" X="20" Y="54" Width="330" Height="17" Property="HOTKEY" CheckBoxValue="1"
+            Text="Open on Ctrl+Shift+Esc"/>
+        <Control Id="HotkeyNote" Type="Text" X="36" Y="71" Width="320" Height="20" NoPrefix="yes"
+            Text="Every way of starting Task Manager opens Negotium instead. Negotium can still open Windows Task Manager."/>
+
+        <Control Id="AdminMode" Type="CheckBox" X="20" Y="99" Width="330" Height="17" Property="ADMINMODE" CheckBoxValue="1"
+            Text="Admin mode (no prompt)"/>
+        <Control Id="AdminModeNote" Type="Text" X="36" Y="116" Width="320" Height="40" NoPrefix="yes"
+            Text="Negotium always runs as administrator without asking, so anything that can start it gets it elevated. For administrator accounts. Setup asks for administrator permission once more when it finishes, to set this up."/>
+
+        <Control Id="Startup" Type="CheckBox" X="20" Y="162" Width="330" Height="17" Property="STARTUP" CheckBoxValue="1"
+            Text="Start with Windows"/>
+        <Control Id="StartupNote" Type="Text" X="36" Y="179" Width="320" Height="20" NoPrefix="yes"
+            Text="Negotium starts hidden in the tray when you sign in."/>
+
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)"/>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)"/>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="OptionsDlg">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">Installed OR WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="OptionsDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg">1</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="1">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">(NOT Installed AND WIX_UPGRADE_DETECTED) OR (Installed AND PATCH)</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="3">Installed AND NOT PATCH</Publish>
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchNegotium" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed</Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+    </UI>
+    <UIRef Id="WixUI_Common"/>
+  </Product>
+</Wix>

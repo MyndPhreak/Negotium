@@ -2736,6 +2736,7 @@ dependencies = [
  "negotium-model",
  "negotium-snapshot",
  "raw-window-handle",
+ "roxmltree",
  "serde",
  "serde_json",
  "slint",
