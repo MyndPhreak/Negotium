@@ -92,7 +92,12 @@ fn details_include_command_line_user_and_priority() {
     assert_eq!(d.pid, child.id());
     assert!(d.command_line.as_deref().unwrap_or("").contains("127.0.0.1"), "{d:?}");
     assert!(d.user.as_deref().unwrap_or("").contains('\\'), "DOMAIN\\user expected: {d:?}");
-    assert_eq!(d.priority.as_deref(), Some("Normal"));
+    // A child inherits its parent's priority class (CI runners run below normal), so compare with ours.
+    let me = std::process::id();
+    let mine = ProcessReader::new().read().unwrap().into_iter().find(|p| p.pid == me).unwrap().create_time;
+    let ours = process_details(me, mine).unwrap();
+    assert!(d.priority.is_some(), "{d:?}");
+    assert_eq!(d.priority, ours.priority);
     assert!(d.image_path.as_deref().unwrap_or("").to_lowercase().ends_with("ping.exe"));
 }
 
