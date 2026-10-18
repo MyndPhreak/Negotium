@@ -4552,7 +4552,7 @@ impl FakeUpdates {
                 let (installers, fails) = (f.installers.clone(), f.installer_fails.clone());
                 move |job, done| {
                     installers.borrow_mut().push(job.msi.clone());
-                    done(fails.borrow().clone().map_or(Ok(()), Err));
+                    done(fails.borrow().clone().map_or(Ok(negotium::update::HeldInstaller(None)), Err));
                 }
             }),
             exit: Box::new({
@@ -4579,7 +4579,7 @@ fn release_v(version: (u64, u64, u64)) -> negotium::update::Release {
         version,
         msi_url: "https://github.com/MyndPhreak/Negotium/releases/download/v9.9.9/Negotium-9.9.9.msi".into(),
         page_url: "https://github.com/MyndPhreak/Negotium/releases/tag/v9.9.9".into(),
-        sha256: None,
+        digest: negotium::update::AssetDigest::Absent,
     }
 }
 
@@ -4675,7 +4675,10 @@ fn update_downloads_runs_the_installer_and_exits() {
     let (_, done) = fake.downloads.borrow_mut().pop().unwrap();
     done(Ok(msi.clone()));
     assert_eq!(*fake.installers.borrow(), [msi]);
-    assert_eq!(fake.exits.get(), 1, "Negotium exits so the installer can replace it");
+    assert_eq!(ui.get_update_banner(), "Installing v9.9.9…");
+    assert_eq!(fake.exits.get(), 0, "it stays a moment, holding the installer while msiexec opens it");
+    i_slint_backend_testing::mock_elapsed_time(negotium::update::EXIT_GRACE + std::time::Duration::from_millis(10));
+    assert_eq!(fake.exits.get(), 1, "then exits so the installer can replace it");
 }
 
 #[test]
@@ -4708,11 +4711,11 @@ fn a_declined_uac_prompt_keeps_negotium_running() {
     let (updater, fake) = FakeUpdates::wire(&ui, true);
     updater.startup(true);
     let digest = [7u8; 32];
-    fake.answer(Ok(Some(negotium::update::Release { sha256: Some(digest), ..release_v((9, 9, 9)) })));
+    fake.answer(Ok(Some(negotium::update::Release { digest: negotium::update::AssetDigest::Sha256(digest), ..release_v((9, 9, 9)) })));
     *fake.installer_fails.borrow_mut() = Some(negotium::update::UpdateError::Cancelled);
     updater.accept();
     let (release, done) = fake.downloads.borrow_mut().pop().unwrap();
-    assert_eq!(release.sha256, Some(digest));
+    assert_eq!(release.digest, negotium::update::AssetDigest::Sha256(digest));
     done(Ok("x.msi".into()));
     assert_eq!(*fake.installers.borrow(), [std::path::PathBuf::from("x.msi")], "msiexec was asked to start");
     assert_eq!(fake.exits.get(), 0, "declined: Negotium stays");
@@ -4728,12 +4731,13 @@ fn a_check_landing_during_the_download_changes_nothing() {
     let (updater, fake) = FakeUpdates::wire(&ui, true);
     updater.startup(true);
     fake.answer(Ok(Some(release_v((9, 9, 9)))));
-    updater.startup(true); // another check, still out when Update is clicked
+    updater.check_now(); // a manual check, still out when Update is clicked
+    assert_eq!(ui.get_settings_update_status(), "Checking…");
     updater.accept();
     updater.check_now(); // ignored while updating
     fake.answer(Ok(Some(release_v((10, 0, 0)))));
     assert_eq!(ui.get_update_banner(), "Downloading v9.9.9…");
-    assert_eq!(ui.get_settings_update_status(), "");
+    assert_eq!(ui.get_settings_update_status(), "", "its Checking… is cleared");
     assert!(fake.checks.borrow().is_empty());
 }
 

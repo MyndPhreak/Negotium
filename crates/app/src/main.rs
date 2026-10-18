@@ -355,14 +355,17 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     .install(&ui);
     // Updates (installed copy only): "Check for updates", the banner, and the startup check once
-    // the window is up (below). Accepting starts msiexec and quits, like the tray's Exit.
+    // the window is up (below). Accepting starts msiexec and quits shortly after, like the tray's
+    // Exit.
     let updater = negotium::update::Updater::install(
         &ui,
         negotium::update::UpdateIo {
             installed: install_installed,
             check: Box::new(negotium::update::check_in_background),
-            download: Box::new(negotium::update::download_in_background),
-            install: Box::new(negotium::update::install_in_background),
+            // Elevated (admin mode), the installer goes to an admin-only folder: msiexec then
+            // starts without a prompt (negotium::update::secure).
+            download: Box::new(move |release, done| negotium::update::download_in_background(release, elevated, done)),
+            install: Box::new(move |job, done| negotium::update::install_in_background(job, elevated, done)),
             exit: Box::new({
                 let (controls, weak, saver) = (controls.clone(), ui.as_weak(), saver.clone());
                 move || begin_exit(&controls, &weak, &saver)

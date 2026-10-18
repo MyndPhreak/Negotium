@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+pub mod secure;
+
 /// The latest release of the repository (GitHub never answers a draft or a prerelease here, and
 /// both are refused anyway).
 pub const LATEST_URL: &str = "https://api.github.com/repos/MyndPhreak/Negotium/releases/latest";
@@ -37,8 +39,10 @@ pub const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 /// Each request's resolve, connect, send and receive timeouts.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What one request may take: at most `bytes` of body, and `deadline` overall (a trickle that
-/// never trips [`TIMEOUT`] still ends).
+/// What one request may take: at most `bytes` of body, and `deadline` overall, so a trickle that
+/// never trips [`TIMEOUT`] still ends. The deadline is checked between stages (before each hop
+/// and between reads), not as a hard interrupt: a stage under way can outlast it by up to
+/// [`TIMEOUT`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limit {
     pub bytes: usize,
@@ -67,9 +71,20 @@ pub struct Release {
     pub msi_url: String,
     /// The release's page (`html_url`), for the log.
     pub page_url: String,
-    /// The asset's SHA-256, from GitHub's `digest` (`sha256:<hex>`) when it gives one; the
-    /// installer is checked against it right before it runs ([`verify_and_launch`]).
-    pub sha256: Option<Digest>,
+    /// The asset's digest from GitHub; a SHA-256 is checked right before the installer runs
+    /// ([`verify_and_launch`]).
+    pub digest: AssetDigest,
+}
+
+/// An asset's `digest` as GitHub gives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssetDigest {
+    /// `sha256:<64 hex digits>`.
+    Sha256(Digest),
+    /// None given (assets uploaded before GitHub added digests): installed unverified, logged.
+    Absent,
+    /// Another algorithm Negotium can't check: like [`AssetDigest::Absent`], logged as such.
+    Unknown(String),
 }
 
 impl Release {
@@ -104,6 +119,10 @@ pub enum UpdateError {
     Start(String),
     /// The UAC prompt for msiexec was declined: nothing ran.
     Cancelled,
+    /// A body larger than the request's [`Limit`] allows.
+    TooLarge(usize),
+    /// The admin-only update folder couldn't be made or isn't safe ([`secure`]).
+    Folder(String),
 }
 
 impl std::fmt::Display for UpdateError {
@@ -119,6 +138,8 @@ impl std::fmt::Display for UpdateError {
             UpdateError::Digest(e) => write!(f, "the installer isn't the release's: {e}"),
             UpdateError::Start(e) => write!(f, "the installer couldn't be started: {e}"),
             UpdateError::Cancelled => f.write_str("it was cancelled"),
+            UpdateError::TooLarge(limit) => write!(f, "GitHub's answer was larger than {limit} bytes"),
+            UpdateError::Folder(e) => write!(f, "the update folder isn't safe to use: {e}"),
         }
     }
 }
@@ -204,13 +225,15 @@ pub fn parse_latest(json: &str, current: &str) -> Result<Option<Release>, Update
     if !asset_allowed(url, tag) {
         return Err(UpdateError::Release(format!("{tag}'s installer {url:?} is not a GitHub download of {tag} over HTTPS")));
     }
-    let sha256 = match msi.digest.as_deref() {
-        None => None,
-        Some(digest) => Some(
+    let digest = match msi.digest.as_deref() {
+        None | Some("") => AssetDigest::Absent,
+        // A SHA-256 that doesn't parse is a broken release, not an unknown algorithm.
+        Some(digest) if digest.starts_with("sha256:") => AssetDigest::Sha256(
             parse_digest(digest).ok_or_else(|| UpdateError::Release(format!("{tag}'s installer digest {digest:?} is not sha256:<hex>")))?,
         ),
+        Some(other) => AssetDigest::Unknown(other.to_string()),
     };
-    Ok(Some(Release { version, msi_url: url.clone(), page_url: latest.html_url, sha256 }))
+    Ok(Some(Release { version, msi_url: url.clone(), page_url: latest.html_url, digest }))
 }
 
 /// An `https://` URL, split.
@@ -302,19 +325,16 @@ pub fn check(fetch: &dyn Fetch, current: &str) -> Result<Option<Release>, Update
     parse_latest(json, current)
 }
 
-/// Where downloads go: `%TEMP%\Negotium-update`.
-pub fn update_dir() -> PathBuf {
-    std::env::temp_dir().join("Negotium-update")
-}
-
 /// An installer of `len` bytes is plausible: not empty, not over [`MAX_MSI_BYTES`].
 pub fn msi_size_ok(len: usize) -> bool {
     (1..=MAX_MSI_BYTES).contains(&len)
 }
 
 /// Downloads `release`'s installer to `dir\Negotium-X.Y.Z.msi` (replacing an earlier one). The URL
-/// is checked again first, and the body must look like an MSI. Written beside and then renamed,
-/// so a failed download never leaves half an installer under the final name.
+/// is checked again first, and the body must look like an MSI. Written beside, to a file this call
+/// creates (a leftover is deleted first, so nobody else's handle or permissions carry over), then
+/// renamed, so a failed download never leaves half an installer under the final name. `dir` is
+/// ready ([`secure::UpdateDir::prepare`]).
 pub fn download(fetch: &dyn Fetch, release: &Release, dir: &Path) -> Result<PathBuf, UpdateError> {
     if !asset_allowed(&release.msi_url, &release.tag()) {
         return Err(UpdateError::Release(format!("{:?} is not a GitHub download over HTTPS", release.msi_url)));
@@ -330,8 +350,14 @@ pub fn download(fetch: &dyn Fetch, release: &Release, dir: &Path) -> Result<Path
     let path = dir.join(format!("Negotium-{x}.{y}.{z}.msi"));
     let part = path.with_extension("msi.part");
     let io = |e: std::io::Error| UpdateError::Io(e.to_string());
-    std::fs::create_dir_all(dir).map_err(io)?;
-    std::fs::write(&part, &body).map_err(io)?;
+    if std::fs::symlink_metadata(&part).is_ok() {
+        secure::delete_no_follow(&part)?;
+    }
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(io)?;
+        file.write_all(&body).map_err(io)?;
+    }
     std::fs::rename(&part, &path).map_err(|e| {
         let _ = std::fs::remove_file(&part);
         io(e)
@@ -355,27 +381,38 @@ pub fn sha256(bytes: &[u8]) -> Result<Digest, UpdateError> {
     if status.is_ok() { Ok(out) } else { Err(UpdateError::Digest(format!("SHA-256 failed (NTSTATUS {:#x})", status.0))) }
 }
 
-/// The last step before the installer runs: `msi` is checked against the release's digest (read
-/// again now, not trusted from the download) and then `launch`ed. A mismatch deletes the file and
-/// nothing runs; a release without a digest is logged and installed unverified (assets uploaded
-/// before GitHub added digests have none). Off the UI thread in the app.
+/// The last step before the installer runs. `msi` is opened without following a link and shared
+/// for reading only ([`secure::open_held`]), read and hashed through that handle, checked against
+/// the release's digest and then `launch`ed, the handle still open: from the hash to msiexec
+/// reading it, nothing can change, rename or delete the file. The handle is returned for the
+/// caller to keep until Negotium exits. A mismatch deletes the file (through a handle, never a
+/// link) and nothing runs; a release without a SHA-256 is logged once and installed unverified.
+/// Off the UI thread in the app.
 pub fn verify_and_launch(
     msi: &Path,
-    expected: Option<&Digest>,
+    digest: &AssetDigest,
     launch: &dyn Fn(&Path) -> Result<(), UpdateError>,
     log: &dyn Fn(&str),
-) -> Result<(), UpdateError> {
-    match expected {
-        Some(expected) => {
-            let bytes = std::fs::read(msi).map_err(|e| UpdateError::Io(e.to_string()))?;
+) -> Result<std::fs::File, UpdateError> {
+    use std::io::Read;
+    let held = secure::open_held(msi)?;
+    match digest {
+        AssetDigest::Sha256(expected) => {
+            let mut bytes = Vec::new();
+            (&held).take(MAX_MSI_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| UpdateError::Io(e.to_string()))?;
             if sha256(&bytes)? != *expected {
-                let _ = std::fs::remove_file(msi);
+                drop(held);
+                let _ = secure::delete_no_follow(msi);
                 return Err(UpdateError::Digest("its SHA-256 doesn't match the release's digest".into()));
             }
         }
-        None => log(&format!("{}: the release gives no SHA-256 digest; installing it unverified", msi.display())),
+        AssetDigest::Absent => log(&format!("{}: the release gives no SHA-256 digest; installing it unverified", msi.display())),
+        AssetDigest::Unknown(d) => {
+            log(&format!("{}: the release's digest {d:?} isn't one Negotium can check; installing it unverified", msi.display()))
+        }
     }
-    launch(msi)
+    launch(msi)?;
+    Ok(held)
 }
 
 /// Starts `<System32>\msiexec.exe` on `msi` ([`installer_args`]) elevated (the `runas` verb: one
@@ -534,7 +571,7 @@ fn get_once(url: &str, limit: Limit, deadline: std::time::Instant) -> Result<Hop
             }
             let start = body.len();
             if start + available as usize > limit.bytes {
-                return Err(UpdateError::Download(format!("over {} bytes", limit.bytes)));
+                return Err(UpdateError::TooLarge(limit.bytes));
             }
             body.resize(start + available as usize, 0);
             let mut read = 0u32;
@@ -558,15 +595,23 @@ pub const CHECK_FAILED: &str = "Couldn't check for updates";
 pub type Checked = Box<dyn FnOnce(Result<Option<Release>, UpdateError>)>;
 /// A download's outcome (the saved installer), delivered on the UI thread.
 pub type Downloaded = Box<dyn FnOnce(Result<PathBuf, UpdateError>)>;
-/// The installer's start (UAC answered), delivered on the UI thread.
-pub type Installed = Box<dyn FnOnce(Result<(), UpdateError>)>;
+/// The installer's start (UAC answered), delivered on the UI thread with the handle that keeps
+/// the installer unchanged.
+pub type Installed = Box<dyn FnOnce(Result<HeldInstaller, UpdateError>)>;
+
+/// How long Negotium stays after msiexec has started, still holding the installer (shared for
+/// reading only), so msiexec opens it while nothing can change it; then it exits.
+pub const EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// The installer's handle from [`verify_and_launch`], kept until Negotium exits (`None` in tests).
+pub struct HeldInstaller(pub Option<std::fs::File>);
 
 /// A downloaded installer to check and start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Installing {
     pub msi: PathBuf,
-    /// The release's digest, if it gives one.
-    pub sha256: Option<Digest>,
+    /// The release's digest.
+    pub digest: AssetDigest,
     /// The UAC prompt's owner window (0: none).
     pub owner: isize,
 }
@@ -578,7 +623,8 @@ pub struct UpdateIo {
     pub installed: bool,
     /// [`check`] against GitHub, off the UI thread ([`check_in_background`] in the app).
     pub check: Box<dyn Fn(Checked)>,
-    /// [`download`] to [`update_dir`], off the UI thread ([`download_in_background`] in the app).
+    /// [`download`] to the update folder, off the UI thread ([`download_in_background`] in the
+    /// app).
     pub download: Box<dyn Fn(Release, Downloaded)>,
     /// [`verify_and_launch`] with [`launch_msiexec`], off the UI thread
     /// ([`install_in_background`] in the app).
@@ -587,6 +633,17 @@ pub struct UpdateIo {
     pub exit: Box<dyn Fn()>,
     /// A log line (the startup check's failures are only logged).
     pub log: Box<dyn Fn(&str)>,
+}
+
+/// Where an update is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Nothing under way: the banner (if any) offers the release.
+    Idle,
+    /// Downloading, checking, or waiting on the UAC prompt.
+    Downloading,
+    /// msiexec has started; Negotium exits after [`EXIT_GRACE`].
+    Installing,
 }
 
 /// The window's side of updates: the startup and manual checks, the banner, the update.
@@ -598,8 +655,10 @@ pub struct Updater {
     manual: Cell<bool>,
     /// The release the banner offers.
     offered: RefCell<Option<Release>>,
-    /// Downloading or starting the installer: the banner waits.
-    updating: Cell<bool>,
+    /// Anything but `Idle`: the banner waits.
+    phase: Cell<Phase>,
+    /// The started installer's handle, held until Negotium exits.
+    held: RefCell<Option<HeldInstaller>>,
 }
 
 impl Updater {
@@ -611,7 +670,8 @@ impl Updater {
             checking: Cell::new(false),
             manual: Cell::new(false),
             offered: RefCell::new(None),
-            updating: Cell::new(false),
+            phase: Cell::new(Phase::Idle),
+            held: RefCell::new(None),
         });
         {
             let u = updater.clone();
@@ -628,6 +688,10 @@ impl Updater {
         updater
     }
 
+    fn updating(&self) -> bool {
+        self.phase.get() != Phase::Idle
+    }
+
     /// The window is up: the installed copy checks once if "Check for updates on startup" is on.
     pub fn startup(self: &Rc<Self>, check_updates: bool) {
         if startup_check_wanted(self.io.installed, check_updates) {
@@ -637,7 +701,7 @@ impl Updater {
 
     /// Settings "Check for updates": always (the installed copy), reported on the page.
     pub fn check_now(self: &Rc<Self>) {
-        if !self.io.installed || self.updating.get() {
+        if !self.io.installed || self.updating() {
             return;
         }
         self.manual.set(true);
@@ -657,8 +721,12 @@ impl Updater {
     fn checked(&self, result: Result<Option<Release>, UpdateError>) {
         self.checking.set(false);
         let manual = self.manual.take();
-        // An update under way keeps its banner: a check that lands meanwhile changes nothing.
-        if self.updating.get() {
+        // An update under way keeps its banner: a check that lands meanwhile changes nothing,
+        // and a manual one's "Checking…" is cleared.
+        if self.updating() {
+            if manual {
+                self.set_status("");
+            }
             return;
         }
         match result {
@@ -684,14 +752,15 @@ impl Updater {
         }
     }
 
-    /// "Update": download the offered installer, check it and start it elevated, then quit. A
-    /// declined UAC prompt or a failure says so, Negotium keeps running and the banner offers the
-    /// update again.
+    /// "Update": download the offered installer, check it and start it elevated, then quit after
+    /// [`EXIT_GRACE`]. A declined UAC prompt or a failure says so, Negotium keeps running and the
+    /// banner offers the update again.
     pub fn accept(self: &Rc<Self>) {
         let Some(release) = self.offered.borrow().clone() else { return };
-        if self.updating.replace(true) {
+        if self.updating() {
             return;
         }
+        self.phase.set(Phase::Downloading);
         self.show_banner();
         let this = self.clone();
         (self.io.download)(
@@ -700,15 +769,12 @@ impl Updater {
                 Err(e) => this.update_failed(&release, e),
                 Ok(msi) => {
                     let owner = this.weak.upgrade().and_then(|ui| crate::platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
-                    let job = Installing { msi: msi.clone(), sha256: release.sha256, owner };
+                    let job = Installing { msi: msi.clone(), digest: release.digest.clone(), owner };
                     let after = this.clone();
                     (this.io.install)(
                         job,
                         Box::new(move |started| match started {
-                            Ok(()) => {
-                                (after.io.log)(&format!("updating to {}: started msiexec on {}", release.tag(), msi.display()));
-                                (after.io.exit)();
-                            }
+                            Ok(held) => after.installing(&release, &msi, held),
                             Err(e) => after.update_failed(&release, e),
                         }),
                     );
@@ -717,10 +783,20 @@ impl Updater {
         );
     }
 
+    /// msiexec has started: hold the installer, say so, and exit after [`EXIT_GRACE`].
+    fn installing(self: &Rc<Self>, release: &Release, msi: &Path, held: HeldInstaller) {
+        (self.io.log)(&format!("updating to {}: started msiexec on {}", release.tag(), msi.display()));
+        *self.held.borrow_mut() = Some(held);
+        self.phase.set(Phase::Installing);
+        self.show_banner();
+        let this = self.clone();
+        slint::Timer::single_shot(EXIT_GRACE, move || (this.io.exit)());
+    }
+
     /// The update didn't start: logged, said, and offered again.
     fn update_failed(&self, release: &Release, e: UpdateError) {
         let tag = release.tag();
-        self.updating.set(false);
+        self.phase.set(Phase::Idle);
         self.show_banner();
         let toast = if e == UpdateError::Cancelled {
             (self.io.log)(&format!("update to {tag} cancelled at the UAC prompt"));
@@ -736,7 +812,7 @@ impl Updater {
 
     /// "Dismiss": the banner goes until the next check finds a release.
     pub fn dismiss(&self) {
-        if self.updating.get() {
+        if self.updating() {
             return;
         }
         *self.offered.borrow_mut() = None;
@@ -746,13 +822,14 @@ impl Updater {
     fn show_banner(&self) {
         let Some(ui) = self.weak.upgrade() else { return };
         let offered = self.offered.borrow();
-        let text = match offered.as_ref() {
-            Some(r) if self.updating.get() => format!("Downloading {}…", r.tag()),
-            Some(r) => banner_text(r),
-            None => String::new(),
+        let text = match (offered.as_ref(), self.phase.get()) {
+            (Some(r), Phase::Downloading) => format!("Downloading {}…", r.tag()),
+            (Some(r), Phase::Installing) => format!("Installing {}…", r.tag()),
+            (Some(r), Phase::Idle) => banner_text(r),
+            (None, _) => String::new(),
         };
         ui.set_update_banner(text.into());
-        ui.set_update_busy(self.updating.get());
+        ui.set_update_busy(self.updating());
     }
 
     fn set_status(&self, text: &str) {
@@ -768,19 +845,32 @@ pub fn check_in_background(done: Checked) {
     crate::settingspage::in_background(move || check(&WinHttp, crate::install::VERSION), done);
 }
 
-/// The app's [`UpdateIo::download`]: [`download`] through [`WinHttp`] to [`update_dir`] on its
-/// own thread. Never called by tests.
-pub fn download_in_background(release: Release, done: Downloaded) {
-    crate::settingspage::in_background(move || download(&WinHttp, &release, &update_dir()), done);
-}
-
-/// The app's [`UpdateIo::install`]: [`verify_and_launch`] with [`launch_msiexec`] on its own
-/// thread (it waits for the UAC prompt). Never called by tests.
-pub fn install_in_background(job: Installing, done: Installed) {
+/// The app's [`UpdateIo::download`]: [`download`] through [`WinHttp`] on its own thread, into the
+/// update folder for a process that is (or isn't) `elevated` ([`secure::update_dir`]), made and
+/// checked first. Never called by tests.
+pub fn download_in_background(release: Release, elevated: bool, done: Downloaded) {
     crate::settingspage::in_background(
         move || {
+            let dir = secure::update_dir(elevated)?;
+            download(&WinHttp, &release, dir.prepare(&secure::SystemAcl)?)
+        },
+        done,
+    );
+}
+
+/// The app's [`UpdateIo::install`]: the update folder checked again (the installer must be in
+/// it), then [`verify_and_launch`] with [`launch_msiexec`], on its own thread (it waits for the
+/// UAC prompt). Never called by tests.
+pub fn install_in_background(job: Installing, elevated: bool, done: Installed) {
+    crate::settingspage::in_background(
+        move || {
+            let dir = secure::update_dir(elevated)?;
+            let dir = dir.prepare(&secure::SystemAcl)?;
+            if job.msi.parent() != Some(dir) {
+                return Err(UpdateError::Folder(format!("{} is not in {}", job.msi.display(), dir.display())));
+            }
             let log = |line: &str| crate::log::Log::new(crate::log::Log::default_path()).warn(line);
-            verify_and_launch(&job.msi, job.sha256.as_ref(), &|msi| launch_msiexec(msi, job.owner), &log)
+            verify_and_launch(&job.msi, &job.digest, &|msi| launch_msiexec(msi, job.owner), &log).map(|f| HeldInstaller(Some(f)))
         },
         done,
     );
@@ -818,7 +908,7 @@ mod tests {
     #[test]
     fn a_newer_release_is_offered() {
         let release = parse_latest(&one_msi("v0.2.0"), "0.1.0").unwrap();
-        assert_eq!(release, Some(Release { version: (0, 2, 0), msi_url: "https://github.com/MyndPhreak/Negotium/releases/download/v0.2.0/Negotium.msi".into(), page_url: PAGE.into(), sha256: None }));
+        assert_eq!(release, Some(Release { version: (0, 2, 0), msi_url: "https://github.com/MyndPhreak/Negotium/releases/download/v0.2.0/Negotium.msi".into(), page_url: PAGE.into(), digest: AssetDigest::Absent }));
         assert_eq!(release.unwrap().tag(), "v0.2.0");
     }
 
@@ -905,19 +995,18 @@ mod tests {
     #[test]
     fn the_assets_digest_is_read() {
         let release = parse_latest(&with_digest(format!("sha256:{ABC}").into()), "0.1.0").unwrap().unwrap();
-        assert_eq!(release.sha256, Some(sha256(b"abc").unwrap()));
-        assert_eq!(parse_latest(&with_digest(serde_json::Value::Null), "0.1.0").unwrap().unwrap().sha256, None, "null: none");
-        assert_eq!(parse_latest(&one_msi("v0.2.0"), "0.1.0").unwrap().unwrap().sha256, None, "absent: none");
-        for bad in [
-            format!("sha256:{}", &ABC[1..]),
-            format!("sha256:{ABC}0"),
-            format!("sha256:{}", ABC.replace('b', "g")),
-            format!("sha512:{ABC}"),
-            format!("SHA256 {ABC}"),
-            ABC.to_string(),
-            String::new(),
-        ] {
-            let got = parse_latest(&with_digest(bad.clone().into()), "0.1.0");
+        assert_eq!(release.digest, AssetDigest::Sha256(sha256(b"abc").unwrap()));
+        let digest = |d: serde_json::Value| parse_latest(&with_digest(d), "0.1.0").map(|r| r.unwrap().digest);
+        assert_eq!(digest(serde_json::Value::Null), Ok(AssetDigest::Absent), "null");
+        assert_eq!(digest("".into()), Ok(AssetDigest::Absent), "empty");
+        assert_eq!(parse_latest(&one_msi("v0.2.0"), "0.1.0").unwrap().unwrap().digest, AssetDigest::Absent, "absent");
+        // Another algorithm: logged at install and treated like none, never blocking updates.
+        for other in [format!("sha512:{ABC}"), format!("SHA256 {ABC}"), ABC.to_string()] {
+            assert_eq!(digest(other.clone().into()), Ok(AssetDigest::Unknown(other.clone())), "{other:?}");
+        }
+        // A SHA-256 that doesn't parse refuses the release.
+        for bad in [format!("sha256:{}", &ABC[1..]), format!("sha256:{ABC}0"), format!("sha256:{}", ABC.replace('b', "g")), "sha256:".into()] {
+            let got = digest(bad.clone().into());
             assert!(matches!(got, Err(UpdateError::Release(_))), "{bad:?}: {got:?}");
         }
     }
@@ -928,21 +1017,21 @@ mod tests {
         assert_eq!(hex, ABC);
     }
 
-    /// `verify_and_launch` with a recording launcher that answers `answer`; returns the result,
-    /// what was launched and the log.
-    fn verify(msi: &Path, expected: Option<&Digest>, answer: Result<(), UpdateError>) -> (Result<(), UpdateError>, Vec<PathBuf>, Vec<String>) {
+    /// `verify_and_launch` with a recording launcher that answers `answer`; returns the result
+    /// (the held handle dropped), what was launched and the log.
+    fn verify(msi: &Path, digest: &AssetDigest, answer: Result<(), UpdateError>) -> (Result<(), UpdateError>, Vec<PathBuf>, Vec<String>) {
         let launched = RefCell::new(Vec::new());
         let log = RefCell::new(Vec::new());
         let result = verify_and_launch(
             msi,
-            expected,
+            digest,
             &|m| {
                 launched.borrow_mut().push(m.to_path_buf());
                 answer.clone()
             },
             &|l| log.borrow_mut().push(l.to_string()),
         );
-        (result, launched.into_inner(), log.into_inner())
+        (result.map(drop), launched.into_inner(), log.into_inner())
     }
 
     #[test]
@@ -951,33 +1040,67 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let msi = dir.join("Negotium-0.2.0.msi");
         std::fs::write(&msi, b"abc").unwrap();
-        let good = sha256(b"abc").unwrap();
+        let good = AssetDigest::Sha256(sha256(b"abc").unwrap());
 
-        let (result, launched, log) = verify(&msi, Some(&good), Ok(()));
+        let (result, launched, log) = verify(&msi, &good, Ok(()));
         assert_eq!(result, Ok(()));
         assert_eq!(launched, std::slice::from_ref(&msi), "a match runs");
         assert!(log.is_empty());
 
-        let (result, launched, log) = verify(&msi, None, Ok(()));
-        assert_eq!(result, Ok(()));
-        assert_eq!(launched, std::slice::from_ref(&msi), "no digest: runs, unverified");
-        assert_eq!(log.len(), 1, "logged once: {log:?}");
-        assert!(log[0].contains("unverified"));
+        for digest in [AssetDigest::Absent, AssetDigest::Unknown("sha512:00".into())] {
+            let (result, launched, log) = verify(&msi, &digest, Ok(()));
+            assert_eq!(result, Ok(()));
+            assert_eq!(launched, std::slice::from_ref(&msi), "{digest:?}: runs, unverified");
+            assert_eq!(log.len(), 1, "logged once: {log:?}");
+            assert!(log[0].contains("unverified"));
+        }
 
-        let (result, _, _) = verify(&msi, Some(&good), Err(UpdateError::Cancelled));
+        let (result, _, _) = verify(&msi, &good, Err(UpdateError::Cancelled));
         assert_eq!(result, Err(UpdateError::Cancelled), "a declined prompt comes back as such");
 
         // Swapped after the download: refused, deleted, never run.
         std::fs::write(&msi, b"abd").unwrap();
-        let (result, launched, _) = verify(&msi, Some(&good), Ok(()));
+        let (result, launched, _) = verify(&msi, &good, Ok(()));
         assert!(matches!(result, Err(UpdateError::Digest(_))), "{result:?}");
         assert!(launched.is_empty(), "a mismatch never runs");
         assert!(!msi.exists(), "and is deleted");
 
-        let (result, launched, _) = verify(&msi, Some(&good), Ok(()));
+        let (result, launched, _) = verify(&msi, &good, Ok(()));
         assert!(matches!(result, Err(UpdateError::Io(_))), "gone: {result:?}");
         assert!(launched.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_installer_stays_locked_from_the_hash_through_the_launch() {
+        let dir = scratch("locked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let msi = dir.join("Negotium-0.2.0.msi");
+        std::fs::write(&msi, b"abc").unwrap();
+        let writable_at_launch = RefCell::new(None);
+        let held = verify_and_launch(
+            &msi,
+            &AssetDigest::Sha256(sha256(b"abc").unwrap()),
+            &|m| {
+                *writable_at_launch.borrow_mut() = Some(std::fs::OpenOptions::new().write(true).open(m).is_ok());
+                assert!(std::fs::File::open(m).is_ok(), "msiexec can read it");
+                Ok(())
+            },
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(*writable_at_launch.borrow(), Some(false), "nobody can write it while msiexec starts");
+        assert!(std::fs::remove_file(&msi).is_err(), "or delete it while it is held");
+        drop(held);
+        assert!(std::fs::remove_file(&msi).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn errors_say_what_went_wrong() {
+        assert_eq!(UpdateError::TooLarge(MAX_JSON_BYTES).to_string(), "GitHub's answer was larger than 2097152 bytes");
+        assert!(!UpdateError::TooLarge(1).to_string().contains("installer"), "not an installer problem");
+        assert!(UpdateError::Folder("x".into()).to_string().contains("update folder"));
     }
 
     #[test]
@@ -1027,7 +1150,7 @@ mod tests {
     const MSI_BYTES: [u8; 12] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 1, 2, 3, 4];
 
     fn release() -> Release {
-        Release { version: (0, 2, 0), msi_url: MSI.into(), page_url: PAGE.into(), sha256: None }
+        Release { version: (0, 2, 0), msi_url: MSI.into(), page_url: PAGE.into(), digest: AssetDigest::Absent }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -1039,6 +1162,7 @@ mod tests {
     #[test]
     fn download_saves_the_msi_by_version_and_overwrites() {
         let dir = scratch("download");
+        std::fs::create_dir_all(&dir).unwrap(); // the folder is ready (`UpdateDir::prepare`)
         let fetch = FakeFetch::with(MSI, Ok(MSI_BYTES.to_vec()));
         let path = download(&fetch, &release(), &dir).unwrap();
         assert_eq!(path, dir.join("Negotium-0.2.0.msi"));
@@ -1048,6 +1172,7 @@ mod tests {
         assert_eq!(MSI_LIMIT.deadline, std::time::Duration::from_secs(600), "a trickle ends");
         let mut newer = MSI_BYTES.to_vec();
         newer.push(9);
+        std::fs::write(dir.join("Negotium-0.2.0.msi.part"), b"left over").unwrap(); // deleted, then made anew
         let path = download(&FakeFetch::with(MSI, Ok(newer.clone())), &release(), &dir).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), newer, "an earlier download is replaced");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "nothing else is left behind");
@@ -1057,6 +1182,7 @@ mod tests {
     #[test]
     fn download_refuses_what_is_not_an_msi() {
         let dir = scratch("refuse");
+        std::fs::create_dir_all(&dir).unwrap();
         for body in [vec![], b"<html>rate limited</html>".to_vec()] {
             let got = download(&FakeFetch::with(MSI, Ok(body.clone())), &release(), &dir);
             assert!(matches!(got, Err(UpdateError::Download(_))), "{body:?}: {got:?}");
@@ -1071,11 +1197,6 @@ mod tests {
         assert!(fetch.asked.borrow().is_empty(), "never fetched");
         assert!(!dir.join("Negotium-0.2.0.msi").exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_update_goes_to_temp() {
-        assert_eq!(update_dir(), std::env::temp_dir().join("Negotium-update"));
     }
 
     #[test]

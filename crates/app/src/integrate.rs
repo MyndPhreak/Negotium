@@ -426,16 +426,7 @@ pub fn task_manager_path() -> Option<PathBuf> {
 /// anywhere: an elevated open-task-manager, or the updater's msiexec, must never start a file the
 /// user picked).
 pub fn system32() -> Option<PathBuf> {
-    use std::ffi::c_void;
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{FOLDERID_System, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
-    // SAFETY: returns a CoTaskMem string that is freed below.
-    let p = unsafe { SHGetKnownFolderPath(&FOLDERID_System, KNOWN_FOLDER_FLAG(0), None) }.ok()?;
-    // SAFETY: `p` is a valid NUL-terminated string until freed.
-    let s = unsafe { p.to_string() }.ok();
-    // SAFETY: allocated by SHGetKnownFolderPath; freed exactly once.
-    unsafe { CoTaskMemFree(Some(p.0 as *const c_void)) };
-    s.filter(|s| !s.is_empty()).map(PathBuf::from)
+    crate::install::known_folder(&windows::Win32::UI::Shell::FOLDERID_System)
 }
 
 /// Whether this launch starts hidden in the tray (Start with Windows): `--tray` (the Run value,

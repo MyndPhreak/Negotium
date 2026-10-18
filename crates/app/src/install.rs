@@ -37,11 +37,16 @@ pub fn current() -> Install {
 /// known folder rather than `%ProgramFiles%`: an environment variable the user can change would
 /// make a build tree look like the installed copy.
 pub fn program_files() -> Option<PathBuf> {
+    known_folder(&windows::Win32::UI::Shell::FOLDERID_ProgramFiles)
+}
+
+/// A shell known folder (`FOLDERID_*`), or `None` if Windows doesn't say.
+pub fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     use std::ffi::c_void;
     use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{FOLDERID_ProgramFiles, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+    use windows::Win32::UI::Shell::{KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
     // SAFETY: returns a CoTaskMem string that is freed below.
-    let p = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KNOWN_FOLDER_FLAG(0), None) }.ok()?;
+    let p = unsafe { SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG(0), None) }.ok()?;
     // SAFETY: `p` is a valid NUL-terminated string until freed.
     let s = unsafe { p.to_string() }.ok();
     // SAFETY: allocated by SHGetKnownFolderPath; freed exactly once.
