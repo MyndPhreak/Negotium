@@ -116,11 +116,16 @@ fn com_error(e: windows::core::Error) -> ActionError {
 /// Whether `path` lies under the temp folder: absolute, inside it (not the folder itself), and
 /// with no `..` component to climb out.
 fn in_temp_dir(path: &Path) -> bool {
-    use std::path::Component;
+    use std::path::{Component, PathBuf};
     let temp = std::env::temp_dir();
+    // TEMP may be an 8.3 short path (CI runners: `RUNNER~1`); accept its long form too.
+    let long = std::fs::canonicalize(&temp).ok().map(|p| {
+        let s = p.to_string_lossy().into_owned();
+        PathBuf::from(s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s))
+    });
+    let under = |root: &Path| path != root && path.starts_with(root);
     path.is_absolute()
-        && path != temp
-        && path.starts_with(&temp)
+        && (under(&temp) || long.as_deref().is_some_and(under))
         && !path
             .components()
             .any(|c| c == Component::ParentDir)
