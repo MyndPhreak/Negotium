@@ -283,6 +283,7 @@ pub fn save_with(writes: &Writes, path: &Path, s: &Settings) -> std::io::Result<
 #[derive(Clone)]
 pub struct Saver {
     path: PathBuf,
+    writes: Writes,
     pending: Arc<Mutex<Option<Settings>>>,
     write: Arc<Mutex<()>>,
     in_flight: Arc<(Mutex<usize>, Condvar)>,
@@ -307,18 +308,29 @@ impl Drop for InFlight {
 }
 
 impl Saver {
+    /// Saves to `path` as this process writes there (`appdata::writes`).
     pub fn new(path: PathBuf) -> Self {
-        Self { path, pending: Default::default(), write: Default::default(), in_flight: Default::default() }
+        Self::with_writes(path, crate::appdata::writes())
+    }
+
+    /// Saves to `path` through `writes` (tests choose, so they behave the same elevated or not).
+    pub fn with_writes(path: PathBuf, writes: Writes) -> Self {
+        Self { path, writes, pending: Default::default(), write: Default::default(), in_flight: Default::default() }
+    }
+
+    /// How this saver writes (other writes that go with the settings use it too).
+    pub fn writes(&self) -> &Writes {
+        &self.writes
     }
 
     pub fn save(&self, s: Settings) -> std::thread::JoinHandle<()> {
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
-        let (path, pending, write) = (self.path.clone(), self.pending.clone(), self.write.clone());
+        let (path, writes, pending, write) = (self.path.clone(), self.writes.clone(), self.pending.clone(), self.write.clone());
         self.run(move || {
             let _writing = write.lock().unwrap_or_else(|e| e.into_inner());
             let next = pending.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(s) = next
-                && let Err(e) = save(&path, &s)
+                && let Err(e) = save_with(&writes, &path, &s)
             {
                 crate::log::Log::new(crate::log::Log::default_path()).warn(&format!("settings not saved: {e}"));
             }
@@ -357,7 +369,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         std::fs::write(&path, r#"{"smooth_graphs":false,"tray_cpu":false,"keep_in_tray":false}"#).unwrap();
-        let (s, loaded) = load(&path);
+        let (s, loaded) = load_with(&Writes::Plain, &path);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(loaded, Loaded::File);
         assert!(!s.smooth_graphs && !s.tray_cpu && !s.keep_in_tray, "{s:?}");
@@ -443,7 +455,7 @@ mod tests {
     #[test]
     fn a_missing_file_means_defaults_and_the_tray_is_on_by_default() {
         let dir = TempDir::new("missing");
-        let (s, how) = load(&dir.file());
+        let (s, how) = load_with(&Writes::Plain, &dir.file());
         assert_eq!(how, Loaded::Defaults);
         assert_eq!(s, Settings::default());
         assert!(s.keep_in_tray, "spec 5.4: keep running in tray defaults on");
@@ -456,13 +468,13 @@ mod tests {
         let dir = TempDir::new("smooth");
         let p = dir.file();
         std::fs::write(&p, r#"{"refresh_ms": 2000}"#).unwrap();
-        assert!(load(&p).0.smooth_graphs, "a file that predates the switch: on");
+        assert!(load_with(&Writes::Plain, &p).0.smooth_graphs, "a file that predates the switch: on");
         std::fs::write(&p, r#"{"smooth_graphs": "yes", "refresh_ms": 2000}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["smooth_graphs".to_string()]));
         assert!(s.smooth_graphs && s.refresh_ms == 2000);
         std::fs::write(&p, r#"{"smooth_graphs": false}"#).unwrap();
-        assert!(!load(&p).0.smooth_graphs);
+        assert!(!load_with(&Writes::Plain, &p).0.smooth_graphs);
     }
 
     #[test]
@@ -470,15 +482,15 @@ mod tests {
         let dir = TempDir::new("installer-fields");
         let p = dir.file();
         std::fs::write(&p, r#"{"refresh_ms": 2000}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::File);
         assert!(s.check_updates && !s.start_with_windows, "a file that predates them: updates on, start off");
         std::fs::write(&p, r#"{"check_updates": "yes", "start_with_windows": 1, "refresh_ms": 2000}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["check_updates".to_string(), "start_with_windows".to_string()]));
         assert!(s.check_updates && !s.start_with_windows && s.refresh_ms == 2000);
         std::fs::write(&p, r#"{"check_updates": false, "start_with_windows": true}"#).unwrap();
-        let s = load(&p).0;
+        let s = load_with(&Writes::Plain, &p).0;
         assert!(!s.check_updates && s.start_with_windows);
     }
 
@@ -487,9 +499,9 @@ mod tests {
         let dir = TempDir::new("traycpu");
         let p = dir.file();
         std::fs::write(&p, r#"{"keep_in_tray": false}"#).unwrap();
-        assert!(load(&p).0.tray_cpu, "a file that predates the switch: on");
+        assert!(load_with(&Writes::Plain, &p).0.tray_cpu, "a file that predates the switch: on");
         std::fs::write(&p, r#"{"tray_cpu": 1, "keep_in_tray": false}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["tray_cpu".to_string()]));
         assert!(s.tray_cpu && !s.keep_in_tray);
     }
@@ -500,12 +512,12 @@ mod tests {
         let dir = TempDir::new("sort");
         let p = dir.file();
         std::fs::write(&p, r#"{"refresh_ms": 2000}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::File);
         assert_eq!(s.sort(), Sort { column: SortColumn::Metric(Metric::Cpu), descending: true });
         assert!(s.group_by_type, "a file that predates the switch: grouped");
         std::fs::write(&p, r#"{"sort_column": "banana", "sort_descending": false, "group_by_type": false}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["sort_column".to_string()]));
         assert_eq!(s.sort(), Sort { column: SortColumn::Metric(Metric::Cpu), descending: false }, "only the column is lost");
         assert!(!s.group_by_type);
@@ -513,8 +525,8 @@ mod tests {
         s.set_sort(Sort { column: SortColumn::Name, descending: false });
         s.group_by_type = false;
         assert_eq!((s.sort_column.as_str(), s.sort_descending), ("name", false));
-        save(&p, &s).unwrap();
-        let (back, how) = load(&p);
+        save_with(&Writes::Plain, &p, &s).unwrap();
+        let (back, how) = load_with(&Writes::Plain, &p);
         assert_eq!((how, back.sort(), back.group_by_type), (Loaded::File, Sort { column: SortColumn::Name, descending: false }, false));
         for m in Metric::ALL {
             s.set_sort(Sort::by(SortColumn::Metric(m)));
@@ -540,9 +552,9 @@ mod tests {
             check_updates: false,
             start_with_windows: true,
         };
-        save(&p, &s).unwrap();
+        save_with(&Writes::Plain, &p, &s).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("\"theme\": \"dark\""));
-        assert_eq!(load(&p), (s, Loaded::File));
+        assert_eq!(load_with(&Writes::Plain, &p), (s, Loaded::File));
         assert!(!p.with_extension("json.tmp").exists(), "the temporary file is renamed into place");
     }
 
@@ -551,12 +563,12 @@ mod tests {
         let dir = TempDir::new("corrupt");
         let p = dir.file();
         std::fs::write(&p, "{\"refresh_ms\": 20").unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(s, Settings::default());
         assert!(matches!(how, Loaded::Recovered(_)), "{how:?}");
         assert_eq!(std::fs::read_to_string(p.with_extension("json.bad")).unwrap(), "{\"refresh_ms\": 20");
         assert!(!p.exists());
-        assert_eq!(load(&p).1, Loaded::Defaults, "the next start is clean");
+        assert_eq!(load_with(&Writes::Plain, &p).1, Loaded::Defaults, "the next start is clean");
     }
 
     #[test]
@@ -564,9 +576,9 @@ mod tests {
         let dir = TempDir::new("twice");
         let p = dir.file();
         std::fs::write(&p, "first").unwrap();
-        load(&p);
+        load_with(&Writes::Plain, &p);
         std::fs::write(&p, "second").unwrap();
-        assert!(matches!(load(&p).1, Loaded::Recovered(_)));
+        assert!(matches!(load_with(&Writes::Plain, &p).1, Loaded::Recovered(_)));
         assert_eq!(std::fs::read_to_string(p.with_extension("json.bad")).unwrap(), "second");
     }
 
@@ -581,7 +593,7 @@ mod tests {
             let dir = TempDir::new(&format!("foreign-{name}"));
             let p = dir.file();
             std::fs::write(&p, bytes).unwrap();
-            let (s, how) = load(&p);
+            let (s, how) = load_with(&Writes::Plain, &p);
             assert_eq!(s, Settings::default(), "{name}");
             assert!(matches!(how, Loaded::Recovered(_)), "{name}: {how:?}");
             assert!(p.with_extension("json.bad").exists(), "{name}");
@@ -594,7 +606,7 @@ mod tests {
         let p = dir.file();
         let text = r#"{"refresh_ms": "fast", "theme": "dark", "always_on_top": true, "gpu_rendering": false}"#;
         std::fs::write(&p, text).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["refresh_ms".to_string()]));
         assert_eq!(
             s,
@@ -610,7 +622,7 @@ mod tests {
         let p = dir.file();
         std::fs::write(&p, r#"{"theme": 7, "refresh_ms": 2000}"#).unwrap();
         std::fs::create_dir(p.with_extension("json.bad")).unwrap(); // the copy cannot land
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(s.refresh_ms, 2000);
         match how {
             Loaded::PartialNotKept(fields, why) => {
@@ -626,7 +638,7 @@ mod tests {
         let dir = TempDir::new("sepia");
         let p = dir.file();
         std::fs::write(&p, r#"{"theme": "sepia", "refresh_ms": 2000, "keep_in_tray": false}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["theme".to_string()]));
         assert_eq!(s, Settings { refresh_ms: 2000, keep_in_tray: false, ..Settings::default() });
     }
@@ -636,7 +648,7 @@ mod tests {
         let dir = TempDir::new("gpusibling");
         let p = dir.file();
         std::fs::write(&p, r#"{"gpu_rendering": false, "theme": 7, "always_on_top": "yes"}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert!(!s.gpu_rendering);
         assert_eq!(how, Loaded::Partial(vec!["theme".to_string(), "always_on_top".to_string()]));
     }
@@ -646,7 +658,7 @@ mod tests {
         let dir = TempDir::new("unreadable");
         let p = dir.file();
         std::fs::create_dir(&p).unwrap(); // reading a directory is an I/O error, not bad content
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(s, Settings::default());
         assert!(matches!(how, Loaded::Unreadable(_)), "{how:?}");
         assert!(p.is_dir() && !p.with_extension("json.bad").exists());
@@ -657,7 +669,7 @@ mod tests {
         let dir = TempDir::new("partial");
         let p = dir.file();
         std::fs::write(&p, r#"{"theme": "light", "admin_mode": "no-prompt"}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::File);
         assert_eq!(s, Settings { theme: ThemeChoice::Light, ..Settings::default() });
         assert!(!p.with_extension("json.bad").exists());
@@ -673,7 +685,7 @@ mod tests {
                 "columns": {"cpu": true}, "startup": {"sort": ["name", "asc"]}}"#,
         )
         .unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::File);
         assert_eq!(s, Settings { refresh_ms: 2000, gpu_rendering: false, ..Settings::default() });
     }
@@ -683,7 +695,7 @@ mod tests {
         let dir = TempDir::new("predates");
         let p = dir.file();
         std::fs::write(&p, r#"{"refresh_ms": 500, "keep_in_tray": false}"#).unwrap();
-        let (s, how) = load(&p);
+        let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::File);
         assert!(s.gpu_rendering);
         assert!(!s.keep_in_tray);
@@ -698,7 +710,7 @@ mod tests {
         let dir = TempDir::new("snap");
         let p = dir.file();
         std::fs::write(&p, r#"{"refresh_ms": 3}"#).unwrap();
-        let (s, _) = load(&p);
+        let (s, _) = load_with(&Writes::Plain, &p);
         assert_eq!(s.refresh_ms, 500);
         assert_eq!(s.refresh_index(), 0);
         assert_eq!(refresh_from_index(3), 5000);
@@ -709,19 +721,19 @@ mod tests {
     fn the_newest_save_wins_when_saves_overlap() {
         let dir = TempDir::new("overlap");
         let p = dir.file();
-        let saver = Saver::new(p.clone());
+        let saver = Saver::with_writes(p.clone(), Writes::Plain);
         let a = saver.save(Settings { refresh_ms: 500, ..Settings::default() });
         let b = saver.save(Settings { refresh_ms: 5000, ..Settings::default() });
         a.join().unwrap();
         b.join().unwrap();
-        assert_eq!(load(&p).0.refresh_ms, 5000);
+        assert_eq!(load_with(&Writes::Plain, &p).0.refresh_ms, 5000);
     }
 
     #[test]
     fn a_flush_lands_pending_writes_before_exit() {
         let dir = TempDir::new("flush");
         let p = dir.file();
-        let saver = Saver::new(p.clone());
+        let saver = Saver::with_writes(p.clone(), Writes::Plain);
         // Fire and forget, as the Settings page does.
         drop(saver.save(Settings { refresh_ms: 2000, ..Settings::default() }));
         let marker = dir.0.join("marker");
@@ -733,14 +745,14 @@ mod tests {
             });
         }
         assert!(saver.clone().flush(std::time::Duration::from_secs(5)), "everything landed in time");
-        assert_eq!(load(&p).0.refresh_ms, 2000, "the pending save is on disk");
+        assert_eq!(load_with(&Writes::Plain, &p).0.refresh_ms, 2000, "the pending save is on disk");
         assert!(marker.is_file(), "the other background write landed too");
         assert!(saver.flush(std::time::Duration::ZERO), "nothing left: a flush returns at once");
     }
 
     #[test]
     fn a_panicking_run_closure_still_lets_flush_return() {
-        let saver = Saver::new(PathBuf::from("unused.json"));
+        let saver = Saver::with_writes(PathBuf::from("unused.json"), Writes::Plain);
         crate::worker::quiet_expected_panics();
         let h = saver.run(|| panic!("test panic: settings write"));
         assert!(h.join().is_err(), "the closure did panic");
@@ -749,7 +761,7 @@ mod tests {
 
     #[test]
     fn a_flush_is_bounded() {
-        let saver = Saver::new(std::env::temp_dir().join("negotium-unused-settings.json"));
+        let saver = Saver::with_writes(std::env::temp_dir().join("negotium-unused-settings.json"), Writes::Plain);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         saver.run(move || {
             let _ = rx.recv(); // until released below

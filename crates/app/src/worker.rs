@@ -349,7 +349,7 @@ mod tests {
         use crate::controls::Page;
         let mut source = LiveSource::new(SharedHistory::default(), Instant::now(), IdSeed::default());
         let dir = std::env::temp_dir().join(format!("negotium-worker-test-{}", std::process::id()));
-        source.log = crate::log::Log::new(dir.join("negotium.log"));
+        source.log = crate::log::Log::with_writes(dir.join("negotium.log"), crate::appdata::Writes::Plain);
         let controls = Controls::default();
 
         let f = source.next_frame(&controls).expect("visible: a frame");
@@ -398,7 +398,7 @@ mod tests {
         let mut source = LiveSource::new(history.clone(), Instant::now(), IdSeed::default())
             .with_tray(Arc::new(move |s| sink_got.lock().unwrap().push(s)));
         let dir = std::env::temp_dir().join(format!("negotium-worker-tray-{}", std::process::id()));
-        source.log = crate::log::Log::new(dir.join("negotium.log"));
+        source.log = crate::log::Log::with_writes(dir.join("negotium.log"), crate::appdata::Writes::Plain);
         // An empty history keeps the next tick's sample whenever it lands (no wall-clock wait).
         let empty = || *history.lock().unwrap() = History::new();
         let controls = Controls::default();
@@ -433,7 +433,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("negotium-worker-ids-{}", std::process::id()));
         let controls = Controls::default();
         let frame = |source: &mut LiveSource| {
-            source.log = crate::log::Log::new(dir.join("negotium.log"));
+            source.log = crate::log::Log::with_writes(dir.join("negotium.log"), crate::appdata::Writes::Plain);
             source.next_frame(&controls).expect("visible: a frame")
         };
         let a = frame(&mut LiveSource::new(history.clone(), Instant::now(), ids.clone()));

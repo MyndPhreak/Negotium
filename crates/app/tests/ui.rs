@@ -1,5 +1,6 @@
 use i_slint_backend_testing::ElementHandle;
 use negotium::{DeviceData, GraphData, SegmentData, StartupData, StatData};
+use negotium::appdata::Writes;
 use negotium::controls::Page;
 use negotium::perf::{DeviceView, GraphView, PerfFrame, Range, StatView};
 use negotium::worker::SharedHistory;
@@ -2193,7 +2194,7 @@ fn eventually(what: &str, f: impl Fn() -> bool) {
 
 /// Waits until the saved settings file holds what `f` expects.
 fn saved(path: &std::path::Path, what: &str, f: impl Fn(&Settings) -> bool) {
-    eventually(what, || matches!(negotium::settings::load(path), (s, negotium::settings::Loaded::File) if f(&s)));
+    eventually(what, || matches!(negotium::settings::load_with(&Writes::Plain, path), (s, negotium::settings::Loaded::File) if f(&s)));
 }
 
 thread_local! {
@@ -2228,12 +2229,12 @@ fn settings_wired_integrated(
     let settings = Rc::new(RefCell::new(s));
     let marker = dir.0.join("renderer-fallback");
     if fallback {
-        negotium::renderer::record_fallback_at(&marker).unwrap();
+        negotium::renderer::record_fallback_with(&Writes::Plain, &marker).unwrap();
     }
     negotium::settingspage::apply_settings(&ui, &settings.borrow());
     let integrations = negotium::settingspage::SettingsWiring {
         settings: settings.clone(),
-        saver: negotium::settings::Saver::new(dir.0.join("settings.json")),
+        saver: negotium::settings::Saver::with_writes(dir.0.join("settings.json"), Writes::Plain),
         controls: controls.clone(),
         gpu_marker: marker,
         fallback_recorded: fallback,

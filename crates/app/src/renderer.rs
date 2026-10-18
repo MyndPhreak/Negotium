@@ -104,7 +104,12 @@ pub fn set_gpu_rendering(on: bool) -> std::io::Result<()> {
 }
 
 pub fn set_gpu_rendering_at(marker: &Path, on: bool) -> std::io::Result<()> {
-    if on { clear_fallback_at(marker) } else { Ok(()) }
+    set_gpu_rendering_with(&crate::appdata::writes(), marker, on)
+}
+
+/// [`set_gpu_rendering_at`] through `writes`.
+pub fn set_gpu_rendering_with(writes: &Writes, marker: &Path, on: bool) -> std::io::Result<()> {
+    if on { clear_fallback_with(writes, marker) } else { Ok(()) }
 }
 
 /// A fallback is recorded when the marker exists with something in it: an elevated Negotium
@@ -308,6 +313,8 @@ pub struct SoftwareRelaunch {
     args: Vec<OsString>,
     marker: PathBuf,
     log: PathBuf,
+    /// How the marker and the log are written (`appdata::writes`; tests choose).
+    writes: Writes,
 }
 
 impl SoftwareRelaunch {
@@ -322,6 +329,7 @@ impl SoftwareRelaunch {
             args: relaunch_args(crate::integrate::own_args(std::env::args_os().skip(1)), in_tray),
             marker: fallback_path(),
             log: crate::log::Log::default_path(),
+            writes: crate::appdata::writes(),
         }
     }
 
@@ -332,8 +340,8 @@ impl SoftwareRelaunch {
     /// Returns false only if the relaunch could not start: this instance then carries on (the
     /// window may still appear), and the next launch uses software anyway.
     pub fn run(self) -> bool {
-        let mut log = crate::log::Log::new(self.log);
-        if let Err(e) = record_fallback_at(&self.marker) {
+        let mut log = crate::log::Log::with_writes(self.log, self.writes.clone());
+        if let Err(e) = record_fallback_with(&self.writes, &self.marker) {
             log.warn(&format!("renderer fallback could not be recorded: {e}"));
         }
         log.warn(&format!(
@@ -426,13 +434,13 @@ mod tests {
         let dir = temp_marker("roundtrip");
         let path = dir.path();
         assert!(!fallback_recorded_at(&path));
-        record_fallback_at(&path).unwrap();
+        record_fallback_with(&Writes::Plain, &path).unwrap();
         assert!(fallback_recorded_at(&path), "recorded, creating the directory");
-        record_fallback_at(&path).unwrap();
+        record_fallback_with(&Writes::Plain, &path).unwrap();
         assert!(fallback_recorded_at(&path), "recording twice is harmless");
-        clear_fallback_at(&path).unwrap();
+        clear_fallback_with(&Writes::Plain, &path).unwrap();
         assert!(!fallback_recorded_at(&path));
-        clear_fallback_at(&path).unwrap(); // clearing when absent is fine
+        clear_fallback_with(&Writes::Plain, &path).unwrap(); // clearing when absent is fine
     }
 
     /// Elevated: recorded and cleared through the guarded write, never deleted (emptied instead);
@@ -458,12 +466,12 @@ mod tests {
     fn the_gpu_switch_clears_the_marker_only_when_turned_on() {
         let dir = temp_marker("switch");
         let path = dir.path();
-        record_fallback_at(&path).unwrap();
-        set_gpu_rendering_at(&path, false).unwrap();
+        record_fallback_with(&Writes::Plain, &path).unwrap();
+        set_gpu_rendering_with(&Writes::Plain, &path, false).unwrap();
         assert!(fallback_recorded_at(&path), "turning it off leaves the record alone");
-        set_gpu_rendering_at(&path, true).unwrap();
+        set_gpu_rendering_with(&Writes::Plain, &path, true).unwrap();
         assert!(!fallback_recorded_at(&path), "turning it on forgets the automatic fallback");
-        set_gpu_rendering_at(&path, true).unwrap(); // nothing to clear is fine
+        set_gpu_rendering_with(&Writes::Plain, &path, true).unwrap(); // nothing to clear is fine
     }
 
     #[test]
@@ -648,6 +656,7 @@ mod tests {
                 args: vec![],
                 marker: dir.path(),
                 log: dir.0.join("negotium.log"),
+                writes: Writes::Plain,
             };
             assert!(!relaunch.run(), "{name}: reports that no replacement started");
             assert!(fallback_recorded_at(&dir.path()), "{name}: later launches still use software");

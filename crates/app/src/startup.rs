@@ -275,7 +275,7 @@ mod tests {
         }
 
         fn log(&self) -> crate::log::Log {
-            crate::log::Log::new(self.0.join("negotium.log"))
+            crate::log::Log::with_writes(self.0.join("negotium.log"), crate::appdata::Writes::Plain)
         }
 
         fn text(&self) -> String {

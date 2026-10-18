@@ -820,7 +820,7 @@ fn real_pipeline_redraws_per_second() {
         bridge.borrow_mut().set_icon_loader(negotium::icons::IconLoader::spawn(negotium::icons::extract, move |p, px| icons.lock().unwrap().push((p, px))));
     }
     let scratch = std::env::temp_dir().join(format!("negotium-real-pipeline-{}", std::process::id()));
-    let mut source = LiveSource::new(history, epoch, Default::default()).with_log(negotium::log::Log::new(scratch.join("negotium.log")));
+    let mut source = LiveSource::new(history, epoch, Default::default()).with_log(negotium::log::Log::with_writes(scratch.join("negotium.log"), negotium::appdata::Writes::Plain));
     if off("tiles") { ui.set_tiles(ModelRc::new(VecModel::<negotium::TileData>::default())); }
     if off("meters") { ui.set_meters(ModelRc::new(VecModel::<negotium::MeterData>::default())); }
     if off("rows") { ui.set_rows(ModelRc::new(VecModel::<negotium::RowData>::default())); }
