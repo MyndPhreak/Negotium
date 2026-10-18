@@ -50,24 +50,34 @@ pub enum TaskStatus {
 
 /// Whether `LastTaskResult` says Task Scheduler couldn't start the task (an HRESULT of the Win32
 /// or the scheduler's own facility, e.g. 0x80070002 "file not found"). Exit codes of a run that
-/// started, including a crash's NTSTATUS, don't count: the next start may well work.
+/// started, including a crash's NTSTATUS (0xC0000005 and the like: facility 0), don't count: the
+/// next start may well work. A copy that crashes at every start therefore leaves the task Ready
+/// and each launch hands off again; what keeps that from leaving nothing on screen is the
+/// launch's own wait for the elevated copy (the app's `integrate::hand_off`): no copy appears, so
+/// the launch carries on non-elevated. Counting repeated crashes as Broken would need a history
+/// Task Scheduler doesn't keep, so it isn't done.
 fn failed_to_start(last_result: i32) -> bool {
     let hr = last_result as u32;
     let facility = (hr >> 16) & 0x1fff;
     hr & 0x8000_0000 != 0 && (hr & 0x2000_0000) == 0 && (facility == 7 || facility == 4)
 }
 
-/// The state of a task read as `view` (`None`: not registered); `exists` checks the action's exe.
-pub fn task_status(view: Option<&TaskView>, exists: impl Fn(&Path) -> bool) -> TaskStatus {
+/// The state of a task read as `view` (`None`: not registered). Its one exec action must start
+/// `exe` (the installed exe; compared as Windows spells paths): a task starting anything else is
+/// Broken, whatever is there. `exists` then checks that file.
+pub fn task_status(view: Option<&TaskView>, exe: &Path, exists: impl Fn(&Path) -> bool) -> TaskStatus {
     let Some(view) = view else {
         return TaskStatus::Missing;
     };
     let broken = |why: String| TaskStatus::Broken(why);
     match view.exec_paths.as_slice() {
         [path] if view.other_actions == 0 => {
-            let exe = action_path(path);
-            if !exists(&exe) {
-                return broken(format!("its program is missing: {}", exe.display()));
+            let action = action_path(path);
+            if !same_path(&action, exe) {
+                return broken(format!("it starts {}, not {}", action.display(), exe.display()));
+            }
+            if !exists(&action) {
+                return broken(format!("its program is missing: {}", action.display()));
             }
         }
         _ => {
@@ -85,6 +95,13 @@ pub fn task_status(view: Option<&TaskView>, exists: impl Fn(&Path) -> bool) -> T
     } else {
         TaskStatus::Ready
     }
+}
+
+/// Whether two paths name the same file as Windows spells them (case-insensitive, `/` as `\`, no
+/// trailing separator); an empty `b` matches nothing.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    !b.as_os_str().is_empty() && norm(a) == norm(b)
 }
 
 /// An exec action's stored path as a file path: unquoted, `%VARIABLES%` expanded.
@@ -332,15 +349,16 @@ fn view(task: &IRegisteredTask) -> windows::core::Result<TaskView> {
     }
 }
 
-/// User `sid`'s task state. Anything that stops it being read (a bad SID or folder name, COM,
-/// Task Scheduler not running, access) is `Broken` with that reason.
-pub fn task_state(roots: &Roots, sid: &str) -> TaskStatus {
-    read_task(roots, sid).0
+/// User `sid`'s task state, its action checked against `exe` ([`task_status`]). Anything that
+/// stops it being read (a bad SID or folder name, COM, Task Scheduler not running, access) is
+/// `Broken` with that reason.
+pub fn task_state(roots: &Roots, sid: &str, exe: &Path) -> TaskStatus {
+    read_task(roots, sid, exe).0
 }
 
 /// User `sid`'s task state (as [`task_state`]) and whether it has the logon trigger (as
 /// [`task_logon`]), read in one Task Scheduler session.
-pub fn read_task(roots: &Roots, sid: &str) -> (TaskStatus, Option<bool>) {
+pub fn read_task(roots: &Roots, sid: &str, exe: &Path) -> (TaskStatus, Option<bool>) {
     let _com = ComApartment::enter();
     // Names first: a bad one never reaches Task Scheduler.
     let registered = || -> Result<Option<IRegisteredTask>, ActionError> {
@@ -352,7 +370,7 @@ pub fn read_task(roots: &Roots, sid: &str) -> (TaskStatus, Option<bool>) {
         Ok(None) => (TaskStatus::Missing, Some(false)),
         Ok(Some(task)) => {
             let status = match view(&task) {
-                Ok(v) => task_status(Some(&v), Path::is_file),
+                Ok(v) => task_status(Some(&v), exe, Path::is_file),
                 Err(e) => TaskStatus::Broken(format!("it couldn't be read: {}", com(e))),
             };
             (status, has_logon_trigger(&task).ok())
@@ -382,7 +400,8 @@ fn has_logon_trigger(task: &IRegisteredTask) -> windows::core::Result<bool> {
 /// Whether user `sid`'s task also starts at sign-in (has a logon trigger): Start with Windows in
 /// admin mode. A missing task has none; `None` when it couldn't be read (not known).
 pub fn task_logon(roots: &Roots, sid: &str) -> Option<bool> {
-    read_task(roots, sid).1
+    // The trigger doesn't depend on the action: the state (judged against no exe) is dropped.
+    read_task(roots, sid, Path::new("")).1
 }
 
 /// Starts user `sid`'s task now, with `args` as its `$(Arg0)` (`join_args`).
@@ -538,9 +557,9 @@ mod tests {
     fn a_task_is_ready_disabled_or_broken() {
         let exists = |p: &Path| p == Path::new(EXE);
         let quoted = format!("\"{EXE}\"");
-        let st = |v: TaskView| task_status(Some(&v), exists);
+        let st = |v: TaskView| task_status(Some(&v), Path::new(EXE), exists);
         let hr = |h: u32| h as i32;
-        assert_eq!(task_status(None, exists), TaskStatus::Missing);
+        assert_eq!(task_status(None, Path::new(EXE), exists), TaskStatus::Missing);
         assert_eq!(st(view(&[&quoted], 0, true, false, 0)), TaskStatus::Ready);
         assert_eq!(st(view(&[EXE], 0, true, false, 0x41303)), TaskStatus::Ready, "never run yet");
         assert_eq!(st(view(&[EXE], 0, true, false, 0x41301)), TaskStatus::Ready, "running");
@@ -555,13 +574,35 @@ mod tests {
             other => panic!("not broken: {other:?}"),
         };
         let gone = r"C:\gone\negotium.exe";
-        assert_eq!(reason(view(&[gone], 0, true, false, 0)), format!("its program is missing: {gone}"));
+        assert_eq!(reason(view(&[gone], 0, true, false, 0)), format!("it starts {gone}, not {EXE}"));
+        match task_status(Some(&view(&[gone], 0, true, false, 0)), Path::new(gone), exists) {
+            TaskStatus::Broken(why) => assert_eq!(why, format!("its program is missing: {gone}")),
+            other => panic!("not broken: {other:?}"),
+        }
         assert_eq!(reason(view(&[], 0, true, false, 0)), "it has 0 program and 0 other actions, not one program");
         assert_eq!(reason(view(&[EXE, EXE], 0, true, false, 0)), "it has 2 program and 0 other actions, not one program");
         assert_eq!(reason(view(&[EXE], 1, true, false, 0)), "it has 1 program and 1 other actions, not one program");
         assert_eq!(reason(view(&[EXE], 0, true, false, hr(0x8007_0002))), "its last start failed (0x80070002)");
         assert_eq!(reason(view(&[EXE], 0, true, false, hr(0x8004_1315))), "its last start failed (0x80041315)");
         assert!(matches!(st(view(&[gone], 0, false, false, 0)), TaskStatus::Broken(_)), "broken wins");
+    }
+
+    /// A task whose action starts anything but the installed exe is Broken, even when that file
+    /// exists: admin mode only ever starts Negotium elevated.
+    #[test]
+    fn a_task_starting_another_program_is_broken() {
+        let everything_exists = |_: &Path| true;
+        let st = |path: &str| task_status(Some(&view(&[path], 0, true, false, 0)), Path::new(EXE), everything_exists);
+        for elsewhere in [r"C:\Windows\System32\cmd.exe", r"C:\Program Files\Negotium2\negotium.exe", r"C:\Users\me\negotium.exe"] {
+            assert!(matches!(st(elsewhere), TaskStatus::Broken(why) if why.starts_with("it starts ")), "{elsewhere}");
+        }
+        // The installed exe however it is spelled.
+        for same in [EXE, r#""C:\Program Files\Negotium\negotium.exe""#, r"c:\program files\negotium\NEGOTIUM.EXE", "C:/Program Files/Negotium/negotium.exe"] {
+            assert_eq!(st(same), TaskStatus::Ready, "{same}");
+        }
+        // No installed exe to compare with: nothing matches.
+        let no_exe = task_status(Some(&view(&[EXE], 0, true, false, 0)), Path::new(""), everything_exists);
+        assert!(matches!(no_exe, TaskStatus::Broken(_)), "{no_exe:?}");
     }
 
     #[test]
@@ -581,7 +622,7 @@ mod tests {
             assert!(folder_path(&roots).is_err(), "{bad:?}");
             assert!(matches!(delete_task_folder(&roots), Err(ActionError::Other(_))), "{bad:?}");
             // Refused before COM, so the reason names the folder.
-            match task_state(&roots, SID) {
+            match task_state(&roots, SID, Path::new(EXE)) {
                 TaskStatus::Broken(why) => assert!(why.contains("not a task folder name"), "{why}"),
                 other => panic!("{bad:?}: {other:?}"),
             }
@@ -618,27 +659,28 @@ mod tests {
         let _cleanup = TestFolder(roots.clone());
         let sid = current_user_sid().unwrap();
         let cmd = PathBuf::from(std::env::var("SystemRoot").unwrap()).join(r"System32\cmd.exe");
-        assert_eq!(task_state(&roots, &sid), TaskStatus::Missing);
+        assert_eq!(task_state(&roots, &sid, &cmd), TaskStatus::Missing);
         create_task(&roots, &sid, &cmd, "/c", false).unwrap();
-        assert_eq!(task_state(&roots, &sid), TaskStatus::Ready);
+        assert_eq!(task_state(&roots, &sid, &cmd), TaskStatus::Ready);
         assert_eq!(task_logon(&roots, &sid), Some(false), "no logon trigger");
         start_task(&roots, &sid, &["exit".to_string(), "0".to_string()]).unwrap();
         // Replaced in place, now with the logon trigger.
         create_task(&roots, &sid, &cmd, "/c", true).unwrap();
-        assert_ne!(task_state(&roots, &sid), TaskStatus::Missing);
-        assert_eq!(read_task(&roots, &sid).1, Some(true), "the logon trigger reads back");
+        assert_ne!(task_state(&roots, &sid, &cmd), TaskStatus::Missing);
+        assert_eq!(read_task(&roots, &sid, &cmd).1, Some(true), "the logon trigger reads back");
         delete_task(&roots, &sid).unwrap();
         assert_eq!(task_logon(&roots, &sid), Some(false), "a missing task has none");
-        assert_eq!(task_state(&roots, &sid), TaskStatus::Missing);
+        assert_eq!(task_state(&roots, &sid, &cmd), TaskStatus::Missing);
         delete_task(&roots, &sid).unwrap();
         // A task whose exe is gone reads as broken.
         let gone = std::env::temp_dir().join(format!("negotium-test-gone-{}.exe", std::process::id()));
         create_task(&roots, &sid, &gone, "/c", false).unwrap();
-        assert!(matches!(task_state(&roots, &sid), TaskStatus::Broken(why) if why.contains("missing")));
+        assert!(matches!(task_state(&roots, &sid, &gone), TaskStatus::Broken(why) if why.contains("missing")));
+        assert!(matches!(task_state(&roots, &sid, &cmd), TaskStatus::Broken(why) if why.starts_with("it starts ")));
         // The folder goes with every task in it.
         create_task(&roots, &sid, &cmd, "/c", false).unwrap();
         delete_task_folder(&roots).unwrap();
-        assert_eq!(task_state(&roots, &sid), TaskStatus::Missing);
+        assert_eq!(task_state(&roots, &sid, &cmd), TaskStatus::Missing);
         let _com = ComApartment::enter();
         assert!(folder(&service().unwrap(), &roots).unwrap().is_none(), "the folder is gone");
         delete_task_folder(&roots).unwrap();

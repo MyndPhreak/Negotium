@@ -134,13 +134,19 @@ fn names_task_manager(arg: &OsStr) -> bool {
 }
 
 /// Whether the command line (after the program name) asks for the integration command at all;
-/// `main` then never shows a window, even when the action doesn't parse.
+/// `main` then never shows a window, even when the action doesn't parse. Never for a start by the
+/// admin task (a leading [`FROM_TASK`]): the arguments a task start carries are anyone's, and
+/// must never reach the integration command (or `--elevate`), so such a start is a normal launch.
 pub fn requested<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    args.into_iter().any(|a| a.as_ref() == OsStr::new(FLAG))
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|first| first.as_ref() == OsStr::new(FROM_TASK)) {
+        return false;
+    }
+    args.any(|a| a.as_ref() == OsStr::new(FLAG))
 }
 
 /// The admin task's state, as Task Scheduler reports it.
@@ -353,11 +359,13 @@ pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
         }
         Action::StartupOff => {
             let sid = user_sid(ctx)?;
+            // The Run value first: it goes even when Task Scheduler then fails.
+            let run = machine.set_run(None);
             // A trigger that couldn't be read may be there: recreated without, to be sure.
             if machine.task_state(&sid) != TaskState::Missing && machine.task_logon(&sid) != Some(false) {
                 machine.create_task(&sid, &exe, false)?;
             }
-            machine.set_run(None)
+            run
         }
         Action::AdminOn { logon } => {
             machine.create_task(&user_sid(ctx)?, &exe, logon)?;
@@ -396,6 +404,10 @@ pub fn run_unelevated(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
     }
 }
 
+/// What an unparsable `--integrate` command line logs: a fixed line, never the arguments (the
+/// caller's text, which may be anything).
+pub const INVALID_COMMAND_LINE: &str = "integrate: not a valid command line (an unknown action or extra arguments)";
+
 /// The whole command for `main`: parse `args` (after the program name), run against `machine` as
 /// the running exe, log a failure. Returns the process exit code: 0 done, 1 failed, 2 not a
 /// valid `--integrate` command line.
@@ -406,8 +418,8 @@ where
 {
     let args: Vec<S> = args.into_iter().collect();
     let Some(action) = Action::parse(&args) else {
-        let shown: Vec<String> = args.iter().map(|a| a.as_ref().to_string_lossy().into_owned()).collect();
-        log(&format!("integrate: not a valid command line: {}", shown.join(" ")));
+        // A fixed line: the arguments are the caller's, and never go into the log as written.
+        log(INVALID_COMMAND_LINE);
         return 2;
     };
     let ctx = Ctx {
@@ -453,8 +465,7 @@ pub fn elevated_command(
     log: &mut dyn FnMut(&str),
 ) -> i32 {
     let Some(action) = Action::parse(args) else {
-        let shown: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        log(&format!("integrate: not a valid command line: {ELEVATE} {}", shown.join(" ")));
+        log(INVALID_COMMAND_LINE);
         return 2;
     };
     let code = if elevated {
@@ -652,7 +663,14 @@ pub struct LaunchCtx<'a> {
     pub activate_running: &'a dyn Fn() -> bool,
     /// Lets the copy the task starts take the foreground (this launch has it).
     pub allow_foreground: &'a dyn Fn(),
+    /// Once the task has been started: waits (up to [`HANDOFF_WAIT`] in the app) for the elevated
+    /// copy to show up (its marked window or its instance lock), true once it has.
+    pub copy_appeared: &'a dyn Fn() -> bool,
 }
+
+/// How long a hand-off waits for the elevated copy the task started before this launch carries on
+/// without admin rights: Task Scheduler accepting the start doesn't mean anything started.
+pub const HANDOFF_WAIT: Duration = Duration::from_secs(3);
 
 /// Admin mode at launch, before the window and the single-instance lock (so the elevated copy
 /// the task starts can claim it): an instance already running is shown, or, with
@@ -699,11 +717,20 @@ pub fn hand_off(ctx: &LaunchCtx, args: &[String], log: &mut dyn FnMut(&str)) -> 
             // Never an empty start: that is the logon trigger's, which starts in the tray.
             let shown = [SHOW.to_string()];
             let args = if args.is_empty() { &shown[..] } else { args };
-            // Task Scheduler accepting the start is all this sees: if the elevated copy then
-            // fails to run (its exe gone, a bad action), the task's last result records it and
-            // the next launch reads the task as Broken and runs here, so this never loops.
+            // Task Scheduler accepting the start isn't the elevated copy running: this waits for
+            // it to show up, and carries on here (non-elevated) when it doesn't, so Ctrl+Shift+Esc
+            // never ends with nothing on screen. A copy that turns up late finds this one and
+            // shows it instead. If the copy fails to run at all (its exe gone, a bad action), the
+            // task's last result also records it and the next launch reads the task as Broken.
             match ctx.machine.start_task(&sid, args) {
-                Ok(()) => true,
+                Ok(()) if (ctx.copy_appeared)() => true,
+                Ok(()) => {
+                    log(&format!(
+                        "admin mode: the task was started but no elevated Negotium appeared within {} s; starting without admin rights",
+                        HANDOFF_WAIT.as_secs()
+                    ));
+                    false
+                }
                 Err(e) => {
                     log(&format!("admin mode: the task couldn't be started ({e}); starting without admin rights"));
                     false
@@ -748,7 +775,7 @@ impl System {
     /// User `sid`'s task state and whether it has the logon trigger (`None`: not known), read in
     /// one Task Scheduler session (Settings).
     pub fn read_task(&self, sid: &str) -> (TaskState, Option<bool>) {
-        let (status, logon) = integration::read_task(&self.roots, sid);
+        let (status, logon) = integration::read_task(&self.roots, sid, &installed_path());
         (task_state(status), logon)
     }
 }
@@ -757,6 +784,12 @@ impl Default for System {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// `<Program Files>\Negotium\negotium.exe`, the only exe the admin task may start (empty, which
+/// matches no task, without a Program Files known folder).
+fn installed_path() -> PathBuf {
+    install::program_files().map(|pf| pf.join("Negotium").join("negotium.exe")).unwrap_or_default()
 }
 
 fn failed(e: ActionError) -> IntegrateError {
@@ -786,7 +819,7 @@ impl Machine for System {
         integration::delete_task(&self.roots, sid).map_err(failed)
     }
     fn task_state(&self, sid: &str) -> TaskState {
-        task_state(integration::task_state(&self.roots, sid))
+        task_state(integration::task_state(&self.roots, sid, &installed_path()))
     }
     fn delete_task_folder(&self) -> Result<(), IntegrateError> {
         integration::delete_task_folder(&self.roots).map_err(failed)
@@ -964,6 +997,23 @@ mod tests {
         assert!(requested(["--integrate", "bogus"]));
     }
 
+    /// A start by the admin task never reaches the integration command, whatever arguments it
+    /// was given: `main` then makes it a normal launch.
+    #[test]
+    fn a_task_start_never_runs_the_integration_command() {
+        for args in [
+            &[FROM_TASK, "--integrate", "hotkey-on"][..],
+            &[FROM_TASK, "--elevate", "--integrate", "admin-on"],
+            &[FROM_TASK, "--integrate", "uninstall"],
+            &[FROM_TASK, "--page=startup", "--integrate", "hotkey-off"],
+        ] {
+            assert!(!requested(args), "{args:?}");
+        }
+        assert!(requested(["--integrate", "hotkey-on"]));
+        assert!(requested(["--elevate", "--integrate", "admin-on"]));
+        assert!(!requested::<[&str; 0], &str>([]));
+    }
+
     #[test]
     fn hotkey_on_and_off_set_and_clear_the_redirect() {
         let root = Root::new();
@@ -1031,6 +1081,11 @@ mod tests {
         fake.calls.borrow_mut().clear();
         run(Action::StartupOff, &root.ctx(&fake)).unwrap();
         assert_eq!(*fake.calls.borrow(), ["set_run"]);
+        // With the trigger: the Run value goes first, then the task loses its trigger.
+        fake.tasks.borrow_mut().insert(SID.into(), (root.exe(), true));
+        fake.calls.borrow_mut().clear();
+        run(Action::StartupOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(*fake.calls.borrow(), ["set_run", "create_task"]);
 
         // A task that needs repair is admin mode too: recreated, with the trigger.
         let broken = Fake { state: Some(TaskState::Broken("its exe is gone".into())), ..Fake::default() };
@@ -1375,6 +1430,18 @@ egotium.exe"), ..root.ctx(&fake) };
         assert!(fake.tasks.borrow().is_empty());
     }
 
+    /// Startup-off removes the Run value even when Task Scheduler then refuses the task.
+    #[test]
+    fn startup_off_removes_the_run_value_before_the_task() {
+        let root = Root::new();
+        let fake = Fake { failing: vec!["create_task"], ..Fake::default() };
+        fake.tasks.borrow_mut().insert(SID.into(), (root.exe(), true));
+        *fake.run.borrow_mut() = Some(run_command(&root.exe()));
+        assert_eq!(run(Action::StartupOff, &root.ctx(&fake)), Err(IntegrateError::Failed("create_task failed".into())));
+        assert_eq!(fake.run_value(), None, "the Run value went first");
+        assert_eq!(*fake.calls.borrow(), ["set_run", "create_task"]);
+    }
+
     #[test]
     fn machine_failures_are_reported() {
         let root = Root::new();
@@ -1393,7 +1460,9 @@ egotium.exe"), ..root.ctx(&fake) };
         assert_eq!(command(["--integrate", "hotkey-on"], &fake, SID.into(), &mut |l| lines.push(l.to_string())), 1);
         assert!(fake.calls.borrow().is_empty());
         assert_eq!(lines.len(), 2, "{lines:?}");
-        assert!(lines[0].contains("bogus"), "{lines:?}");
+        // A fixed line: what the caller passed never reaches the log.
+        assert_eq!(lines[0], INVALID_COMMAND_LINE);
+        assert!(!lines[0].contains("bogus"), "{lines:?}");
         assert!(lines[1].starts_with("integrate hotkey-on: only the installed Negotium"), "{lines:?}");
     }
 
@@ -1494,6 +1563,10 @@ egotium.exe"), ..root.ctx(&fake) };
         reads: std::cell::Cell<usize>,
         read: Option<Box<dyn Fn() -> Option<TaskState>>>,
         log: RefCell<Vec<String>>,
+        /// Whether the elevated copy shows up after the task is started, and how often that was
+        /// waited for.
+        appears: bool,
+        waited: std::cell::Cell<usize>,
     }
 
     impl Launcher {
@@ -1510,6 +1583,8 @@ egotium.exe"), ..root.ctx(&fake) };
                 reads: Default::default(),
                 read: None,
                 log: Default::default(),
+                appears: true,
+                waited: Default::default(),
             }
         }
 
@@ -1520,6 +1595,10 @@ egotium.exe"), ..root.ctx(&fake) };
                 self.running
             };
             let allow = || self.allowed.set(self.allowed.get() + 1);
+            let appeared = || {
+                self.waited.set(self.waited.get() + 1);
+                self.appears
+            };
             let read = |sid: &str| {
                 self.reads.set(self.reads.get() + 1);
                 match &self.read {
@@ -1537,6 +1616,7 @@ egotium.exe"), ..root.ctx(&fake) };
                 machine: &self.fake,
                 activate_running: &activate,
                 allow_foreground: &allow,
+                copy_appeared: &appeared,
             };
             let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             hand_off(&ctx, &args, &mut |l| self.log.borrow_mut().push(l.to_string()))
@@ -1596,6 +1676,27 @@ egotium.exe"), ..root.ctx(&fake) };
         }
     }
 
+    /// The task accepted the start but no elevated copy showed up: logged once, and this launch
+    /// runs here instead of leaving nothing on screen. One that does show up ends this launch.
+    #[test]
+    fn a_hand_off_whose_copy_never_appears_runs_here() {
+        let l = Launcher { appears: false, ..Launcher::new(TaskState::Ready) };
+        assert!(!l.launch(false, false, &["--page=startup"]));
+        assert_eq!(l.fake.started.borrow().len(), 1, "the task was started");
+        assert_eq!(l.waited.get(), 1);
+        assert_eq!(l.log.borrow().len(), 1, "{:?}", l.log.borrow());
+        assert!(l.log.borrow()[0].contains("no elevated Negotium appeared within 3 s"), "{:?}", l.log.borrow());
+        let l = Launcher::new(TaskState::Ready);
+        assert!(l.launch(false, false, &[]));
+        assert_eq!(l.waited.get(), 1);
+        assert!(l.log.borrow().is_empty());
+        // A start Task Scheduler refused isn't waited for.
+        let l = Launcher::with(Fake { state: Some(TaskState::Ready), failing: vec!["start_task"], ..Fake::default() });
+        assert!(!l.launch(false, false, &[]));
+        assert_eq!(l.waited.get(), 0);
+        assert_eq!(HANDOFF_WAIT, Duration::from_secs(3));
+    }
+
     /// A hung Schedule service: the launch runs here once the bound has passed, logged once.
     #[test]
     fn a_slow_task_read_runs_here_within_the_bound() {
@@ -1642,6 +1743,7 @@ egotium.exe"), ..root.ctx(&fake) };
                 machine: &fake,
                 activate_running: &running,
                 allow_foreground: &nothing,
+                copy_appeared: &|| panic!("never started"),
             };
             assert!(!hand_off(&ctx, &[], &mut |_| {}), "{installed} {admin_member}");
         }
@@ -1715,9 +1817,9 @@ egotium.exe"), ..root.ctx(&fake) };
         let elevate = |_: &str| -> Result<(), ActionError> { panic!("never asked") };
         for elevated in [false, true] {
             let mut lines = Vec::new();
-            let args = os(&[FLAG, "admin-on", "--bogus"]);
+            let args = os(&[FLAG, "admin-on", "--bogus\nforged log line"]);
             assert_eq!(elevated_command(&args, elevated, &run_here, &elevate, &no_fallback, &mut |l| lines.push(l.to_string())), 2);
-            assert_eq!(lines.len(), 1);
+            assert_eq!(lines, [INVALID_COMMAND_LINE], "the arguments are never logged");
         }
     }
 

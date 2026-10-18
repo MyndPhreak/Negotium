@@ -581,26 +581,98 @@ pub fn shell_start(exe: &Path) -> Result<(), String> {
     started
 }
 
+/// What [`activate_existing_instance`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Existing {
+    /// A running instance's window was asked to show itself.
+    Shown,
+    /// A running instance's window exists but isn't responding (`IsHungAppWindow`): asking it
+    /// would show nothing, so the caller goes on as if none were running.
+    Hung,
+    /// No window turned up within the wait.
+    None,
+}
+
+/// Whether `hwnd`'s thread has stopped taking messages (Windows' own "Not responding": no message
+/// read for 5 s). Sends no message itself, so it never blocks, and works across elevation.
+fn is_hung(hwnd: HWND) -> bool {
+    // SAFETY: IsHungAppWindow reads the window's cached responsiveness; any handle value is safe.
+    unsafe { IsHungAppWindow(hwnd) }.as_bool()
+}
+
 /// Asks the running instance to show itself, waiting up to `timeout` for its window to exist
-/// (it may still be starting). Returns false if no window turned up.
-pub fn activate_existing_instance(timeout: Duration) -> bool {
+/// (it may still be starting). A responding one is preferred; a hung one is not asked
+/// ([`Existing::Hung`]).
+pub fn activate_existing_instance(timeout: Duration) -> Existing {
+    activate_with(timeout, || responsive_main_window().or_else(find_main_window), is_hung, |hwnd| {
+        let mut pid = 0u32;
+        // SAFETY: plain calls; the target may vanish meanwhile, which only makes them fail.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            // We are the foreground process (just launched); let the old instance take focus.
+            let _ = AllowSetForegroundWindow(pid);
+            let _ = PostMessageW(Some(hwnd), activate_message(), WPARAM(0), LPARAM(0));
+        }
+    })
+}
+
+/// [`activate_existing_instance`] over `find`, `hung` and `show` (tests fake all three).
+fn activate_with<W: Copy>(
+    timeout: Duration,
+    find: impl Fn() -> Option<W>,
+    hung: impl Fn(W) -> bool,
+    show: impl Fn(W),
+) -> Existing {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(hwnd) = find_main_window() {
-            let mut pid = 0u32;
-            // SAFETY: plain calls; the target may vanish meanwhile, which only makes them fail.
-            unsafe {
-                GetWindowThreadProcessId(hwnd, Some(&mut pid));
-                // We are the foreground process (just launched); let the old instance take focus.
-                let _ = AllowSetForegroundWindow(pid);
-                let _ = PostMessageW(Some(hwnd), activate_message(), WPARAM(0), LPARAM(0));
+        if let Some(window) = find() {
+            if hung(window) {
+                return Existing::Hung;
             }
+            show(window);
+            return Existing::Shown;
+        }
+        if Instant::now() >= deadline {
+            return Existing::None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A running instance's main window that is responding (not [`is_hung`]), if any.
+pub fn responsive_main_window() -> Option<HWND> {
+    find_main_window_where(|hwnd| !is_hung(hwnd))
+}
+
+/// Whether the single-instance lock `name` exists (some instance holds it), including one an
+/// elevated instance created that this process may not open.
+pub fn instance_exists(name: &str) -> bool {
+    use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    // SAFETY: plain call; a handle it returns is closed at once.
+    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, &HSTRING::from(name)) } {
+        Ok(h) => {
+            // SAFETY: the handle just opened; closed exactly once.
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+            true
+        }
+        Err(e) => e.code() == ERROR_ACCESS_DENIED.to_hresult(),
+    }
+}
+
+/// Polls `check` every `step` until it is true (true) or `timeout` has passed (false).
+pub fn wait_until(timeout: Duration, step: Duration, check: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if check() {
             return true;
         }
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(step.min(deadline.saturating_duration_since(Instant::now())));
     }
 }
 
@@ -681,6 +753,21 @@ pub fn terminate_self() -> ! {
     std::process::exit(0)
 }
 
+/// The variables (of `names`, this process's) an elevated Negotium removes before anything reads
+/// them: every `SLINT_*` (Slint's: `SLINT_BACKEND` picks the renderer code, `SLINT_DEFAULT_FONT`
+/// and `SLINT_FONT_PATH` name font files it parses, the rest change its behaviour) and every
+/// `NEGOTIUM_*` (Negotium's own: `NEGOTIUM_FRAME_STATS` names a file written at exit,
+/// `NEGOTIUM_SIMULATE_STALL` hangs the UI thread). Windows compares names case-insensitively.
+pub fn untrusted_env(names: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    names
+        .into_iter()
+        .filter(|name| {
+            let upper = name.to_string_lossy().to_ascii_uppercase();
+            upper.starts_with("SLINT_") || upper.starts_with("NEGOTIUM_")
+        })
+        .collect()
+}
+
 /// Removes an environment variable from this process, so processes it starts don't inherit it.
 /// Call it only while no other thread can be reading the environment (early in `main`).
 pub fn remove_env_var(name: &str) {
@@ -692,6 +779,64 @@ pub fn remove_env_var(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elevated_every_slint_and_negotium_variable_is_dropped() {
+        let names = ["SLINT_BACKEND", "slint_default_font", "SLINT_FONT_PATH", "NEGOTIUM_FRAME_STATS", "Negotium_Simulate_Stall", "PATH", "LOCALAPPDATA", "SLINTX", "TEMP"];
+        let dropped = untrusted_env(names.iter().map(std::ffi::OsString::from));
+        assert_eq!(dropped, ["SLINT_BACKEND", "slint_default_font", "SLINT_FONT_PATH", "NEGOTIUM_FRAME_STATS", "Negotium_Simulate_Stall"]);
+    }
+
+    /// A running instance is shown; a hung one never is (the launch goes on as if none ran); none
+    /// at all is waited for up to the timeout.
+    #[test]
+    fn a_hung_instance_is_not_trusted_to_show_itself() {
+        use std::cell::Cell;
+        let shown = Cell::new(0);
+        let show = |_: u32| shown.set(shown.get() + 1);
+        assert_eq!(activate_with(Duration::ZERO, || Some(1u32), |_| false, show), Existing::Shown);
+        assert_eq!(shown.get(), 1);
+        assert_eq!(activate_with(Duration::from_secs(5), || Some(1u32), |_| true, show), Existing::Hung);
+        assert_eq!(shown.get(), 1, "a hung window isn't asked");
+        let started = Instant::now();
+        assert_eq!(activate_with(Duration::from_millis(250), || None::<u32>, |_| false, show), Existing::None);
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        // A window that turns up during the wait is shown.
+        let polls = Cell::new(0);
+        let late = || {
+            polls.set(polls.get() + 1);
+            (polls.get() > 2).then_some(7u32)
+        };
+        assert_eq!(activate_with(Duration::from_secs(5), late, |_| false, show), Existing::Shown);
+        assert_eq!(shown.get(), 2);
+    }
+
+    #[test]
+    fn waiting_stops_at_the_first_yes_or_the_timeout() {
+        use std::cell::Cell;
+        let n = Cell::new(0);
+        assert!(wait_until(Duration::from_secs(5), Duration::from_millis(10), || {
+            n.set(n.get() + 1);
+            n.get() == 3
+        }));
+        assert_eq!(n.get(), 3);
+        let started = Instant::now();
+        assert!(!wait_until(Duration::from_millis(200), Duration::from_millis(50), || false));
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(200) && took < Duration::from_secs(2), "{took:?}");
+    }
+
+    /// A lock nobody holds doesn't exist; one this process holds does (a unique test name, never
+    /// the app's).
+    #[test]
+    fn an_instance_lock_is_seen_while_held() {
+        let name = format!(r"Local\Negotium.Test.InstanceExists.{}", std::process::id());
+        assert!(!instance_exists(&name));
+        let lock = claim_instance(&name, Duration::ZERO).expect("unique name");
+        assert!(instance_exists(&name));
+        drop(lock);
+        assert!(!instance_exists(&name));
+    }
 
     #[test]
     fn accent_dword_is_abgr() {

@@ -360,7 +360,7 @@ export component SettingsPage inherits VerticalLayout {
             }
             hotkey-row := SettingRow {
                 title: "Open on Ctrl+Shift+Esc";
-                description: "Open Negotium instead of Task Manager.";
+                description: "Open Negotium instead of Task Manager. Turning this on replaces another tool's Task Manager replacement, such as Process Explorer's.";
                 note: root.installed ? "" : "Install Negotium to use this";
                 available: root.installed;
                 Toggle {

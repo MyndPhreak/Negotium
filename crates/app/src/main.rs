@@ -93,6 +93,14 @@ fn make_tray(
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Elevated (admin mode), nothing the user's environment says may choose what this process
+    // loads or writes: every SLINT_* (the backend, font files) and NEGOTIUM_* variable is removed
+    // first, before Slint or any other thread can read one (platform::untrusted_env).
+    if negotium::appdata::elevated() {
+        for name in platform::untrusted_env(std::env::vars_os().map(|(name, _)| name)) {
+            platform::remove_env_var(&name.to_string_lossy());
+        }
+    }
     // Negotium's own arguments: started by the Ctrl+Shift+Esc redirect, Windows appends Task
     // Manager's command line, which is ignored (a normal launch).
     let args = negotium::integrate::own_args(std::env::args_os().skip(1));
@@ -124,7 +132,9 @@ fn main() -> Result<(), slint::PlatformError> {
         std::process::exit(code);
     }
     // `--integrate <action>` (the installer and the Settings switches): no window, no renderer, no
-    // instance lock, no settings; the exit code says whether it worked, a failure is logged.
+    // instance lock, no settings; the exit code says whether it worked, a failure is logged. Never
+    // for a start by the admin task (`--from-task` first): its arguments are anyone's, so it is a
+    // normal launch (`integrate::requested`).
     if negotium::integrate::requested(&args) {
         // The registry guard then allows exactly the two integration values (and the startup
         // state keys, which this path never writes). The task is named by this process's user:
@@ -188,9 +198,24 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let machine = negotium::integrate::System::new();
         let user_sid = || user_sid.clone();
-        // A start in the tray leaves a running instance as it is.
-        let activate_running =
-            || if in_tray { platform::find_main_window().is_some() } else { platform::activate_existing_instance(Duration::ZERO) };
+        // A start in the tray leaves a running instance as it is. A hung one counts as none (it
+        // would show nothing): the task is started instead.
+        let activate_running = || {
+            if in_tray {
+                platform::responsive_main_window().is_some()
+            } else {
+                platform::activate_existing_instance(Duration::ZERO) == platform::Existing::Shown
+            }
+        };
+        // The elevated copy the task started: its marked window, or its instance lock when none
+        // was held before (a hung instance's lock is no sign of it).
+        let lock_held_before = platform::instance_exists(platform::INSTANCE_MUTEX);
+        let copy_appeared = || {
+            platform::wait_until(negotium::integrate::HANDOFF_WAIT, Duration::from_millis(100), || {
+                platform::responsive_main_window().is_some()
+                    || (!lock_held_before && platform::instance_exists(platform::INSTANCE_MUTEX))
+            })
+        };
         let ctx = negotium::integrate::LaunchCtx {
             installed: install.installed,
             elevated,
@@ -207,6 +232,7 @@ fn main() -> Result<(), slint::PlatformError> {
             machine: &machine,
             activate_running: &activate_running,
             allow_foreground: &platform::allow_any_foreground,
+            copy_appeared: &copy_appeared,
         };
         let passed: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         if negotium::integrate::hand_off(&ctx, &passed, &mut |line| warn(line)) {
@@ -214,23 +240,29 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
     // One instance per session. A second launch shows the running one (even from the tray) and
-    // exits; a restart (as admin) waits for the old instance to finish quitting.
+    // exits; a restart (as admin) waits for the old instance to finish quitting. A running one
+    // that is hung (Not responding) can't show itself: this launch then runs beside it, without
+    // the lock, so Ctrl+Shift+Esc still opens something that works.
     let restarted = has_arg("--restarted");
     let wait = if restarted { Duration::from_secs(10) } else { Duration::ZERO };
     let _instance = match platform::claim_instance(platform::INSTANCE_MUTEX, wait) {
-        Some(lock) => lock,
+        Some(lock) => Some(lock),
         None => {
-            if in_tray && platform::find_main_window().is_some() {
+            if in_tray && platform::responsive_main_window().is_some() {
                 return Ok(());
             }
-            if platform::activate_existing_instance(Duration::from_secs(5)) {
-                return Ok(());
-            }
-            // The holder has no window: it is shutting down (or never got one). Take over once it
-            // has gone, so a launch during an exit doesn't end with nothing running.
-            match platform::claim_instance(platform::INSTANCE_MUTEX, Duration::from_secs(5)) {
-                Some(lock) => lock,
-                None => return Ok(()),
+            match platform::activate_existing_instance(Duration::from_secs(5)) {
+                platform::Existing::Shown => return Ok(()),
+                platform::Existing::Hung => {
+                    warn("a running Negotium isn't responding; starting another beside it");
+                    None
+                }
+                // The holder has no window: it is shutting down (or never got one). Take over once
+                // it has gone, so a launch during an exit doesn't end with nothing running.
+                platform::Existing::None => match platform::claim_instance(platform::INSTANCE_MUTEX, Duration::from_secs(5)) {
+                    Some(lock) => Some(lock),
+                    None => return Ok(()),
+                },
             }
         }
     };
@@ -665,8 +697,13 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     // The rendering notifier reports the first presented frame to the watchdog and, with
-    // NEGOTIUM_FRAME_STATS=<path>, times every frame for the bench.
-    let frame_stats_path = std::env::var_os("NEGOTIUM_FRAME_STATS");
+    // NEGOTIUM_FRAME_STATS=<path>, times every frame for the bench: only in a debug build or with
+    // the bench's own flag, and never elevated (the path is written at exit; framestats::path).
+    let frame_stats_path = negotium::framestats::path(
+        elevated,
+        cfg!(debug_assertions) || has_arg(negotium::framestats::BENCH_ARG),
+        std::env::var_os(negotium::framestats::ENV),
+    );
     let frame_stats: Rc<RefCell<negotium::framestats::FrameStats>> = Default::default();
     let notified = {
         let (stats, timed) = (frame_stats.clone(), frame_stats_path.is_some());
