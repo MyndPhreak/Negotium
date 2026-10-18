@@ -116,6 +116,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // Started by the admin task: `--from-task` (and a logon start's placeholder) set aside.
     let (from_task, args) = negotium::integrate::task_args(args);
     let has_arg = |flag: &str| args.iter().any(|a| a == flag);
+    // Start with Windows: the Run value's `--tray`, or the admin task's logon trigger, starts
+    // hidden in the tray (passed on through a hand-off).
+    let in_tray = negotium::integrate::starts_in_tray(from_task, &args);
     let install = negotium::install::current();
     let user_sid = negotium_actions::integration::current_user_sid().ok();
     let elevated = negotium_actions::is_elevated();
@@ -128,7 +131,9 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let machine = negotium::integrate::System::new();
         let user_sid = || user_sid.clone();
-        let activate_running = || platform::activate_existing_instance(Duration::ZERO);
+        // A start in the tray leaves a running instance as it is.
+        let activate_running =
+            || if in_tray { platform::find_main_window().is_some() } else { platform::activate_existing_instance(Duration::ZERO) };
         let ctx = negotium::integrate::LaunchCtx {
             installed: install.installed,
             elevated,
@@ -158,6 +163,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let _instance = match platform::claim_instance(platform::INSTANCE_MUTEX, wait) {
         Some(lock) => lock,
         None => {
+            if in_tray && platform::find_main_window().is_some() {
+                return Ok(());
+            }
             if platform::activate_existing_instance(Duration::from_secs(5)) {
                 return Ok(());
             }
@@ -304,10 +312,15 @@ fn main() -> Result<(), slint::PlatformError> {
             // One registry value and the user's task, read on the UI thread when the page is
             // wired, each time it is shown and after each elevated command.
             redirect: Box::new(|| negotium::integrate::Machine::ifeo(&negotium::integrate::System::new())),
+            run_value: Box::new(|| negotium::integrate::Machine::run_value(&negotium::integrate::System::new())),
             admin_member,
             read_task: Box::new({
                 let sid = user_sid.clone();
                 move |done| negotium::settingspage::read_task_in_background(sid.clone(), done)
+            }),
+            run_here: Box::new({
+                let sid = user_sid.clone();
+                move |action, done| negotium::settingspage::run_here_in_background(sid.clone(), action, done)
             }),
             elevated,
             // Admin mode just turned on here, non-elevated: the task starts the elevated copy
@@ -548,6 +561,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // Whether the window is on screen: graphs scroll only then (negotium::smooth). Every path that
     // hides, shows, minimises or restores it goes through this.
     let on_screen = OnScreen::new(controls.clone(), &ui);
+    // Started in the tray: the worker keeps the tray's pace from the start.
+    if in_tray {
+        on_screen.hide();
+    }
     {
         let (controls, b, close_weak, settings) = (controls.clone(), bridge.clone(), weak.clone(), settings.clone());
         let (saver, on_screen) = (saver.clone(), on_screen.clone());
@@ -796,6 +813,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 on_screen.apply();
                 platform::mark_main_window(hwnd);
                 chromed = true;
+                // Started in the tray: the native window exists now (hooked and marked, so the tray
+                // and a second launch can show it), and goes out of sight as closing it to the
+                // tray would. Slint creates the window only once the event loop runs, so it may
+                // be on screen for a moment first.
+                if in_tray {
+                    let _ = ui.hide();
+                }
             }
             if !tray_allowed() {
                 return;

@@ -2,7 +2,8 @@
 //! (the installer's custom actions and the Settings switches run it, elevated where Windows needs
 //! it). It turns the Ctrl+Shift+Esc redirect (the Image File Execution Options `Debugger` value
 //! for taskmgr.exe), admin mode (a per-user Task Scheduler task with highest privileges) and Start
-//! with Windows (the HKCU Run value) on and off, and removes all of them on uninstall.
+//! with Windows (the HKCU Run value, or the admin task's logon trigger in admin mode) on and off,
+//! and removes all of them on uninstall.
 //!
 //! Every effect goes through a [`Machine`] (the registry and Task Scheduler in the app, an
 //! in-memory fake in tests), and [`run`] refuses unless it runs as the installed exe: nothing it
@@ -25,6 +26,11 @@ pub const TRAY: &str = "--tray";
 /// with arguments passes them after it; a logon start may pass the literal
 /// `integration::ARG_PLACEHOLDER` instead, which means none.
 pub const FROM_TASK: &str = "--from-task";
+/// What [`hand_off`] passes the task for a launch with no arguments of its own: every start
+/// Negotium asks of the task carries at least one argument, so a start with none is the logon
+/// trigger's (Task Scheduler gives a trigger start no `$(Arg0)` value), which starts in the tray
+/// ([`starts_in_tray`]). Otherwise ignored.
+pub const SHOW: &str = "--show";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -183,6 +189,8 @@ pub trait Machine {
     /// Creates (or replaces) user `sid`'s admin task in `\Negotium\`: highest privileges, action
     /// `exe` with [`FROM_TASK`], and with `logon` a trigger at that user's sign-in.
     fn create_task(&self, sid: &str, exe: &Path, logon: bool) -> Result<(), IntegrateError>;
+    /// Whether user `sid`'s task has the logon trigger (false when it is missing or unreadable).
+    fn task_logon(&self, sid: &str) -> bool;
     /// Deletes user `sid`'s admin task (absent is fine).
     fn delete_task(&self, sid: &str) -> Result<(), IntegrateError>;
     fn task_state(&self, sid: &str) -> TaskState;
@@ -225,6 +233,17 @@ fn user_sid(ctx: &Ctx) -> Result<String, IntegrateError> {
 /// The Run value: the installed exe, quoted (Program Files has a space), started in the tray.
 pub fn run_command(exe: &Path) -> String {
     format!("\"{}\" {TRAY}", exe.display())
+}
+
+/// Whether the Run value `value` starts `exe` (however the path is spelled; quoted, or unquoted
+/// without spaces; with any arguments): Start with Windows is on in its Run value form.
+pub fn run_value_starts(value: &str, exe: &Path) -> bool {
+    let value = value.trim();
+    let path = match value.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or_default(),
+        None => value.split(' ').next().unwrap_or_default(),
+    };
+    !path.is_empty() && same_path(Path::new(path), exe)
 }
 
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
@@ -295,6 +314,14 @@ fn open_task_manager(
 }
 
 /// Runs `action` as the installed exe (refusing otherwise, before any change).
+///
+/// Start with Windows has two forms. Without admin mode (no task) it is the Run value, in HKCU:
+/// startup-on/off then touch nothing else and need no elevation. With admin mode (the user's task
+/// exists, even one needing repair) it is the task's logon trigger, so sign-in starts the elevated
+/// copy directly: startup-on recreates the task with the trigger, startup-off without it (both
+/// need elevation), and the Run value is removed. Admin mode takes the startup with it: admin-on
+/// removes the Run value (Settings and the installer pass `--logon` while Start with Windows is
+/// on), admin-off sets it again when the task had the trigger.
 pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
     let exe = installed_exe(ctx)?;
     let machine = ctx.machine;
@@ -304,15 +331,31 @@ pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
         // HKCU's Run value belongs to the user running this; a service account (SYSTEM, from an
         // installer step) has no sign-in to start at, so it is refused like admin mode.
         Action::StartupOn => {
-            user_sid(ctx)?;
-            machine.set_run(Some(&run_command(&exe)))
+            let sid = user_sid(ctx)?;
+            if machine.task_state(&sid) == TaskState::Missing {
+                machine.set_run(Some(&run_command(&exe)))
+            } else {
+                machine.create_task(&sid, &exe, true)?;
+                machine.set_run(None)
+            }
         }
         Action::StartupOff => {
-            user_sid(ctx)?;
+            let sid = user_sid(ctx)?;
+            if machine.task_state(&sid) != TaskState::Missing && machine.task_logon(&sid) {
+                machine.create_task(&sid, &exe, false)?;
+            }
             machine.set_run(None)
         }
-        Action::AdminOn { logon } => machine.create_task(&user_sid(ctx)?, &exe, logon),
-        Action::AdminOff => machine.delete_task(&user_sid(ctx)?),
+        Action::AdminOn { logon } => {
+            machine.create_task(&user_sid(ctx)?, &exe, logon)?;
+            machine.set_run(None)
+        }
+        Action::AdminOff => {
+            let sid = user_sid(ctx)?;
+            let logon = machine.task_logon(&sid);
+            machine.delete_task(&sid)?;
+            if logon { machine.set_run(Some(&run_command(&exe))) } else { Ok(()) }
+        }
         Action::OpenTaskManager => open_task_manager(machine, &exe, ctx.start_task_manager),
         // Every step is attempted; the first failure is reported.
         Action::Uninstall => [clear_redirect(machine, &exe), machine.set_run(None), machine.delete_task_folder()]
@@ -365,6 +408,13 @@ pub fn task_manager_path() -> Option<PathBuf> {
     // SAFETY: allocated by SHGetKnownFolderPath; freed exactly once.
     unsafe { CoTaskMemFree(Some(p.0 as *const c_void)) };
     s.filter(|s| !s.is_empty()).map(|s| PathBuf::from(s).join("Taskmgr.exe"))
+}
+
+/// Whether this launch starts hidden in the tray (Start with Windows): `--tray` (the Run value,
+/// passed on by a hand-off too), or a start by the task with no arguments at all, which only its
+/// logon trigger makes ([`SHOW`]). `args` is [`task_args`]' rest.
+pub fn starts_in_tray(from_task: bool, args: &[OsString]) -> bool {
+    args.iter().any(|a| a == TRAY) || (from_task && args.iter().all(|a| a.is_empty()))
 }
 
 /// What a launch does about admin mode.
@@ -479,6 +529,9 @@ pub fn hand_off(ctx: &LaunchCtx, args: &[String], log: &mut dyn FnMut(&str)) -> 
         }
         Launch::HandOff => {
             (ctx.allow_foreground)();
+            // Never an empty start: that is the logon trigger's, which starts in the tray.
+            let shown = [SHOW.to_string()];
+            let args = if args.is_empty() { &shown[..] } else { args };
             // Task Scheduler accepting the start is all this sees: if the elevated copy then
             // fails to run (its exe gone, a bad action), the task's last result records it and
             // the next launch reads the task as Broken and runs here, so this never loops.
@@ -549,6 +602,9 @@ impl Machine for System {
     }
     fn create_task(&self, sid: &str, exe: &Path, logon: bool) -> Result<(), IntegrateError> {
         integration::create_task(&self.roots, sid, exe, FROM_TASK, logon).map_err(failed)
+    }
+    fn task_logon(&self, sid: &str) -> bool {
+        integration::task_logon(&self.roots, sid)
     }
     fn delete_task(&self, sid: &str) -> Result<(), IntegrateError> {
         integration::delete_task(&self.roots, sid).map_err(failed)
@@ -630,6 +686,9 @@ mod tests {
             self.call("delete_task")?;
             self.tasks.borrow_mut().remove(sid);
             Ok(())
+        }
+        fn task_logon(&self, sid: &str) -> bool {
+            self.tasks.borrow().get(sid).is_some_and(|(_, logon)| *logon)
         }
         fn task_state(&self, sid: &str) -> TaskState {
             if let Some(state) = &self.state {
@@ -756,6 +815,109 @@ mod tests {
         assert_eq!(fake.run_value(), Some(format!("\"{}\" --tray", root.exe().display())));
         run(Action::StartupOff, &root.ctx(&fake)).unwrap();
         assert_eq!(fake.run_value(), None);
+    }
+
+    /// Without admin mode Start with Windows is the Run value (HKCU: no UAC); with it, the task's
+    /// logon trigger, and the Run value goes.
+    #[test]
+    fn startup_uses_the_run_value_without_admin_mode_and_the_task_with_it() {
+        let root = Root::new();
+        let fake = Fake::default();
+        run(Action::StartupOn, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.run_value(), Some(run_command(&root.exe())));
+        assert!(fake.tasks.borrow().is_empty(), "no task without admin mode");
+        assert_eq!(*fake.calls.borrow(), ["set_run"], "only HKCU is touched");
+        run(Action::StartupOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.run_value(), None);
+        assert_eq!(*fake.calls.borrow(), ["set_run", "set_run"]);
+
+        // Admin mode on: the task gets the logon trigger, and a stray Run value is removed.
+        fake.tasks.borrow_mut().insert(SID.into(), (root.exe(), false));
+        *fake.run.borrow_mut() = Some(run_command(&root.exe()));
+        run(Action::StartupOn, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.tasks.borrow().get(SID), Some(&(root.exe(), true)));
+        assert!(fake.task_logon(SID));
+        assert_eq!(fake.run_value(), None);
+        run(Action::StartupOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.tasks.borrow().get(SID), Some(&(root.exe(), false)), "admin mode stays, without the trigger");
+        assert_eq!(fake.run_value(), None);
+        // Off again with no trigger: the task is left as it is.
+        fake.calls.borrow_mut().clear();
+        run(Action::StartupOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(*fake.calls.borrow(), ["set_run"]);
+
+        // A task that needs repair is admin mode too: recreated, with the trigger.
+        let broken = Fake { state: Some(TaskState::Broken("its exe is gone".into())), ..Fake::default() };
+        broken.tasks.borrow_mut().insert(SID.into(), (PathBuf::from(r"C:\gone.exe"), false));
+        run(Action::StartupOn, &root.ctx(&broken)).unwrap();
+        assert_eq!(broken.tasks.borrow().get(SID), Some(&(root.exe(), true)));
+        assert_eq!(broken.run_value(), None);
+    }
+
+    /// Admin mode turned on or off while Start with Windows is on takes the startup with it.
+    #[test]
+    fn switching_admin_mode_moves_startup_between_forms() {
+        let root = Root::new();
+        let fake = Fake::default();
+        run(Action::StartupOn, &root.ctx(&fake)).unwrap();
+        // On (Settings passes --logon while Start with Windows is on): the trigger, no Run value.
+        run(Action::AdminOn { logon: true }, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.tasks.borrow().get(SID), Some(&(root.exe(), true)));
+        assert_eq!(fake.run_value(), None);
+        // Off: the Run value again.
+        run(Action::AdminOff, &root.ctx(&fake)).unwrap();
+        assert!(fake.tasks.borrow().is_empty());
+        assert_eq!(fake.run_value(), Some(run_command(&root.exe())));
+        // Start with Windows off: admin mode never adds a startup.
+        run(Action::StartupOff, &root.ctx(&fake)).unwrap();
+        run(Action::AdminOn { logon: false }, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.tasks.borrow().get(SID), Some(&(root.exe(), false)));
+        run(Action::AdminOff, &root.ctx(&fake)).unwrap();
+        assert_eq!(fake.run_value(), None);
+        assert!(fake.tasks.borrow().is_empty());
+        // A failed delete changes nothing: no Run value next to a task that still starts.
+        let stuck = Fake { failing: vec!["delete_task"], ..Fake::default() };
+        stuck.tasks.borrow_mut().insert(SID.into(), (root.exe(), true));
+        assert!(run(Action::AdminOff, &root.ctx(&stuck)).is_err());
+        assert_eq!(stuck.run_value(), None);
+    }
+
+    /// `--tray` (the Run value) and a start by the task's logon trigger (no arguments at all:
+    /// every start Negotium asks of the task carries some) start hidden in the tray.
+    #[test]
+    fn tray_argument_starts_hidden() {
+        let os = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        let tray = |args: &[&str]| {
+            let (from_task, rest) = task_args(own_args(os(args)));
+            starts_in_tray(from_task, &rest)
+        };
+        assert!(tray(&["--tray"]));
+        assert!(tray(&["--from-task", "--tray"]), "a Run value launch handed off");
+        assert!(tray(&["--from-task", integration::ARG_PLACEHOLDER]), "the logon trigger");
+        assert!(tray(&["--from-task"]), "the logon trigger, the placeholder emptied");
+        assert!(tray(&["--from-task", ""]), "or an empty one");
+        assert!(!tray(&[]), "a plain launch shows the window");
+        assert!(!tray(&[r"C:\Windows\System32\Taskmgr.exe", "/4"]), "Ctrl+Shift+Esc");
+        assert!(!tray(&["--from-task", SHOW]), "a hand-off of a plain launch");
+        assert!(!tray(&["--from-task", "--restarted", "--page=startup"]));
+        assert!(!tray(&["--page=startup"]));
+        assert!(!tray(&["--trays"]));
+        // The hand-off never sends an empty start, so it can't be taken for the logon trigger.
+        let l = Launcher::new(TaskState::Ready);
+        assert!(l.launch(false, false, &[]));
+        assert!(l.launch(false, false, &["--tray"]));
+        assert_eq!(*l.fake.started.borrow(), [vec![SHOW.to_string()], vec![TRAY.to_string()]]);
+    }
+
+    #[test]
+    fn the_run_value_is_recognised_however_it_is_spelled() {
+        let exe = Path::new(r"C:\Program Files\Negotium\negotium.exe");
+        assert!(run_value_starts(&run_command(exe), exe));
+        assert!(run_value_starts(r#""C:\PROGRAM FILES\Negotium\negotium.exe""#, exe));
+        assert!(run_value_starts(r"C:\Progra~1\x.exe --tray", Path::new(r"C:\Progra~1\x.exe")));
+        for other in ["", "\"\"", r#""C:\Tools\other.exe" --tray"#, r"C:\Program Files\Negotium\negotium.exe --tray"] {
+            assert!(!run_value_starts(other, exe), "{other}");
+        }
     }
 
     #[test]

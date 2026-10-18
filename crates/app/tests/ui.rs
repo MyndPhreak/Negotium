@@ -2254,8 +2254,11 @@ const INSTALLED_EXE: &str = r"C:\Program Files\Negotium\negotium.exe";
 #[derive(Clone, Default)]
 struct FakeIntegration {
     redirect: Rc<RefCell<Option<std::path::PathBuf>>>,
-    /// The user's admin task (none set: missing).
+    /// The user's admin task (none set: missing), and whether it has the logon trigger.
     task: Rc<RefCell<Option<negotium::integrate::TaskState>>>,
+    logon: Rc<std::cell::Cell<bool>>,
+    /// The HKCU Run value.
+    run: Rc<RefCell<Option<String>>>,
     /// How often the task was asked for, and the reads not yet answered (`read`).
     task_reads: Rc<std::cell::Cell<usize>>,
     reads: Rc<RefCell<Vec<negotium::settingspage::TaskRead>>>,
@@ -2291,6 +2294,10 @@ impl FakeIntegration {
                 let r = f.redirect.clone();
                 move || r.borrow().clone()
             }),
+            run_value: Box::new({
+                let r = f.run.clone();
+                move || r.borrow().clone()
+            }),
             admin_member,
             // Like the app's: the answer comes later (`read`), never during the call.
             read_task: Box::new({
@@ -2298,6 +2305,15 @@ impl FakeIntegration {
                 move |done| {
                     count.set(count.get() + 1);
                     reads.borrow_mut().push(done);
+                }
+            }),
+            // Run here (no UAC): recorded as `here ...`, its outcome given by `finish` like an
+            // elevated command's.
+            run_here: Box::new({
+                let (asked, pending) = (f.asked.clone(), f.pending.clone());
+                move |action, done| {
+                    asked.borrow_mut().push(format!("here {}", action.to_args().join(" ")));
+                    assert!(pending.borrow_mut().replace(done).is_none(), "one command at a time");
                 }
             }),
             elevated,
@@ -2348,10 +2364,129 @@ impl FakeIntegration {
                 return;
             }
             for done in reads {
-                done(self.task.borrow().clone().unwrap_or(negotium::integrate::TaskState::Missing));
+                let state = self.task.borrow().clone().unwrap_or(negotium::integrate::TaskState::Missing);
+                done(negotium::settingspage::AdminTask { state, logon: self.logon.get() });
             }
         }
     }
+}
+
+const STARTUP: &str = "Start with Windows";
+
+/// The Run value the installed copy writes.
+fn our_run_value() -> String {
+    format!("\"{INSTALLED_EXE}\" --tray")
+}
+
+/// Without admin mode Start with Windows is the Run value: shown from the machine, changed in
+/// this process (HKCU, no UAC prompt), and the saved choice follows the machine.
+#[test]
+fn start_with_windows_is_the_run_value_without_admin_mode() {
+    let dir = Scratch::new("startup-run");
+    let path = dir.0.join("settings.json");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    fake.read();
+    let checked = || switch(&ui, STARTUP).accessible_checked();
+    assert_eq!(checked(), Some(false));
+
+    switch(&ui, STARTUP).invoke_accessible_default_action();
+    assert_eq!(*fake.asked.borrow(), ["here --integrate startup-on"], "run here, not elevated");
+    assert!(fake.exes.borrow().is_empty());
+    assert_eq!(checked(), Some(false), "not on until the machine says so");
+    *fake.run.borrow_mut() = Some(our_run_value());
+    fake.finish(Ok(()));
+    assert_eq!(checked(), Some(true));
+    assert!(settings.borrow().start_with_windows);
+    saved(&path, "start with windows", |s| s.start_with_windows);
+
+    // A failure says so, and the switch stays with the machine.
+    switch(&ui, STARTUP).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("here --integrate startup-off"));
+    fake.finish(Err(negotium_actions::ActionError::Other("access denied".into())));
+    assert_eq!(checked(), Some(true));
+    assert_eq!(ui.get_toast(), "Couldn't change Start with Windows: access denied.");
+
+    // Removed outside Negotium: the switch and the saved choice follow when Settings is shown.
+    *fake.run.borrow_mut() = None;
+    integrations.page_shown(Page::Settings);
+    fake.read();
+    assert_eq!(checked(), Some(false));
+    assert!(!settings.borrow().start_with_windows);
+    // Another program's value under our name doesn't count.
+    *fake.run.borrow_mut() = Some(r#""C:\Tools\other.exe" --tray"#.into());
+    integrations.show();
+    fake.read();
+    assert_eq!(checked(), Some(false));
+}
+
+/// With admin mode on, Start with Windows is the task's logon trigger: shown from the task (read
+/// off the UI thread) and changed elevated. Admin mode turned off or on takes it along.
+#[test]
+fn start_with_windows_is_the_tasks_trigger_in_admin_mode() {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("startup-task");
+    let (integration, fake) = FakeIntegration::new(true);
+    fake.set_task(TaskState::Ready);
+    // A stray Run value doesn't count in admin mode.
+    *fake.run.borrow_mut() = Some(our_run_value());
+    let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    let checked = || switch(&ui, STARTUP).accessible_checked();
+    assert_eq!(checked(), Some(false), "the saved choice until the task is read");
+    fake.read();
+    assert_eq!(checked(), Some(false), "no logon trigger");
+
+    switch(&ui, STARTUP).invoke_accessible_default_action();
+    assert_eq!(*fake.asked.borrow(), ["--integrate startup-on"]);
+    assert_eq!(*fake.exes.borrow(), [std::path::PathBuf::from(INSTALLED_EXE)], "elevated");
+    fake.logon.set(true);
+    *fake.run.borrow_mut() = None;
+    fake.finish(Ok(()));
+    assert_eq!(checked(), Some(false), "until Task Scheduler answers");
+    fake.read();
+    assert_eq!(checked(), Some(true));
+    assert!(settings.borrow().start_with_windows);
+
+    // Admin mode off: the command moves the startup to the Run value.
+    switch(&ui, ADMIN).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate admin-off"));
+    fake.set_task(TaskState::Missing);
+    fake.logon.set(false);
+    *fake.run.borrow_mut() = Some(our_run_value());
+    fake.finish(Ok(()));
+    fake.read();
+    assert_eq!(checked(), Some(true), "now the Run value");
+    // And on again: the task takes it back (--logon).
+    switch(&ui, ADMIN).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate admin-on --logon"));
+    fake.set_task(TaskState::Ready);
+    fake.logon.set(true);
+    *fake.run.borrow_mut() = None;
+    fake.finish(Ok(()));
+    fake.read();
+    assert_eq!(checked(), Some(true), "the trigger again");
+    // Off in admin mode (even one that needs repair): elevated.
+    fake.set_task(TaskState::Broken("its exe is gone".into()));
+    integrations.show();
+    fake.read();
+    switch(&ui, STARTUP).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate startup-off"));
+    assert_eq!(fake.exes.borrow().len(), 4, "every one elevated");
+}
+
+#[test]
+fn a_dev_build_never_reads_or_changes_start_with_windows() {
+    let dir = Scratch::new("startup-dev");
+    let (integration, fake) = FakeIntegration::new(false);
+    *fake.run.borrow_mut() = Some(our_run_value());
+    let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    assert_eq!(switch(&ui, STARTUP).accessible_checked(), Some(false));
+    integrations.toggle_start_with_windows(true);
+    assert!(fake.asked.borrow().is_empty());
+    assert!(!settings.borrow().start_with_windows, "a dev build doesn't take the installed copy's state");
 }
 
 /// A development build's exe.

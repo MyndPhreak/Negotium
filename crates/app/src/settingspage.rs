@@ -78,13 +78,21 @@ pub struct Integration {
     pub installed_exe: Option<PathBuf>,
     /// The exe taskmgr.exe's redirect names (`integrate::Machine::ifeo`).
     pub redirect: Box<dyn Fn() -> Option<PathBuf>>,
+    /// The HKCU Run value `Negotium` (`integrate::Machine::run_value`), one registry value:
+    /// Start with Windows without admin mode.
+    pub run_value: Box<dyn Fn() -> Option<String>>,
     /// The user is in Administrators (`integration::is_admin_member`): admin mode is offered
     /// only then.
     pub admin_member: bool,
-    /// Reads this user's admin task (`integrate::Machine::task_state`, a Task Scheduler call)
-    /// off the UI thread and hands the state back on it ([`read_task_in_background`] in the
-    /// app); asked only for the installed copy of an administrator.
+    /// Reads this user's admin task (`integrate::Machine::task_state` and `task_logon`, Task
+    /// Scheduler calls) off the UI thread and hands it back on it ([`read_task_in_background`]
+    /// in the app); asked only for the installed copy of an administrator.
     pub read_task: Box<dyn Fn(TaskRead)>,
+    /// Runs an integration action in this process, without elevation, off the UI thread; the
+    /// outcome comes back on the UI thread ([`run_here_in_background`] in the app). Start with
+    /// Windows without admin mode only: the Run value is the user's own (HKCU), so it needs no
+    /// UAC prompt.
+    pub run_here: Box<RunHere>,
     /// This instance runs elevated.
     pub elevated: bool,
     /// Starts the admin task with `--restarted` and the current page and, once it has started,
@@ -111,20 +119,35 @@ pub type ElevatedDone = Box<dyn FnOnce(Result<(), ActionError>)>;
 pub type Elevate = dyn Fn(PathBuf, Vec<String>, isize, ElevatedDone, LateExit);
 /// An elevated command that outlasted its wait has exited (on the UI thread).
 pub type LateExit = Box<dyn FnOnce()>;
-/// The admin task's state, delivered on the UI thread.
-pub type TaskRead = Box<dyn FnOnce(TaskState)>;
+/// The admin task, delivered on the UI thread.
+pub type TaskRead = Box<dyn FnOnce(AdminTask)>;
+/// [`Integration::run_here`]: the action, then its outcome.
+pub type RunHere = dyn Fn(Action, ElevatedDone);
+
+/// The user's admin task as Settings shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminTask {
+    pub state: TaskState,
+    /// It has the logon trigger: Start with Windows in admin mode.
+    pub logon: bool,
+}
 
 /// The Ctrl+Shift+Esc and admin mode switches and "Open Windows Task Manager", wired. One
 /// elevated command at a time: a click while a UAC prompt (or its command) is still open does
 /// nothing.
 pub struct Integrations {
     io: Integration,
-    /// Start with Windows decides whether admin mode's task also starts at sign-in.
+    /// Start with Windows decides whether admin mode's task also starts at sign-in; it follows
+    /// the machine (the Run value or the task's trigger) and is saved when that changes.
     settings: Rc<RefCell<Settings>>,
+    saver: Saver,
     weak: slint::Weak<MainWindow>,
     busy: Cell<bool>,
-    /// The admin mode row's last known state, shown while Task Scheduler is read again.
+    /// The admin mode row's last known state, shown while Task Scheduler is read again, and
+    /// whether the task has the logon trigger; `task_known`: the task has been read once.
     admin_state: Cell<i32>,
+    task_logon: Cell<bool>,
+    task_known: Cell<bool>,
     /// A task read is running; `read_again`: another was asked for meanwhile.
     reading: Cell<bool>,
     read_again: Cell<bool>,
@@ -160,9 +183,42 @@ impl Integrations {
         (self.io.redirect)().is_some_and(|exe| names(&exe)).then(|| installed.to_path_buf())
     }
 
-    /// Reads the machine again and shows it: the switches, and the tray menu. The redirect is
-    /// one registry value, read here; the admin task is read off the UI thread, and the row
-    /// shows its last known state until the answer comes.
+    /// Admin mode is on (a task exists, even one that needs repair): Start with Windows is then
+    /// the task's logon trigger, changed elevated.
+    fn admin_mode(&self) -> bool {
+        self.io.admin_member && matches!(self.admin_state.get(), 1 | 2)
+    }
+
+    /// Whether Start with Windows is on, as the machine says: the task's trigger in admin mode,
+    /// the Run value otherwise. `None` until it is known (a development build, or the task not
+    /// read yet for an administrator's installed copy): the saved choice stands meanwhile.
+    fn startup_on(&self) -> Option<bool> {
+        let install = &self.io.install;
+        if !install.installed || (self.io.admin_member && !self.task_known.get()) {
+            return None;
+        }
+        if self.admin_mode() {
+            return Some(self.task_logon.get());
+        }
+        Some((self.io.run_value)().is_some_and(|v| crate::integrate::run_value_starts(&v, &install.exe)))
+    }
+
+    /// Shows Start with Windows as the machine has it; the saved choice follows (and is saved
+    /// when it changed), so admin mode's `--logon` and the page agree with the machine.
+    fn show_startup(&self) {
+        let Some(on) = self.startup_on() else { return };
+        if self.settings.borrow().start_with_windows != on {
+            self.settings.borrow_mut().start_with_windows = on;
+            drop(self.saver.save(self.settings.borrow().clone()));
+        }
+        if let Some(ui) = self.weak.upgrade() {
+            ui.set_settings_start_with_windows(on);
+        }
+    }
+
+    /// Reads the machine again and shows it: the switches, and the tray menu. The redirect and
+    /// the Run value are one registry value each, read here; the admin task is read off the UI
+    /// thread, and its rows show their last known state until the answer comes.
     pub fn show(self: &Rc<Self>) {
         let ours = self.redirect_is_ours();
         let admin = if !self.io.admin_member {
@@ -177,6 +233,7 @@ impl Integrations {
             ui.set_settings_hotkey(ours);
             ui.set_settings_admin_mode_state(admin);
         }
+        self.show_startup();
         (self.io.redirect_shown)(ours);
     }
 
@@ -190,10 +247,13 @@ impl Integrations {
         let this = self.clone();
         (self.io.read_task)(Box::new(move |task| {
             this.reading.set(false);
-            this.admin_state.set(admin_mode_state(true, &task));
+            this.admin_state.set(admin_mode_state(true, &task.state));
+            this.task_logon.set(task.logon);
+            this.task_known.set(true);
             if let Some(ui) = this.weak.upgrade() {
                 ui.set_settings_admin_mode_state(this.admin_state.get());
             }
+            this.show_startup();
             if this.read_again.take() {
                 this.read_task();
             }
@@ -243,6 +303,23 @@ impl Integrations {
         });
     }
 
+    /// The Start with Windows switch asked for `on`: startup-on/off, which picks the form
+    /// (`integrate::run`). Without admin mode that is the Run value, run here without a prompt;
+    /// with it, the task's logon trigger, run elevated. The switch then shows the machine again.
+    pub fn toggle_start_with_windows(self: &Rc<Self>, on: bool) {
+        if !self.io.install.installed {
+            self.show();
+            return;
+        }
+        let action = if on { Action::StartupOn } else { Action::StartupOff };
+        let failure = |e: &ActionError| e.message("Start with Windows", false);
+        if self.admin_mode() {
+            self.run_elevated(action, failure, |_| {});
+        } else {
+            self.run_command(Runner::Here, action, failure, |_| {});
+        }
+    }
+
     /// "Open Windows Task Manager" (Settings, the tray): with a Negotium redirect set, the
     /// elevated open-task-manager lifts it while Task Manager starts; otherwise Task Manager just
     /// starts.
@@ -251,7 +328,7 @@ impl Integrations {
             let failure = |e: &ActionError| {
                 format!("Couldn't open Windows Task Manager: {}.", e.to_string().trim_end_matches('.'))
             };
-            self.run_elevated_as(exe, Action::OpenTaskManager, failure, |_| {});
+            self.run_command(Runner::Elevated(exe), Action::OpenTaskManager, failure, |_| {});
         } else if !self.busy.get() {
             (self.io.start_task_manager)();
         }
@@ -263,14 +340,15 @@ impl Integrations {
         failure: fn(&ActionError) -> String,
         succeeded: impl FnOnce(&Rc<Self>) + 'static,
     ) {
-        self.run_elevated_as(self.io.install.exe.clone(), action, failure, succeeded);
+        self.run_command(Runner::Elevated(self.io.install.exe.clone()), action, failure, succeeded);
     }
 
-    /// Runs `action` as `exe`, elevated; the switches show the machine again once it returns
-    /// (and again if it outlasted the wait, once it exits), and `succeeded` follows a success.
-    fn run_elevated_as(
+    /// Runs `action` (elevated as an exe, or here); the switches show the machine again once it
+    /// returns (and again if an elevated one outlasted the wait, once it exits), and `succeeded`
+    /// follows a success.
+    fn run_command(
         self: &Rc<Self>,
-        exe: PathBuf,
+        runner: Runner,
         action: Action,
         failure: fn(&ActionError) -> String,
         succeeded: impl FnOnce(&Rc<Self>) + 'static,
@@ -279,28 +357,37 @@ impl Integrations {
             self.show();
             return;
         }
-        let owner = self.weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
-        let (this, late) = (self.clone(), self.clone());
-        (self.io.elevate)(
-            exe,
-            action.to_args(),
-            owner,
-            Box::new(move |result| {
-                this.busy.set(false);
-                this.show();
-                match result {
-                    Ok(()) => succeeded(&this),
-                    Err(ActionError::Cancelled) => {}
-                    Err(e) => {
-                        if let Some(ui) = this.weak.upgrade() {
-                            ui.set_toast(failure(&e).into());
-                        }
+        let this = self.clone();
+        let done: ElevatedDone = Box::new(move |result| {
+            this.busy.set(false);
+            this.show();
+            match result {
+                Ok(()) => succeeded(&this),
+                Err(ActionError::Cancelled) => {}
+                Err(e) => {
+                    if let Some(ui) = this.weak.upgrade() {
+                        ui.set_toast(failure(&e).into());
                     }
                 }
-            }),
-            Box::new(move || late.show()),
-        );
+            }
+        });
+        match runner {
+            Runner::Elevated(exe) => {
+                let owner = self.weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
+                let late = self.clone();
+                (self.io.elevate)(exe, action.to_args(), owner, done, Box::new(move || late.show()));
+            }
+            Runner::Here => (self.io.run_here)(action, done),
+        }
     }
+}
+
+/// Where [`Integrations::run_command`] runs its action.
+enum Runner {
+    /// As this exe, elevated (a UAC prompt).
+    Elevated(PathBuf),
+    /// In this process, without elevation.
+    Here,
 }
 
 /// A handler waiting for its value, type-erased ([`pending`]).
@@ -366,10 +453,38 @@ pub fn in_background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stati
 /// The app's [`Integration::read_task`]: user `sid`'s task (no SID: missing) from Task
 /// Scheduler on its own thread, so a slow or hung Schedule service never holds up the window.
 pub fn read_task_in_background(sid: Option<String>, done: TaskRead) {
+    use crate::integrate::{Machine, System};
     in_background(
         move || match sid {
-            Some(sid) => crate::integrate::Machine::task_state(&crate::integrate::System::new(), &sid),
-            None => TaskState::Missing,
+            Some(sid) => {
+                let machine = System::new();
+                AdminTask { state: machine.task_state(&sid), logon: machine.task_logon(&sid) }
+            }
+            None => AdminTask { state: TaskState::Missing, logon: false },
+        },
+        done,
+    );
+}
+
+/// The app's [`Integration::run_here`]: `action` through `integrate::run` as this exe, for user
+/// `sid`, on its own thread (it reads Task Scheduler), then `done` on the UI thread. A failure is
+/// logged. Called on the UI thread; never by tests.
+pub fn run_here_in_background(sid: Option<String>, action: Action, done: ElevatedDone) {
+    in_background(
+        move || {
+            let machine = crate::integrate::System::new();
+            let ctx = crate::integrate::Ctx {
+                exe: std::env::current_exe().unwrap_or_default(),
+                program_files: install::program_files(),
+                user_sid: sid.unwrap_or_default(),
+                machine: &machine,
+                start_task_manager: &crate::integrate::start_task_manager,
+            };
+            crate::integrate::run(action, &ctx).map_err(|e| {
+                let command = action.to_args().join(" ");
+                crate::log::Log::new(crate::log::Log::default_path()).warn(&format!("{command} failed: {e}"));
+                ActionError::Other(e.to_string())
+            })
         },
         done,
     );
@@ -424,9 +539,12 @@ impl SettingsWiring {
         let integrations = Rc::new(Integrations {
             io: self.integration,
             settings: self.settings.clone(),
+            saver: self.saver.clone(),
             weak: ui.as_weak(),
             busy: Cell::new(false),
             admin_state: Cell::new(0),
+            task_logon: Cell::new(false),
+            task_known: Cell::new(false),
             reading: Cell::new(false),
             read_again: Cell::new(false),
         });
@@ -443,8 +561,11 @@ impl SettingsWiring {
             let integrations = integrations.clone();
             ui.on_admin_mode_toggled(move |on| integrations.toggle_admin_mode(on));
         }
+        {
+            let integrations = integrations.clone();
+            ui.on_start_with_windows_toggled(move |on| integrations.toggle_start_with_windows(on));
+        }
         // Filled in by the tasks that implement them; until then the page only asks.
-        ui.on_start_with_windows_toggled(|_| {});
         ui.on_check_updates_toggled(|_| {});
         ui.on_check_updates_now(|| {});
         let change = Rc::new(Change { settings: self.settings, saver: self.saver, weak: ui.as_weak() });

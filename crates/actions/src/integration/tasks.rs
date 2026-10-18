@@ -14,7 +14,7 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::TaskScheduler::{
     IExecAction, IRegisteredTask, ITaskFolder, ITaskService, TASK_ACTION_EXEC, TASK_ACTION_TYPE,
     TASK_CREATE_OR_UPDATE, TASK_ENUM_HIDDEN, TASK_LOGON_INTERACTIVE_TOKEN, TASK_STATE_DISABLED,
-    TaskScheduler,
+    TASK_TRIGGER_LOGON, TASK_TRIGGER_TYPE2, TaskScheduler,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{BSTR, Interface};
@@ -349,6 +349,41 @@ pub fn task_state(roots: &Roots, sid: &str) -> TaskStatus {
     }
 }
 
+fn has_logon_trigger(task: &IRegisteredTask) -> windows::core::Result<bool> {
+    // SAFETY (this block): plain COM property reads on a valid registered task and the objects it
+    // returns; out-parameters are writable locals; the collection is 1-based.
+    unsafe {
+        let triggers = task.Definition()?.Triggers()?;
+        let mut count = 0i32;
+        triggers.Count(&mut count)?;
+        for i in 1..=count {
+            let mut kind = TASK_TRIGGER_TYPE2::default();
+            triggers.get_Item(i)?.Type(&mut kind)?;
+            if kind == TASK_TRIGGER_LOGON {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether user `sid`'s task also starts at sign-in (has a logon trigger): Start with Windows in
+/// admin mode. A missing or unreadable task has none.
+pub fn task_logon(roots: &Roots, sid: &str) -> bool {
+    if task_name(sid).is_err() || folder_path(roots).is_err() {
+        return false;
+    }
+    let _com = ComApartment::enter();
+    let read = || -> Result<bool, ActionError> {
+        let service = service()?;
+        match registered(&service, roots, sid)? {
+            Some(task) => has_logon_trigger(&task).map_err(com),
+            None => Ok(false),
+        }
+    };
+    read().unwrap_or(false)
+}
+
 /// Starts user `sid`'s task now, with `args` as its `$(Arg0)` (`join_args`).
 pub fn start_task(roots: &Roots, sid: &str, args: &[String]) -> Result<(), ActionError> {
     task_name(sid)?;
@@ -558,6 +593,7 @@ mod tests {
             assert!(matches!(delete_task(&Roots::system(), bad), Err(ActionError::Other(_))), "{bad}");
             assert!(matches!(create_task(&Roots::system(), bad, Path::new(EXE), "", false), Err(ActionError::Other(_))), "{bad}");
             assert!(matches!(start_task(&Roots::system(), bad, &[]), Err(ActionError::Other(_))), "{bad}");
+            assert!(!task_logon(&Roots::system(), bad), "{bad}");
         }
         assert_eq!(folder_path(&Roots::system()).unwrap(), "\\Negotium");
     }
@@ -584,11 +620,14 @@ mod tests {
         assert_eq!(task_state(&roots, &sid), TaskStatus::Missing);
         create_task(&roots, &sid, &cmd, "/c", false).unwrap();
         assert_eq!(task_state(&roots, &sid), TaskStatus::Ready);
+        assert!(!task_logon(&roots, &sid), "no logon trigger");
         start_task(&roots, &sid, &["exit".to_string(), "0".to_string()]).unwrap();
         // Replaced in place, now with the logon trigger.
         create_task(&roots, &sid, &cmd, "/c", true).unwrap();
         assert_ne!(task_state(&roots, &sid), TaskStatus::Missing);
+        assert!(task_logon(&roots, &sid), "the logon trigger reads back");
         delete_task(&roots, &sid).unwrap();
+        assert!(!task_logon(&roots, &sid), "a missing task has none");
         assert_eq!(task_state(&roots, &sid), TaskStatus::Missing);
         delete_task(&roots, &sid).unwrap();
         // A task whose exe is gone reads as broken.
