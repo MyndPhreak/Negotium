@@ -28,7 +28,7 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 /// The admin-only folder's security: owner Administrators, a protected DACL (nothing inherited
 /// from ProgramData, whose DACL lets users create files) with full control for Administrators and
 /// SYSTEM, inherited by what is created inside.
-const ADMIN_ONLY_SDDL: &str = "O:BAG:SYD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+pub const ADMIN_ONLY_SDDL: &str = "O:BAG:SYD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
 
 /// The folder downloads go to.
 #[derive(Clone, Debug, PartialEq, Eq)]

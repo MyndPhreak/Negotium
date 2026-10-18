@@ -41,7 +41,10 @@
   - The in-app updater passes NEGOTIUM_RELAUNCH=1: when the install is done, the new exe's
     -relaunch starts the new version as the user gets it (the admin task when it is ready,
     otherwise an unelevated start through Explorer), never elevated because msiexec is.
-    A first install offers "Launch Negotium" on the last page.
+    A first install offers "Launch Negotium" on the last page (-relaunch as well).
+  - A real uninstall also removes the redirect with Windows' reg.exe after the uninstall step, in
+    case the exe couldn't run it.
+  - %ProgramData%\Negotium-update, the elevated updater's download folder, is created admin-only.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
@@ -99,10 +102,26 @@
         </Directory>
       </Directory>
       <Directory Id="ProgramMenuFolder"/>
+      <!-- The 64-bit System32, for the reg.exe fallback (RemoveRedirectFallback). -->
+      <Directory Id="System64Folder"/>
+      <!-- The in-app updater's folder when Negotium runs elevated (admin mode):
+           %ProgramData%\Negotium-update, made here admin-only (owner Administrators, a protected
+           DACL for Administrators and SYSTEM only, as crates/app/src/update/secure.rs creates and
+           checks it), so a standard user can't create it first with permissions of their own. -->
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="UPDATEFOLDER" Name="Negotium-update">
+          <Component Id="UpdateFolder" Guid="DE4C325D-D817-49EA-826E-9DACEE1437F9" Win64="yes" KeyPath="yes">
+            <CreateFolder>
+              <PermissionEx Sddl="O:BAG:SYD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"/>
+            </CreateFolder>
+          </Component>
+        </Directory>
+      </Directory>
     </Directory>
 
     <Feature Id="Main" Title="Negotium" Level="1" Absent="disallow" AllowAdvertise="no">
       <ComponentRef Id="NegotiumExe"/>
+      <ComponentRef Id="UpdateFolder"/>
     </Feature>
 
     <!-- Add/Remove Programs: nothing to change (no features or options after install). -->
@@ -161,6 +180,13 @@
         Execute="rollback" Impersonate="yes" Return="ignore"/>
     <CustomAction Id="IntegrateUninstall" FileKey="NegotiumExe" ExeCommand="--integrate uninstall"
         Execute="deferred" Impersonate="no" Return="ignore"/>
+    <!-- Only the exe being removed can run the uninstall step; if it can't (damaged, blocked), the
+         redirect would outlive it and Ctrl+Shift+Esc would start nothing. So Windows' own reg.exe
+         (64-bit System32, and /reg:64: the 64-bit registry view) removes taskmgr.exe's Debugger
+         value afterwards when AppSearch found Negotium's there. Already gone is fine (ignored). -->
+    <CustomAction Id="RemoveRedirectFallback" Directory="System64Folder"
+        ExeCommand="&quot;[System64Folder]reg.exe&quot; delete &quot;HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe&quot; /v Debugger /f /reg:64"
+        Execute="deferred" Impersonate="no" Return="ignore"/>
     <CustomAction Id="IntegrateUninstallStartup" FileKey="NegotiumExe" ExeCommand="--integrate startup-off"
         Execute="deferred" Impersonate="yes" Return="ignore"/>
     <!-- Not waited for: it asks Task Scheduler or Explorer, which must never hold up the end of
@@ -194,8 +220,11 @@
       <Custom Action="RollbackUninstallHotkey" Before="IntegrateUninstall">
         REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NEGOTIUM_IFEO ~&gt;&lt; "\Negotium\negotium.exe"
       </Custom>
-      <Custom Action="IntegrateUninstall" Before="RollbackUninstallStartup">
+      <Custom Action="IntegrateUninstall" Before="RemoveRedirectFallback">
         REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
+      </Custom>
+      <Custom Action="RemoveRedirectFallback" Before="RollbackUninstallStartup">
+        REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NEGOTIUM_IFEO ~&gt;&lt; "\Negotium\negotium.exe"
       </Custom>
       <Custom Action="RollbackUninstallStartup" Before="IntegrateUninstallStartup">
         REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NEGOTIUM_RUN ~&gt;&lt; "\Negotium\negotium.exe"
@@ -209,11 +238,12 @@
       </Custom>
     </InstallExecuteSequence>
 
-    <!-- "Launch Negotium" on the last page of a first install: started by the setup window itself,
-         as the user (not elevated). -->
+    <!-- "Launch Negotium" on the last page of a first install: the new exe's -relaunch, as after an
+         update, so it starts as the user gets it (the admin task, or an unelevated start through
+         Explorer) even when setup's window runs elevated. Not waited for. -->
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Negotium"/>
-    <Property Id="WixShellExecTarget" Value="[#NegotiumExe]"/>
-    <CustomAction Id="LaunchNegotium" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" Return="ignore"/>
+    <CustomAction Id="LaunchNegotium" FileKey="NegotiumExe" ExeCommand="--relaunch"
+        Execute="immediate" Return="asyncNoWait"/>
 
     <UI Id="NegotiumUI">
       <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8"/>
@@ -248,7 +278,7 @@
         <Control Id="Hotkey" Type="CheckBox" X="20" Y="54" Width="330" Height="17" Property="HOTKEY" CheckBoxValue="1"
             Text="Open on Ctrl+Shift+Esc"/>
         <Control Id="HotkeyNote" Type="Text" X="36" Y="71" Width="320" Height="20" NoPrefix="yes"
-            Text="Every way of starting Task Manager opens Negotium instead. Negotium can still open Windows Task Manager."/>
+            Text="Every way of starting Task Manager opens Negotium instead (replacing another tool's, such as Process Explorer's). Negotium can still open Windows Task Manager."/>
 
         <Control Id="AdminMode" Type="CheckBox" X="20" Y="99" Width="330" Height="17" Property="ADMINMODE" CheckBoxValue="1"
             Text="Admin mode (no prompt)"/>

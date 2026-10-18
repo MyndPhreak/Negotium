@@ -390,17 +390,96 @@ fn every_negotium_step_ignores_its_result() {
     let doc = Document::parse(&source).unwrap();
     let steps = steps(&doc);
     let negotium: Vec<&Step> = steps.iter().filter(|s| !s.command.is_empty()).collect();
-    // exit-running, relaunch, the four checkbox steps, the two uninstall steps and four rollbacks.
-    assert_eq!(negotium.len(), 12, "{negotium:#?}");
+    // exit-running, relaunch, the four checkbox steps, the two uninstall steps, the reg.exe
+    // fallback and four rollbacks.
+    assert_eq!(negotium.len(), 13, "{negotium:#?}");
     for s in negotium {
         let want = if s.command == RELAUNCH { "asyncNoWait" } else { "ignore" };
         assert_eq!(s.ret, want, "{}", s.id);
     }
     let rollbacks = steps.iter().filter(|s| s.rollback).count();
     assert_eq!(rollbacks, 4);
-    // "Launch Negotium" on the last page (published by the dialog, not sequenced).
+    // "Launch Negotium" on the last page (published by the dialog, not sequenced): not waited for.
     let launch = all(&doc, "CustomAction").into_iter().find(|a| attr(a, "Id") == Some("LaunchNegotium")).unwrap();
-    assert_eq!(attr(&launch, "Return"), Some("ignore"));
+    assert_eq!(attr(&launch, "Return"), Some("asyncNoWait"));
+}
+
+/// The exe being removed may be unable to run its uninstall step: Windows' own reg.exe then
+/// removes the redirect (when AppSearch found Negotium's), after that step, as LocalSystem, in
+/// the 64-bit registry view, never failing the uninstall.
+#[test]
+fn a_real_uninstall_also_removes_the_redirect_without_the_exe() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let steps = steps(&doc);
+    let fallback = steps.iter().find(|s| s.id == "RemoveRedirectFallback").expect("the reg.exe fallback is scheduled");
+    assert_clauses(fallback, &REAL_UNINSTALL, &[r#"NEGOTIUM_IFEO ~>< "\Negotium\negotium.exe""#]);
+    assert!(fallback.deferred && fallback.system, "deferred, not impersonated: HKLM needs LocalSystem");
+    assert_eq!(fallback.ret, "ignore");
+    let uninstall = step(&steps, "--integrate uninstall", false);
+    assert!(fallback.at > uninstall.at && fallback.at < pos("RemoveFiles"), "after the exe's own step, before the files go");
+    assert_eq!(
+        fallback.command,
+        concat!(
+            r#""[System64Folder]reg.exe" delete "#,
+            r#""HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe""#,
+            " /v Debugger /f /reg:64"
+        ),
+        "only taskmgr.exe's Debugger value, in the 64-bit view, by the 64-bit reg.exe"
+    );
+    let action = all(&doc, "CustomAction").into_iter().find(|a| attr(a, "Id") == Some("RemoveRedirectFallback")).unwrap();
+    assert_eq!(attr(&action, "Directory"), Some("System64Folder"));
+    // The rollback that puts the redirect back still comes right before the uninstall step: a
+    // cancelled uninstall undoes this one first, then that one's.
+    let restore = step(&steps, "--integrate hotkey-on", true);
+    assert!(restore.at < uninstall.at);
+}
+
+/// "Launch Negotium" never starts it elevated, even from an elevated setup window: it runs the new
+/// exe's `--relaunch` (the admin task, or an unelevated start through Explorer).
+#[test]
+fn launch_negotium_goes_through_the_relaunch() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let launch = all(&doc, "CustomAction").into_iter().find(|a| attr(a, "Id") == Some("LaunchNegotium")).unwrap();
+    assert_eq!(attr(&launch, "FileKey"), Some("NegotiumExe"));
+    assert_eq!(attr(&launch, "ExeCommand"), Some(RELAUNCH));
+    assert!(attr(&launch, "DllEntry").is_none() && attr(&launch, "BinaryKey").is_none(), "not WixShellExec");
+    assert!(!all(&doc, "Property").iter().any(|p| attr(p, "Id") == Some("WixShellExecTarget")));
+    let published: Vec<Node> = all(&doc, "Publish")
+        .into_iter()
+        .filter(|p| attr(p, "Event") == Some("DoAction") && attr(p, "Value") == Some("LaunchNegotium"))
+        .collect();
+    assert_eq!(published.len(), 1);
+    assert_eq!(attr(&published[0], "Dialog"), Some("ExitDialog"));
+}
+
+/// The elevated updater's folder is created by the installer with the admin-only security the app
+/// itself creates and checks, so a standard user can't create it first.
+#[test]
+fn the_update_folder_is_created_admin_only() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let folder = all(&doc, "Directory").into_iter().find(|d| attr(d, "Name") == Some("Negotium-update")).expect("Negotium-update");
+    assert_eq!(folder.parent().and_then(|p| attr(&p, "Id")), Some("CommonAppDataFolder"));
+    let component = folder.children().find(|n| is(n, "Component")).expect("a component");
+    let create = component.children().find(|n| is(n, "CreateFolder")).expect("CreateFolder");
+    let permissions: Vec<Node> = create.children().filter(|n| n.is_element()).collect();
+    assert_eq!(permissions.len(), 1, "one security descriptor, nothing else");
+    assert!(is(&permissions[0], "PermissionEx"), "MsiLockPermissionsEx (a protected SDDL)");
+    assert_eq!(attr(&permissions[0], "Sddl"), Some(negotium::update::secure::ADMIN_ONLY_SDDL));
+    let id = attr(&component, "Id").unwrap();
+    assert!(all(&doc, "ComponentRef").iter().any(|r| attr(r, "Id") == Some(id)), "installed by the feature");
+    assert!(attr(&component, "Guid").is_some_and(is_guid));
+}
+
+/// The installer says what turning the redirect on replaces.
+#[test]
+fn the_redirect_note_names_another_tools_replacement() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let note = all(&doc, "Control").into_iter().find(|c| attr(c, "Id") == Some("HotkeyNote")).unwrap();
+    assert!(attr(&note, "Text").unwrap().contains("Process Explorer"));
 }
 
 #[test]
