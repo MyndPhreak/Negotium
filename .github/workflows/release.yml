@@ -48,6 +48,11 @@ jobs:
       - name: Build release
         run: cargo build --release -p negotium
 
+      # The MSI ships only negotium.exe: it must not need the Visual C++ Redistributable.
+      - name: Check the release exe imports no Visual C++ runtime
+        shell: pwsh
+        run: ./.github/scripts/check-imports.ps1 target/release/negotium.exe
+
       - name: Install WiX Toolset v3.14
         shell: pwsh
         run: |
@@ -85,13 +90,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create $env:TAG $env:MSI_PATH --repo $env:GITHUB_REPOSITORY --draft --title $env:TAG --notes "Negotium $env:TAG. Install with the attached MSI (per-machine, Windows 64-bit)."
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
-          $assets = (gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json assets | ConvertFrom-Json).assets
-          if ($LASTEXITCODE -ne 0) { throw "gh release view failed" }
-          $msis = @($assets | Where-Object { $_.name -like '*.msi' })
-          if ($msis.Count -ne 1 -or @($assets).Count -ne 1) {
-            throw "draft release must have exactly one asset, an .msi; found $(@($assets).Count) assets"
+          # Any failure once the draft may exist (a create that failed uploading the asset
+          # included) deletes it, keeping the tag, so re-running the workflow starts clean instead
+          # of failing on an existing release.
+          try {
+            gh release create $env:TAG $env:MSI_PATH --repo $env:GITHUB_REPOSITORY --draft --title $env:TAG --notes "Negotium $env:TAG. Install with the attached MSI (per-machine, Windows 64-bit)."
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+            $assets = (gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json assets | ConvertFrom-Json).assets
+            if ($LASTEXITCODE -ne 0) { throw "gh release view failed" }
+            $msis = @($assets | Where-Object { $_.name -like '*.msi' })
+            if ($msis.Count -ne 1 -or @($assets).Count -ne 1) {
+              throw "draft release must have exactly one asset, an .msi; found $(@($assets).Count) assets"
+            }
+            # --latest: the updater reads /releases/latest.
+            gh release edit $env:TAG --repo $env:GITHUB_REPOSITORY --draft=false --prerelease=false --latest
+            if ($LASTEXITCODE -ne 0) { throw "gh release edit failed" }
+          } catch {
+            gh release delete $env:TAG --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag=false
+            if ($LASTEXITCODE -ne 0) { Write-Warning "no draft release $env:TAG was deleted (none was created, or deleting failed: then delete it before re-running)" }
+            throw
           }
-          gh release edit $env:TAG --repo $env:GITHUB_REPOSITORY --draft=false --prerelease=false
-          if ($LASTEXITCODE -ne 0) { throw "gh release edit failed" }
