@@ -26,3 +26,11 @@ fn a_process_that_never_unlocks_may_only_write_inside_the_test_sandbox() {
         &format!(r"{}\sandbox", registry::TEST_ROOT)
     )));
 }
+
+#[test]
+fn a_process_that_never_unlocks_may_not_write_the_integration_values() {
+    let ifeo = RegKey::new(Hive::LocalMachine, registry::IFEO_TASKMGR);
+    let run = RegKey::new(Hive::CurrentUser, registry::USER_RUN);
+    assert!(!registry::may_write_value(&ifeo, "Debugger"));
+    assert!(!registry::may_write_value(&run, "Negotium"));
+}

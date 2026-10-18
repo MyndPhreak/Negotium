@@ -1,7 +1,8 @@
 //! Registry helpers for the startup lists: read a key's values and subkeys, write one value.
 //! Paths are relative to a hive; a missing key reads as empty. Every write goes through `set`,
 //! which refuses anything outside the test sandbox until the app calls `allow_system_writes`, and
-//! even then anything but the startup state keys a toggle writes (`may_write`).
+//! even then anything but the startup state keys a toggle writes (`may_write`) and the two
+//! integration values (`may_write_value`: the taskmgr.exe redirect and the HKCU Run value).
 use crate::ActionError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::{
@@ -213,9 +214,41 @@ fn in_test_root(key: &RegKey) -> bool {
         && !key.path[prefix.len()..].trim_matches('\\').is_empty()
 }
 
-/// Refuses a write `may_write` (or, for value `name`, `value_allowed`) rejects.
+/// Whether value `name` of `key` may be written: `may_write_value_with` with this process's unlock.
+pub fn may_write_value(key: &RegKey, name: &str) -> bool {
+    may_write_value_with(key, name, SYSTEM_WRITES.load(Ordering::SeqCst))
+}
+
+/// A value-level write check: anything in the sandbox; once unlocked, the startup state keys
+/// (`may_write_with`, `value_allowed`) and exactly the two integration values
+/// (`is_integration_value`). Pure: it never touches the registry.
+fn may_write_value_with(key: &RegKey, name: &str, unlocked: bool) -> bool {
+    in_test_root(key)
+        || (unlocked
+            && ((may_write_with(key, true) && value_allowed(key, name))
+                || is_integration_value(key, name)))
+}
+
+/// The Ctrl+Shift+Esc redirect's key (its `Debugger` value is the only one written).
+pub const IFEO_TASKMGR: &str =
+    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe";
+/// The per-user Run key (its `Negotium` value is the only one written).
+pub const USER_RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// The two values the installed app's integration writes, and nothing else under their keys:
+/// `HKLM\…\Image File Execution Options\taskmgr.exe` value `Debugger` and
+/// `HKCU\…\CurrentVersion\Run` value `Negotium`. Names compare case-insensitively; the key must
+/// match exactly (no subkey, no doubled or trailing backslash).
+fn is_integration_value(key: &RegKey, name: &str) -> bool {
+    let is = |hive: Hive, path: &str, value: &str| {
+        key.hive == hive && key.path.eq_ignore_ascii_case(path) && name.eq_ignore_ascii_case(value)
+    };
+    is(Hive::LocalMachine, IFEO_TASKMGR, "Debugger") || is(Hive::CurrentUser, USER_RUN, "Negotium")
+}
+
+/// Refuses a write `may_write_value` rejects.
 fn guard_write(key: &RegKey, name: &str) -> Result<(), ActionError> {
-    if !may_write(key) || !value_allowed(key, name) {
+    if !may_write_value(key, name) {
         return Err(ActionError::Other(format!(
             "writing {} is not allowed in this process",
             key.display()
@@ -634,6 +667,63 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    const IFEO: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
+    const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    #[test]
+    fn only_the_two_new_values_are_writable() {
+        let k = RegKey::new;
+        let allowed = [
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe")), "Debugger"),
+            (k(Hive::CurrentUser, RUN), "Negotium"),
+            // Names compare case-insensitively, as Windows does.
+            (k(Hive::LocalMachine, &format!(r"{}\TASKMGR.EXE", IFEO.to_lowercase())), "debugger"),
+            (k(Hive::CurrentUser, &RUN.to_uppercase()), "NEGOTIUM"),
+        ];
+        for (key, name) in &allowed {
+            assert!(may_write_value_with(key, name, true), "unlocked: {} {name}", key.display());
+            assert!(!may_write_value_with(key, name, false), "locked: {} {name}", key.display());
+        }
+        let refused = [
+            // Other images' redirects, other values of taskmgr.exe's key.
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\notepad.exe")), "Debugger"),
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe")), "GlobalFlag"),
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe")), "VerifierDlls"),
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe\sub")), "Debugger"),
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\\taskmgr.exe")), "Debugger"),
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe\")), "Debugger"),
+            (k(Hive::LocalMachine, IFEO), "Debugger"),
+            (k(Hive::CurrentUser, &format!(r"{IFEO}\taskmgr.exe")), "Debugger"),
+            (k(Hive::LocalMachine, r"SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe"), "Debugger"),
+            // Other Run values, other Run keys.
+            (k(Hive::CurrentUser, RUN), "OneDrive"),
+            (k(Hive::CurrentUser, RUN), "Negotium2"),
+            (k(Hive::CurrentUser, RUN), ""),
+            (k(Hive::LocalMachine, RUN), "Negotium"),
+            (k(Hive::CurrentUser, &format!(r"{RUN}Once")), "Negotium"),
+            (k(Hive::CurrentUser, &format!(r"{RUN}\sub")), "Negotium"),
+            (k(Hive::CurrentUser, &format!(r"{RUN}\")), "Negotium"),
+            // The new values only in their own keys.
+            (k(Hive::CurrentUser, RUN), "Debugger"),
+            (k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe")), "Negotium"),
+        ];
+        for (key, name) in &refused {
+            assert!(!may_write_value_with(key, name, true), "unlocked, still refused: {} {name:?}", key.display());
+        }
+        // The keys themselves don't join the key-level allow-list: only those two values do.
+        assert!(!may_write_with(&k(Hive::CurrentUser, RUN), true));
+        assert!(!may_write_with(&k(Hive::LocalMachine, &format!(r"{IFEO}\taskmgr.exe")), true));
+        // And the existing allow-list is unchanged by the value-level check.
+        for key in startup_state_keys() {
+            assert!(may_write_value_with(&key, "State", true), "{}", key.display());
+        }
+        for key in other_keys() {
+            assert!(!may_write_value_with(&key, "Other", true), "{}", key.display());
+        }
+        let task = k(Hive::CurrentUser, &format!(r"{APP_DATA}\Contoso.App_8wekyb3d8bbwe\Boot"));
+        assert!(!may_write_value_with(&task, "UserEnabledStartupOnce", true));
     }
 
     #[test]

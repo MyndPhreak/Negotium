@@ -75,6 +75,20 @@ fn make_tray(
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // `--integrate <action>` (the installer and the Settings switches): no window, no renderer, no
+    // instance lock, no settings; the exit code says whether it worked, a failure is logged.
+    if negotium::integrate::requested(std::env::args_os().skip(1)) {
+        // The registry and Task Scheduler machine (and the user's SID) come in a later change;
+        // until then every action is refused as not implemented.
+        let mut log = negotium::log::Log::new(negotium::log::Log::default_path());
+        let code = negotium::integrate::command(
+            std::env::args_os().skip(1),
+            &negotium::integrate::Unavailable,
+            String::new(),
+            &mut |line| log.warn(line),
+        );
+        std::process::exit(code);
+    }
     // One instance per session. A second launch shows the running one (even from the tray) and
     // exits; a restart (as admin) waits for the old instance to finish quitting.
     let restarted = std::env::args_os().any(|a| a == "--restarted");

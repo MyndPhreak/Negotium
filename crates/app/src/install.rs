@@ -23,12 +23,30 @@ pub fn detect(exe: &Path, program_files: &Path) -> Install {
     Install { exe: exe.to_path_buf(), installed: lower(exe) == lower(&expected) }
 }
 
-/// [`detect`] for the running exe and this machine's Program Files (`%ProgramFiles%`, which is
-/// the 64-bit folder for this 64-bit exe).
+/// [`detect`] for the running exe and this machine's Program Files ([`program_files`]); without
+/// a known folder nothing counts as installed.
 pub fn current() -> Install {
     let exe = std::env::current_exe().unwrap_or_default();
-    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-    detect(&exe, &program_files)
+    match program_files() {
+        Some(program_files) => detect(&exe, &program_files),
+        None => Install { exe, installed: false },
+    }
+}
+
+/// The machine's Program Files folder (the 64-bit one for this 64-bit exe), from the shell's
+/// known folder rather than `%ProgramFiles%`: an environment variable the user can change would
+/// make a build tree look like the installed copy.
+pub fn program_files() -> Option<PathBuf> {
+    use std::ffi::c_void;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_ProgramFiles, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+    // SAFETY: returns a CoTaskMem string that is freed below.
+    let p = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KNOWN_FOLDER_FLAG(0), None) }.ok()?;
+    // SAFETY: `p` is a valid NUL-terminated string until freed.
+    let s = unsafe { p.to_string() }.ok();
+    // SAFETY: allocated by SHGetKnownFolderPath; freed exactly once.
+    unsafe { CoTaskMemFree(Some(p.0 as *const c_void)) };
+    s.filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
 /// The Settings page's version line.
@@ -53,6 +71,32 @@ mod tests {
         ] {
             assert_eq!(detect(Path::new(exe), pf).installed, want, "{exe}");
         }
+    }
+
+    /// Set in the child process `current_uses_the_known_folder` starts.
+    const CHILD: &str = "NEGOTIUM_TEST_PROGRAM_FILES_CHILD";
+
+    /// A changed `%ProgramFiles%` must not move "installed": the child runs with it pointing at a
+    /// build tree and still reports the machine's real Program Files (the known folder).
+    #[test]
+    fn current_uses_the_known_folder() {
+        if std::env::var_os(CHILD).is_some() {
+            println!("PF={}", program_files().unwrap().display());
+            return;
+        }
+        let real = program_files().expect("the Program Files known folder");
+        assert!(real.is_absolute() && real.is_dir(), "{}", real.display());
+        let fake = std::env::temp_dir().join("negotium-not-program-files");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "install::tests::current_uses_the_known_folder", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("ProgramFiles", &fake)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().find_map(|l| l.split_once("PF=").map(|(_, pf)| pf)).unwrap_or_else(|| panic!("no PF line in {text}"));
+        assert_eq!(Path::new(line), real);
+        assert_ne!(Path::new(line), fake);
     }
 
     #[test]
