@@ -4520,3 +4520,197 @@ fn a_process_row_shows_its_pid_after_its_name() {
     assert!(has_text("helper.exe, CPU , memory ", "4242"), "the PID beside the process name");
     assert!(!has_text("Browser, CPU 1.0%, memory ", "4242"));
 }
+
+/// What a fake [`negotium::update::UpdateIo`] was asked: checks waiting for an answer, downloads
+/// waiting (with their release), installers started, exits, log lines.
+#[derive(Clone, Default)]
+struct FakeUpdates {
+    checks: Rc<RefCell<Vec<negotium::update::Checked>>>,
+    downloads: Rc<RefCell<Vec<(negotium::update::Release, negotium::update::Downloaded)>>>,
+    installers: Rc<RefCell<Vec<std::path::PathBuf>>>,
+    installer_fails: Rc<std::cell::Cell<bool>>,
+    exits: Rc<std::cell::Cell<usize>>,
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl FakeUpdates {
+    fn wire(ui: &MainWindow, installed: bool) -> (Rc<negotium::update::Updater>, FakeUpdates) {
+        let f = FakeUpdates::default();
+        let io = negotium::update::UpdateIo {
+            installed,
+            check: Box::new({
+                let checks = f.checks.clone();
+                move |done| checks.borrow_mut().push(done)
+            }),
+            download: Box::new({
+                let downloads = f.downloads.clone();
+                move |release, done| downloads.borrow_mut().push((release, done))
+            }),
+            run_installer: Box::new({
+                let (installers, fails) = (f.installers.clone(), f.installer_fails.clone());
+                move |msi| {
+                    installers.borrow_mut().push(msi.to_path_buf());
+                    if fails.get() { Err(negotium::update::UpdateError::Start("not found".into())) } else { Ok(()) }
+                }
+            }),
+            exit: Box::new({
+                let exits = f.exits.clone();
+                move || exits.set(exits.get() + 1)
+            }),
+            log: Box::new({
+                let log = f.log.clone();
+                move |line| log.borrow_mut().push(line.to_string())
+            }),
+        };
+        (negotium::update::Updater::install(ui, io), f)
+    }
+
+    /// The check asked for answers `result`.
+    fn answer(&self, result: Result<Option<negotium::update::Release>, negotium::update::UpdateError>) {
+        let done = self.checks.borrow_mut().pop().expect("a check is running");
+        done(result);
+    }
+}
+
+fn release_v(version: (u64, u64, u64)) -> negotium::update::Release {
+    negotium::update::Release {
+        version,
+        msi_url: "https://github.com/MyndPhreak/Negotium/releases/download/v9.9.9/Negotium-9.9.9.msi".into(),
+        page_url: "https://github.com/MyndPhreak/Negotium/releases/tag/v9.9.9".into(),
+    }
+}
+
+fn button(ui: &MainWindow, label: &str) -> Option<El> {
+    El::find_by_accessible_label(ui, label).find(|e| e.accessible_role() == Some(AccessibleRole::Button))
+}
+
+#[test]
+fn the_update_banner_offers_the_version() {
+    let ui = shown_window();
+    let (updater, fake) = FakeUpdates::wire(&ui, true);
+    updater.startup(true);
+    assert_eq!(fake.checks.borrow().len(), 1, "the installed copy checks at startup");
+    assert!(button(&ui, "Update").is_none(), "no banner before an answer");
+    fake.answer(Ok(Some(release_v((9, 9, 9)))));
+    assert_eq!(ui.get_update_banner(), "Update to v9.9.9");
+    assert!(text(&ui, "Update to v9.9.9").is_some(), "the banner says it");
+    assert_eq!(button(&ui, "Update").and_then(|b| b.accessible_enabled()), Some(true));
+    // It shows over every page, the Settings page included.
+    ui.set_page(3);
+    assert!(text(&ui, "Update to v9.9.9").is_some());
+    button(&ui, "Dismiss").expect("Dismiss").invoke_accessible_default_action();
+    assert_eq!(ui.get_update_banner(), "");
+    assert!(text(&ui, "Update to v9.9.9").is_none(), "dismissed");
+    assert!(fake.downloads.borrow().is_empty(), "nothing downloaded");
+}
+
+#[test]
+fn the_startup_check_follows_the_switch_and_skips_a_dev_build() {
+    let ui = shown_window();
+    let (updater, fake) = FakeUpdates::wire(&ui, false);
+    updater.startup(true);
+    updater.check_now();
+    assert!(fake.checks.borrow().is_empty(), "a development build never checks");
+    let (updater, fake) = FakeUpdates::wire(&ui, true);
+    updater.startup(false);
+    assert!(fake.checks.borrow().is_empty(), "the switch is off");
+    // A failed startup check is only a log line.
+    updater.startup(true);
+    fake.answer(Err(negotium::update::UpdateError::Status(403)));
+    assert_eq!(ui.get_settings_update_status(), "");
+    assert_eq!(ui.get_toast(), "");
+    assert!(fake.log.borrow().iter().any(|l| l.contains("update check failed") && l.contains("403")), "{:?}", fake.log.borrow());
+    // Nothing newer at startup: nothing shows.
+    updater.startup(true);
+    fake.answer(Ok(None));
+    assert_eq!(ui.get_settings_update_status(), "");
+    assert_eq!(ui.get_update_banner(), "");
+}
+
+#[test]
+fn check_for_updates_says_what_it_found() {
+    let ui = settings_window(1000, 1700);
+    negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: INSTALLED_EXE.into(), installed: true });
+    let (_updater, fake) = FakeUpdates::wire(&ui, true);
+    let check = || button(&ui, "Check for updates").expect("the button").invoke_accessible_default_action();
+
+    check();
+    assert_eq!(ui.get_settings_update_status(), "Checking…");
+    assert!(text(&ui, "Checking…").is_some(), "under the row");
+    check(); // a second click while it runs asks nothing more
+    assert_eq!(fake.checks.borrow().len(), 1);
+    fake.answer(Ok(None));
+    assert!(text(&ui, "You're up to date").is_some());
+
+    check();
+    fake.answer(Err(negotium::update::UpdateError::Network("offline".into())));
+    assert!(text(&ui, "Couldn't check for updates").is_some());
+    assert!(fake.log.borrow().iter().any(|l| l.contains("offline")));
+
+    check();
+    fake.answer(Ok(Some(release_v((9, 9, 9)))));
+    assert_eq!(ui.get_settings_update_status(), "", "the banner says it");
+    assert_eq!(ui.get_update_banner(), "Update to v9.9.9");
+}
+
+#[test]
+fn update_downloads_runs_the_installer_and_exits() {
+    let ui = shown_window();
+    let (updater, fake) = FakeUpdates::wire(&ui, true);
+    updater.startup(true);
+    fake.answer(Ok(Some(release_v((9, 9, 9)))));
+    button(&ui, "Update").expect("Update").invoke_accessible_default_action();
+    assert_eq!(fake.downloads.borrow().len(), 1);
+    assert_eq!(fake.downloads.borrow()[0].0.version, (9, 9, 9));
+    assert_eq!(ui.get_update_banner(), "Downloading v9.9.9…");
+    assert_eq!(button(&ui, "Update").and_then(|b| b.accessible_enabled()), Some(false), "it waits");
+    updater.accept(); // a second click doesn't download again
+    updater.dismiss(); // nor can the banner go meanwhile
+    assert_eq!(fake.downloads.borrow().len(), 1);
+    assert_eq!(ui.get_update_banner(), "Downloading v9.9.9…");
+    let msi = std::path::PathBuf::from(r"C:\Temp\Negotium-update\Negotium-9.9.9.msi");
+    let (_, done) = fake.downloads.borrow_mut().pop().unwrap();
+    done(Ok(msi.clone()));
+    assert_eq!(*fake.installers.borrow(), [msi]);
+    assert_eq!(fake.exits.get(), 1, "Negotium exits so the installer can replace it");
+}
+
+#[test]
+fn a_failed_update_says_so_and_offers_it_again() {
+    let ui = shown_window();
+    let (updater, fake) = FakeUpdates::wire(&ui, true);
+    updater.startup(true);
+    fake.answer(Ok(Some(release_v((9, 9, 9)))));
+    updater.accept();
+    let (_, done) = fake.downloads.borrow_mut().pop().unwrap();
+    done(Err(negotium::update::UpdateError::Download("not a Windows Installer package".into())));
+    assert_eq!(fake.exits.get(), 0);
+    assert!(fake.installers.borrow().is_empty(), "nothing started");
+    assert!(ui.get_toast().starts_with("Couldn't update to v9.9.9"), "{}", ui.get_toast());
+    assert_eq!(ui.get_update_banner(), "Update to v9.9.9");
+    assert!(!ui.get_update_busy());
+    // The installer won't start: the same.
+    fake.installer_fails.set(true);
+    updater.accept();
+    let (_, done) = fake.downloads.borrow_mut().pop().unwrap();
+    done(Ok("x.msi".into()));
+    assert_eq!(fake.exits.get(), 0);
+    assert_eq!(ui.get_update_banner(), "Update to v9.9.9");
+    assert!(fake.log.borrow().iter().any(|l| l.contains("update to v9.9.9 failed")));
+}
+
+#[test]
+fn the_startup_check_switch_is_saved() {
+    let dir = Scratch::new("check-updates");
+    let path = dir.0.join("settings.json");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, settings, _) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700));
+    fake.read();
+    let label = "Check for updates on startup";
+    assert_eq!(switch(&ui, label).accessible_checked(), Some(true), "on by default");
+    switch(&ui, label).invoke_accessible_default_action();
+    assert!(!settings.borrow().check_updates);
+    assert_eq!(switch(&ui, label).accessible_checked(), Some(false));
+    saved(&path, "check updates off", |s| !s.check_updates);
+}

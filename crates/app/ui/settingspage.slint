@@ -196,6 +196,8 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> hotkey;
     in property <bool> start-with-windows;
     in property <bool> check-updates;
+    // The manual check's outcome (crate::update::Updater), shown under its row.
+    in property <string> update-status;
     in property <string> version-text;
     in property <bool> interactive: true;
     // Room kept free below the last row (the floating toast), so it can be scrolled clear.
@@ -401,7 +403,7 @@ export component SettingsPage inherits VerticalLayout {
             check-row := SettingRow {
                 title: "Check for updates now";
                 description: "Look for a newer version of Negotium.";
-                note: root.installed ? "" : "Install Negotium to use this";
+                note: root.installed ? root.update-status : "Install Negotium to use this";
                 available: root.installed;
                 ActionButton {
                     label: "Check for updates";

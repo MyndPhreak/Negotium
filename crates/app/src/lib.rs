@@ -20,6 +20,7 @@ pub mod smooth;
 pub mod startup;
 pub mod tray;
 pub mod trayicon;
+pub mod update;
 pub mod view;
 pub mod worker;
 

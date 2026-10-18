@@ -257,6 +257,26 @@ pub fn centered_position(hwnd: HWND) -> Option<(i32, i32)> {
     Some(centered((w.left, w.top, w.right, w.bottom), (rect.right - rect.left, rect.bottom - rect.top)))
 }
 
+/// Where a window started off screen ([`OFF_SCREEN`]) goes once hidden: centred
+/// ([`centered_position`]), else the primary work area's top-left, else the primary screen's
+/// origin. Never left off screen, where a later Show would bring back a window nobody can see.
+pub fn on_screen_position(centered: Option<(i32, i32)>, work: Option<(i32, i32, i32, i32)>) -> (i32, i32) {
+    centered.or(work.map(|(left, top, _, _)| (left, top))).unwrap_or((0, 0))
+}
+
+/// The primary monitor's work area (left, top, right, bottom), from SPI_GETWORKAREA.
+pub fn primary_work_area() -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW};
+    let mut rect = RECT::default();
+    // SAFETY: SPI_GETWORKAREA writes one RECT to the writable local passed.
+    unsafe {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut rect as *mut RECT as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+    }
+    .ok()?;
+    Some((rect.left, rect.top, rect.right, rect.bottom))
+}
+
 /// Whether `hwnd` is minimised now: a launch from a shortcut set to "Minimized" starts so, before
 /// the window hooks can hear WM_SIZE.
 pub fn is_minimised(hwnd: HWND) -> bool {
@@ -683,6 +703,16 @@ mod tests {
         assert_eq!(centered((-1920, 0, 0, 1080), (920, 80)), (-1420, 500), "a monitor left of the primary");
         assert_eq!(centered((0, 0, 800, 600), (1000, 700)), (0, 0), "too large: its corner stays on screen");
         assert!(OFF_SCREEN.0 <= -30000 && OFF_SCREEN.1 <= -30000, "beyond any desktop");
+    }
+
+    #[test]
+    fn a_window_started_off_screen_always_comes_back_on_screen() {
+        assert_eq!(on_screen_position(Some((460, 220)), Some((0, 40, 1920, 1080))), (460, 220), "centred");
+        assert_eq!(on_screen_position(None, Some((0, 40, 1920, 1080))), (0, 40), "the work area's corner (a taskbar on top)");
+        assert_eq!(on_screen_position(None, None), (0, 0), "the primary screen's origin");
+        assert_ne!(on_screen_position(None, None), OFF_SCREEN);
+        let work = primary_work_area().expect("the primary work area");
+        assert!(work.2 > work.0 && work.3 > work.1, "{work:?}");
     }
 
     #[test]

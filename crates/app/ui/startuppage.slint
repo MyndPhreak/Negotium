@@ -77,7 +77,7 @@ export component StartupPage inherits VerticalLayout {
         text: "Apps that start for all users can only be changed with admin rights.";
         dismissable: false;
         interactive: root.interactive;
-        restart => { root.restart-admin(); }
+        act => { root.restart-admin(); }
     }
     HorizontalLayout {
         vertical-stretch: 0;

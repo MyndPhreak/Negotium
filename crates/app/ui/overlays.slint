@@ -1,13 +1,15 @@
 import { Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
-// The inline admin path (spec 7: never a dialog): why admin rights are needed and a "Restart as
-// admin" button, on the Overview (dismissable) and the Startup page (not).
+// An inline offer (spec 7: never a dialog): the admin path (why admin rights are needed and a
+// "Restart as admin" button, on the Overview (dismissable) and the Startup page (not)), and an
+// update ("Update to vX.Y.Z" with "Update" and "Dismiss", over every page).
 export component Banner inherits Rectangle {
     in property <string> text: "Some processes need admin rights to show details, network use, or be ended.";
+    in property <string> action-text: "Restart as admin";
     in property <bool> dismissable: true;
     in property <bool> interactive: true;
-    callback restart();
+    callback act();
     callback dismiss();
     min-height: 40px;
     vertical-stretch: 0;
@@ -17,7 +19,7 @@ export component Banner inherits Rectangle {
         padding: 8px;
         spacing: 8px;
         Text { text: root.text; color: Theme.text; vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1; }
-        Button { text: "Restart as admin"; enabled: root.interactive; clicked => { root.restart(); } }
+        Button { text: root.action-text; enabled: root.interactive; clicked => { root.act(); } }
         if root.dismissable : Button { text: "Dismiss"; enabled: root.interactive; clicked => { root.dismiss(); } }
     }
 }

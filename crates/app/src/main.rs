@@ -120,6 +120,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // hidden in the tray (passed on through a hand-off).
     let in_tray = negotium::integrate::starts_in_tray(from_task, &args);
     let install = negotium::install::current();
+    let install_installed = install.installed;
     let user_sid = negotium_actions::integration::current_user_sid().ok();
     let elevated = negotium_actions::is_elevated();
     let admin_member = negotium_actions::integration::is_admin_member();
@@ -353,6 +354,22 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     }
     .install(&ui);
+    // Updates (installed copy only): "Check for updates", the banner, and the startup check once
+    // the window is up (below). Accepting starts msiexec and quits, like the tray's Exit.
+    let updater = negotium::update::Updater::install(
+        &ui,
+        negotium::update::UpdateIo {
+            installed: install_installed,
+            check: Box::new(negotium::update::check_in_background),
+            download: Box::new(negotium::update::download_in_background),
+            run_installer: Box::new(negotium::update::run_installer),
+            exit: Box::new({
+                let (controls, weak, saver) = (controls.clone(), ui.as_weak(), saver.clone());
+                move || begin_exit(&controls, &weak, &saver)
+            }),
+            log: Box::new(warn),
+        },
+    );
     let tray_wiring = Rc::new(TrayWiring { saver: saver.clone(), integrations, taskmgr_shown });
     let bridge = Bridge::install(&ui, controls.clone());
     // Program icons: extracted on the loader's own thread (shell and GDI calls, never in a frame);
@@ -762,6 +779,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = weak.clone();
         let controls = controls.clone();
         let handle = Rc::downgrade(&chrome_timer);
+        let updater = updater.clone();
         let mut chromed = false;
         let watchdog = watchdog.clone();
         chrome_timer.start(slint::TimerMode::Repeated, Duration::from_millis(50), move || {
@@ -826,10 +844,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 // or a second launch shows it.
                 if in_tray {
                     let _ = ui.hide();
-                    if let Some((x, y)) = platform::centered_position(hwnd) {
-                        ui.window().set_position(slint::PhysicalPosition::new(x, y));
-                    }
+                    let (x, y) = platform::on_screen_position(platform::centered_position(hwnd), platform::primary_work_area());
+                    ui.window().set_position(slint::PhysicalPosition::new(x, y));
                 }
+                // The window is up: the installed copy looks for an update, off the UI thread.
+                updater.startup(settings.borrow().check_updates);
             }
             if !tray_allowed() {
                 return;

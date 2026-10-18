@@ -180,6 +180,14 @@ export component MainWindow inherits Window {
     callback check-updates-toggled(bool);
     callback check-updates-now();
     callback open-windows-task-manager();
+    // Updates (crate::update::Updater): the banner's text ("Update to vX.Y.Z"; empty: none),
+    // whether the update is under way (its buttons wait), and the manual check's outcome on the
+    // Settings page ("Checking…", "You're up to date", "Couldn't check for updates").
+    in property <string> update-banner;
+    in property <bool> update-busy;
+    in property <string> settings-update-status;
+    callback update-accepted();
+    callback update-dismissed();
     // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
     // function, not a `changed` handler, so Theme.dark is current as soon as it returns.
     public function set-dark(dark: bool) {
@@ -250,166 +258,183 @@ export component MainWindow inherits Window {
             interactive: !root.modal-open;
             select(p) => { root.select-page(p); }
         }
-        // Pages are stacked, not laid out (an invisible element still takes layout space): a hidden
-        // page keeps its state (scroll position, search text, selection) and gets no input.
-        Rectangle {
+        VerticalLayout {
             horizontal-stretch: 1;
-            Rectangle {
-                x: 0;
-                y: 0;
-                width: parent.width;
-                height: parent.height;
-                visible: root.page == 0;
-                VerticalLayout {
-                    padding: 12px;
-                    padding-bottom: 12px + root.toast-inset;
-                    spacing: 10px;
-                    if root.show-admin-banner : Banner {
-                        interactive: !root.modal-open;
-                        restart => { root.restart-admin(); }
-                        dismiss => { root.dismiss-banner(); }
-                    }
-                    meters-row := MetersRow {
-                        meters: root.meters;
-                        selected: root.selected-metric;
-                        interactive: !root.modal-open;
-                        select(i) => { root.select-metric(i); }
-                    }
-                    TopStrip {
-                        tiles: root.tiles;
-                        caption: root.top-caption;
-                        smooth: root.settings-smooth-graphs;
-                        interactive: !root.modal-open;
-                        // Opening a tile clears the filter, so the box must be emptied together with it.
-                        open(id) => { root.search-text = ""; root.open-tile(id); }
-                    }
-                    list := AppList {
-                        vertical-stretch: 1;
-                        rows: root.rows;
-                        metric: root.selected-metric;
-                        sort-column: root.sort-column;
-                        sort-descending: root.sort-descending;
-                        sort-clicked(c) => { root.sort-clicked(c); }
-                        search-text <=> root.search-text;
-                        interactive: !root.modal-open;
-                        toggle(id) => { root.toggle-row(id); }
-                        action(name, id) => { root.row-action(name, id); }
-                        hover(h) => { root.list-hover(h); }
-                        menu-open(open) => { root.menu-open(open); }
-                        row-focus(id, focused) => { root.row-key-focus(id, focused); }
-                        search(text) => { root.search-changed(text); }
-                        current-row: root.current-row;
-                        current-row-y: root.current-row-y;
-                        current-row-h: root.current-row-h;
-                        current-id: root.current-id;
-                        current-actionable: root.current-actionable;
-                        list-focus(f) => { root.list-focus(f); }
-                        list-key(k) => { return root.list-key(k); }
-                        park-focus => { parking.focus(); }
-                    }
+            // An update offer shows over every page: the startup check finds it wherever the user
+            // is, and the manual one is made from Settings.
+            if root.update-banner != "" : VerticalLayout {
+                padding: 12px;
+                padding-bottom: 0px;
+                Banner {
+                    text: root.update-banner;
+                    action-text: "Update";
+                    interactive: !root.modal-open && !root.update-busy;
+                    act => { root.update-accepted(); }
+                    dismiss => { root.update-dismissed(); }
                 }
             }
+            // Pages are stacked, not laid out (an invisible element still takes layout space): a
+            // hidden page keeps its state (scroll position, search text, selection) and gets no input.
             Rectangle {
-                x: 0;
-                y: 0;
-                width: parent.width;
-                height: parent.height;
-                visible: root.page == 1;
-                perf := PerformancePage {
-                    devices: root.perf-devices;
-                    selected: root.perf-selected;
-                    title: root.perf-title;
-                    subtitle: root.perf-subtitle;
-                    note: root.perf-note;
-                    graphs: root.perf-graphs;
-                    cells: root.perf-cells;
-                    stats: root.perf-stats;
-                    segments: root.perf-segments;
-                    range: root.perf-range;
-                    span-ms: root.perf-span-ms;
-                    bottom-inset: root.toast-inset;
-                    interactive: !root.modal-open;
-                    select-device(id) => { root.select-device(id); }
-                    select-range(i) => { root.select-range(i); }
-                    scrub-x: root.scrub-x;
-                    scrub-title: root.scrub-title;
-                    scrub-empty: root.scrub-empty;
-                    scrub-note: root.scrub-note;
-                    scrub-rows: root.scrub-rows;
-                    scrub(f) => { root.scrub(f); }
+                vertical-stretch: 1;
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 0;
+                    VerticalLayout {
+                        padding: 12px;
+                        padding-bottom: 12px + root.toast-inset;
+                        spacing: 10px;
+                        if root.show-admin-banner : Banner {
+                            interactive: !root.modal-open;
+                            act => { root.restart-admin(); }
+                            dismiss => { root.dismiss-banner(); }
+                        }
+                        meters-row := MetersRow {
+                            meters: root.meters;
+                            selected: root.selected-metric;
+                            interactive: !root.modal-open;
+                            select(i) => { root.select-metric(i); }
+                        }
+                        TopStrip {
+                            tiles: root.tiles;
+                            caption: root.top-caption;
+                            smooth: root.settings-smooth-graphs;
+                            interactive: !root.modal-open;
+                            // Opening a tile clears the filter, so the box must be emptied together with it.
+                            open(id) => { root.search-text = ""; root.open-tile(id); }
+                        }
+                        list := AppList {
+                            vertical-stretch: 1;
+                            rows: root.rows;
+                            metric: root.selected-metric;
+                            sort-column: root.sort-column;
+                            sort-descending: root.sort-descending;
+                            sort-clicked(c) => { root.sort-clicked(c); }
+                            search-text <=> root.search-text;
+                            interactive: !root.modal-open;
+                            toggle(id) => { root.toggle-row(id); }
+                            action(name, id) => { root.row-action(name, id); }
+                            hover(h) => { root.list-hover(h); }
+                            menu-open(open) => { root.menu-open(open); }
+                            row-focus(id, focused) => { root.row-key-focus(id, focused); }
+                            search(text) => { root.search-changed(text); }
+                            current-row: root.current-row;
+                            current-row-y: root.current-row-y;
+                            current-row-h: root.current-row-h;
+                            current-id: root.current-id;
+                            current-actionable: root.current-actionable;
+                            list-focus(f) => { root.list-focus(f); }
+                            list-key(k) => { return root.list-key(k); }
+                            park-focus => { parking.focus(); }
+                        }
+                    }
                 }
-            }
-            Rectangle {
-                x: 0;
-                y: 0;
-                width: parent.width;
-                height: parent.height;
-                visible: root.page == 2;
-                StartupPage {
-                    rows: root.startup-rows;
-                    loading: root.startup-loading;
-                    admin-banner: root.startup-admin-banner;
-                    read-note: root.startup-read-note;
-                    bottom-inset: root.toast-inset;
-                    interactive: !root.modal-open;
-                    toggle(id, on) => { root.toggle-startup(id, on); }
-                    refresh => { root.refresh-startup(); }
-                    restart-admin => { root.restart-admin(); }
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 1;
+                    perf := PerformancePage {
+                        devices: root.perf-devices;
+                        selected: root.perf-selected;
+                        title: root.perf-title;
+                        subtitle: root.perf-subtitle;
+                        note: root.perf-note;
+                        graphs: root.perf-graphs;
+                        cells: root.perf-cells;
+                        stats: root.perf-stats;
+                        segments: root.perf-segments;
+                        range: root.perf-range;
+                        span-ms: root.perf-span-ms;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        select-device(id) => { root.select-device(id); }
+                        select-range(i) => { root.select-range(i); }
+                        scrub-x: root.scrub-x;
+                        scrub-title: root.scrub-title;
+                        scrub-empty: root.scrub-empty;
+                        scrub-note: root.scrub-note;
+                        scrub-rows: root.scrub-rows;
+                        scrub(f) => { root.scrub(f); }
+                    }
                 }
-            }
-            Rectangle {
-                x: 0;
-                y: 0;
-                width: parent.width;
-                height: parent.height;
-                visible: root.page == 3;
-                SettingsPage {
-                    refresh: root.settings-refresh;
-                    theme: root.settings-theme;
-                    always-on-top: root.on-top;
-                    keep-in-tray: root.settings-keep-in-tray;
-                    smooth-graphs: root.settings-smooth-graphs;
-                    group-by-type: root.settings-group-by-type;
-                    tray-cpu: root.settings-tray-cpu;
-                    gpu-rendering: root.settings-gpu-rendering;
-                    gpu-fallback: root.settings-gpu-fallback;
-                    gpu-running: root.settings-gpu-running;
-                    gpu-env-override: root.settings-gpu-env-override;
-                    installed: root.settings-installed;
-                    admin-mode-state: root.settings-admin-mode-state;
-                    hotkey: root.settings-hotkey;
-                    start-with-windows: root.settings-start-with-windows;
-                    check-updates: root.settings-check-updates;
-                    version-text: root.version-text;
-                    bottom-inset: root.toast-inset;
-                    interactive: !root.modal-open;
-                    refresh-chosen(i) => { root.refresh-chosen(i); }
-                    theme-chosen(i) => { root.theme-chosen(i); }
-                    always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
-                    tray-toggled(on) => { root.tray-toggled(on); }
-                    smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
-                    group-by-type-toggled(on) => { root.group-by-type-toggled(on); }
-                    tray-cpu-toggled(on) => { root.tray-cpu-toggled(on); }
-                    gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
-                    admin-mode-toggled(on) => { root.admin-mode-toggled(on); }
-                    hotkey-toggled(on) => { root.hotkey-toggled(on); }
-                    start-with-windows-toggled(on) => { root.start-with-windows-toggled(on); }
-                    check-updates-toggled(on) => { root.check-updates-toggled(on); }
-                    check-updates-now() => { root.check-updates-now(); }
-                    open-windows-task-manager() => { root.open-windows-task-manager(); }
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 2;
+                    StartupPage {
+                        rows: root.startup-rows;
+                        loading: root.startup-loading;
+                        admin-banner: root.startup-admin-banner;
+                        read-note: root.startup-read-note;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        toggle(id, on) => { root.toggle-startup(id, on); }
+                        refresh => { root.refresh-startup(); }
+                        restart-admin => { root.restart-admin(); }
+                    }
                 }
-            }
-            // Over every page: a result (a failed startup toggle, an action's message) shows
-            // wherever the user is. Its host is empty (zero height) without a toast.
-            toast-host := VerticalLayout {
-                x: 12px;
-                width: parent.width - 24px;
-                height: self.preferred-height;
-                y: parent.height - self.height - 12px;
-                if root.toast != "" : Toast {
-                    text: root.toast;
-                    interactive: !root.modal-open;
-                    dismiss => { root.dismiss-toast(); }
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 3;
+                    SettingsPage {
+                        refresh: root.settings-refresh;
+                        theme: root.settings-theme;
+                        always-on-top: root.on-top;
+                        keep-in-tray: root.settings-keep-in-tray;
+                        smooth-graphs: root.settings-smooth-graphs;
+                        group-by-type: root.settings-group-by-type;
+                        tray-cpu: root.settings-tray-cpu;
+                        gpu-rendering: root.settings-gpu-rendering;
+                        gpu-fallback: root.settings-gpu-fallback;
+                        gpu-running: root.settings-gpu-running;
+                        gpu-env-override: root.settings-gpu-env-override;
+                        installed: root.settings-installed;
+                        admin-mode-state: root.settings-admin-mode-state;
+                        hotkey: root.settings-hotkey;
+                        start-with-windows: root.settings-start-with-windows;
+                        check-updates: root.settings-check-updates;
+                        update-status: root.settings-update-status;
+                        version-text: root.version-text;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        refresh-chosen(i) => { root.refresh-chosen(i); }
+                        theme-chosen(i) => { root.theme-chosen(i); }
+                        always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
+                        tray-toggled(on) => { root.tray-toggled(on); }
+                        smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
+                        group-by-type-toggled(on) => { root.group-by-type-toggled(on); }
+                        tray-cpu-toggled(on) => { root.tray-cpu-toggled(on); }
+                        gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
+                        admin-mode-toggled(on) => { root.admin-mode-toggled(on); }
+                        hotkey-toggled(on) => { root.hotkey-toggled(on); }
+                        start-with-windows-toggled(on) => { root.start-with-windows-toggled(on); }
+                        check-updates-toggled(on) => { root.check-updates-toggled(on); }
+                        check-updates-now() => { root.check-updates-now(); }
+                        open-windows-task-manager() => { root.open-windows-task-manager(); }
+                    }
+                }
+                // Over every page: a result (a failed startup toggle, an action's message) shows
+                // wherever the user is. Its host is empty (zero height) without a toast.
+                toast-host := VerticalLayout {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: self.preferred-height;
+                    y: parent.height - self.height - 12px;
+                    if root.toast != "" : Toast {
+                        text: root.toast;
+                        interactive: !root.modal-open;
+                        dismiss => { root.dismiss-toast(); }
+                    }
                 }
             }
         }

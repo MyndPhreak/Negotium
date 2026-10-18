@@ -575,10 +575,14 @@ impl SettingsWiring {
             let integrations = integrations.clone();
             ui.on_start_with_windows_toggled(move |on| integrations.toggle_start_with_windows(on));
         }
-        // Filled in by the tasks that implement them; until then the page only asks.
-        ui.on_check_updates_toggled(|_| {});
-        ui.on_check_updates_now(|| {});
+        // "Check for updates now" is the updater's (`crate::update::Updater`).
         let change = Rc::new(Change { settings: self.settings, saver: self.saver, weak: ui.as_weak() });
+        {
+            let change = change.clone();
+            ui.on_check_updates_toggled(move |on| {
+                change.apply(|s| s.check_updates = on);
+            });
+        }
         let controls = self.controls;
         {
             let (change, controls) = (change.clone(), controls.clone());

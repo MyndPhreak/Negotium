@@ -417,10 +417,15 @@ where
     }
 }
 
-/// Windows' own Task Manager, `<System32>\Taskmgr.exe`, from the shell's known folder (not
-/// `%SystemRoot%`, which the user can point anywhere: an elevated open-task-manager must never
-/// start a file the user picked).
+/// Windows' own Task Manager, `<System32>\Taskmgr.exe` ([`system32`]).
 pub fn task_manager_path() -> Option<PathBuf> {
+    system32().map(|dir| dir.join("Taskmgr.exe"))
+}
+
+/// System32, from the shell's known folder (not `%SystemRoot%`, which the user can point
+/// anywhere: an elevated open-task-manager, or the updater's msiexec, must never start a file the
+/// user picked).
+pub fn system32() -> Option<PathBuf> {
     use std::ffi::c_void;
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{FOLDERID_System, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
@@ -430,7 +435,7 @@ pub fn task_manager_path() -> Option<PathBuf> {
     let s = unsafe { p.to_string() }.ok();
     // SAFETY: allocated by SHGetKnownFolderPath; freed exactly once.
     unsafe { CoTaskMemFree(Some(p.0 as *const c_void)) };
-    s.filter(|s| !s.is_empty()).map(|s| PathBuf::from(s).join("Taskmgr.exe"))
+    s.filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
 /// Whether this launch starts hidden in the tray (Start with Windows): `--tray` (the Run value,
