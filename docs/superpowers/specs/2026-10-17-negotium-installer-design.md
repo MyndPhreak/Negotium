@@ -36,6 +36,11 @@ which only an install to Program Files gives.
    `%LOCALAPPDATA%\Negotium` are kept). Uninstall removes the program, the Start menu shortcut,
    the Ctrl+Shift+Esc redirect and the admin-mode scheduled task; it leaves the user's settings and
    logs (my call — the usual Windows convention).
+6a. Upgrades keep the machine's integration as it is (my call): the Ctrl+Shift+Esc redirect, the
+   admin-mode tasks and "Start with Windows" survive an upgrade (the uninstall steps of goal 6 run
+   only on a real uninstall, not the old product's removal during a major upgrade). The
+   checkboxes appear only on a first install; the in-app updater runs the MSI with reduced UI
+   (progress only, no checkboxes).
 7. Installing or upgrading while Negotium runs: the installer asks it to exit (or the updater exits
    it first, below); it never leaves two versions running.
 
@@ -58,7 +63,10 @@ which only an install to Program Files gives.
     switch on the installed copy, with the trade-off stated plainly: anything that can start the
     task gets an elevated Negotium without a prompt.
 12. Turning it on shows one UAC prompt and creates a Task Scheduler task, "Run with highest
-    privileges", for the current user, starting the installed exe in Program Files. Turning it off
+    privileges", for the current user, starting the installed exe in Program Files. Each user's
+    task lives in a `\Negotium\` Task Scheduler folder, named after the user's SID, so uninstall
+    removes every user's task by removing that folder (my call). The installer's checkbox creates
+    the task for the account running the installer. Turning it off
     deletes the task (a UAC prompt if Windows needs one).
 13. With admin mode on, every non-elevated launch of the installed Negotium (Start menu, the
     Ctrl+Shift+Esc redirect, the startup entry) starts the task instead and exits, so the user
@@ -68,6 +76,16 @@ which only an install to Program Files gives.
     dialogs and never a launch loop.
 15. Only for accounts in the Administrators group; on a standard account the switch is disabled
     with a short note why.
+
+### Start with Windows (the user's decision)
+
+13a. Settings and the installer get "Start with Windows" (off by default). Negotium then starts at
+     sign-in hidden in the tray (ready for Ctrl+Shift+Esc). Without admin mode it is a per-user
+     Run entry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Negotium`, the
+     installed exe with a `--tray` argument; the registry write guard's allow-list gains exactly
+     this value). With admin mode on, the admin task gets a logon trigger instead (and the Run
+     entry is removed), so sign-in starts the elevated copy directly with no hand-off. Uninstall
+     removes the Run value. Installed copy only.
 
 ### Ctrl+Shift+Esc
 
@@ -107,11 +125,12 @@ which only an install to Program Files gives.
 ## Constraints
 
 - Rust + `windows` 0.62.2; the existing default-deny registry write guard (`allow_system_writes()`
-  only in main; allow-listed keys) is extended for the IFEO `taskmgr.exe` `Debugger` value only.
+  only in main; allow-listed keys) is extended for exactly two values: the IFEO `taskmgr.exe`
+  `Debugger` value and the HKCU Run value `Negotium`.
 - The bench refuses to run while negotium.exe runs; the installed copy and dev builds share one
   instance mutex — the builder decides whether a dev build and the installed copy may run at once
   (a sensible default: same rule, one at a time).
-- Tests never touch the user's real settings, log, registry (IFEO), Task Scheduler or network;
+- Tests never touch the user's real settings, log, registry (IFEO, Run), Task Scheduler or network;
   updater tests use a fake release source. Elevated tests are `#[ignore]` and handed to the user.
 - Nothing is pushed to GitHub or published without the user's go-ahead at that moment.
 
