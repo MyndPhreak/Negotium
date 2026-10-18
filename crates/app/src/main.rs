@@ -93,7 +93,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // Negotium's own arguments: started by the Ctrl+Shift+Esc redirect, Windows appends Task
     // Manager's command line, which is ignored (a normal launch).
     let args = negotium::integrate::own_args(std::env::args_os().skip(1));
-    let has_arg = |flag: &str| args.iter().any(|a| a == flag);
     // `--integrate <action>` (the installer and the Settings switches): no window, no renderer, no
     // instance lock, no settings; the exit code says whether it worked, a failure is logged.
     if negotium::integrate::requested(&args) {
@@ -113,6 +112,36 @@ fn main() -> Result<(), slint::PlatformError> {
             &mut |line| log.warn(line),
         );
         std::process::exit(code);
+    }
+    // Started by the admin task: `--from-task` (and a logon start's placeholder) set aside.
+    let (from_task, args) = negotium::integrate::task_args(args);
+    let has_arg = |flag: &str| args.iter().any(|a| a == flag);
+    let install = negotium::install::current();
+    let elevated = negotium_actions::is_elevated();
+    let admin_member = negotium_actions::integration::is_admin_member();
+    // Admin mode: a non-elevated launch of the installed copy starts the user's task (an elevated
+    // copy, with this launch's page and arguments) and exits, before the window and before the
+    // instance lock, so the elevated copy can claim it. A running instance is shown instead. A
+    // task that is broken or won't start is logged and this launch carries on non-elevated; the
+    // copy the task starts (`--from-task`) never starts it again.
+    {
+        let machine = negotium::integrate::System::new();
+        let user_sid = || negotium_actions::integration::current_user_sid().ok();
+        let activate_running = || platform::activate_existing_instance(Duration::ZERO);
+        let ctx = negotium::integrate::LaunchCtx {
+            installed: install.installed,
+            elevated,
+            admin_member,
+            from_task,
+            user_sid: &user_sid,
+            machine: &machine,
+            activate_running: &activate_running,
+            allow_foreground: &platform::allow_any_foreground,
+        };
+        let passed: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        if negotium::integrate::hand_off(&ctx, &passed, &mut |line| warn(line)) {
+            return Ok(());
+        }
     }
     // One instance per session. A second launch shows the running one (even from the tray) and
     // exits; a restart (as admin) waits for the old instance to finish quitting.
@@ -136,7 +165,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // so tests (which never run `main`) can't reach the user's startup entries.
     negotium_actions::startup::registry::allow_system_writes();
     // Before the worker starts, so the collector and every action see the privilege.
-    let elevated = negotium_actions::is_elevated();
     if elevated && let Err(e) = negotium_actions::enable_debug_privilege() {
         // Not fatal: actions on other users' processes then report access denied.
         warn(&format!("could not enable SeDebugPrivilege: {e:?}"));
@@ -263,10 +291,19 @@ fn main() -> Result<(), slint::PlatformError> {
         running,
         tray_cpu_changed: Rc::new(negotium::tray::set_enabled),
         integration: negotium::settingspage::Integration {
-            install: negotium::install::current(),
-            // One registry value, read on the UI thread when the page is wired and after each
-            // elevated command.
+            install,
+            installed_exe: negotium::install::program_files().map(|pf| pf.join("Negotium").join("negotium.exe")),
+            // One registry value and the user's task, read on the UI thread when the page is
+            // wired, each time it is shown and after each elevated command.
             redirect: Box::new(|| negotium::integrate::Machine::ifeo(&negotium::integrate::System::new())),
+            admin_member,
+            task_state: Box::new({
+                let sid = negotium_actions::integration::current_user_sid().ok();
+                move || match &sid {
+                    Some(sid) => negotium::integrate::Machine::task_state(&negotium::integrate::System::new(), sid),
+                    None => negotium::integrate::TaskState::Missing,
+                }
+            }),
             elevate: Box::new(negotium::settingspage::elevate_in_background),
             start_task_manager: Box::new(negotium::settingspage::start_task_manager_in_background),
             redirect_shown: Box::new(redirect_shown),
@@ -347,6 +384,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Every page change: a rail click, and the page a restart comes back on.
     let show_page = {
         let (weak, b, load_startup) = (weak.clone(), bridge.clone(), load_startup.clone());
+        let integrations = tray_wiring.integrations.clone();
         move |page: negotium::controls::Page| {
             if let Some(ui) = weak.upgrade() {
                 b.borrow_mut().set_page(&ui, page);
@@ -355,6 +393,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if page == negotium::controls::Page::Startup {
                 load_startup();
             }
+            // The Settings switches read the machine again (a change made outside Negotium).
+            integrations.page_shown(page);
         }
     };
     {

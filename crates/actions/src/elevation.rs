@@ -7,8 +7,9 @@ use windows::Win32::Security::{
     AdjustTokenPrivileges, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_DEBUG_NAME,
     SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
 };
-use windows::Win32::Foundation::WAIT_OBJECT_0;
-use windows::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject};
+use windows::Win32::Foundation::{WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, WaitForSingleObject};
+use std::time::Duration;
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
@@ -71,7 +72,8 @@ pub fn enable_debug_privilege() -> Result<(), ActionError> {
 /// `owner` is the main window's HWND as an integer (0: none), so the UAC prompt can come to the
 /// front instead of flashing in the taskbar.
 pub fn restart_as_admin(args: &str, owner: isize) -> Result<(), ActionError> {
-    runas(args, owner, false).map(drop)
+    let exe = std::env::current_exe().map_err(|e| ActionError::Other(e.to_string()))?;
+    shell_execute(w!("runas"), exe.as_os_str(), args, owner, false).map(drop)
 }
 
 /// Opens `path` the way Explorer would (the `open` verb), so a program whose manifest asks for
@@ -80,33 +82,57 @@ pub fn shell_open(path: &Path, owner: isize) -> Result<(), ActionError> {
     shell_execute(w!("open"), path.as_os_str(), "", owner, false).map(drop)
 }
 
+/// How long [`run_elevated`] waits for the elevated command once it runs (the UAC prompt before
+/// it is not counted): a command that hangs ends the wait with an error, so the caller is never
+/// stuck.
+pub const ELEVATED_WAIT: Duration = Duration::from_secs(30);
+
 /// Runs the current executable with `args` elevated (the `runas` verb: a UAC prompt unless this
 /// process is already elevated) and waits for it to finish: `Ok` once it exits with code 0, an
-/// error for any other exit code. A declined prompt is `Cancelled` and nothing runs. Blocks until
-/// the elevated process exits, so call it off the UI thread; `owner` as for [`restart_as_admin`].
+/// error for any other exit code or once [`ELEVATED_WAIT`] has passed. A declined prompt is
+/// `Cancelled` and nothing runs. Blocks, so call it off the UI thread; `owner` as for
+/// [`restart_as_admin`].
 pub fn run_elevated(args: &str, owner: isize) -> Result<(), ActionError> {
-    let process = runas(args, owner, true)?
+    let exe = std::env::current_exe().map_err(|e| ActionError::Other(e.to_string()))?;
+    run_elevated_exe(&exe, args, owner)
+}
+
+/// [`run_elevated`] for another executable (a development build asks the installed copy).
+pub fn run_elevated_exe(exe: &Path, args: &str, owner: isize) -> Result<(), ActionError> {
+    let process = shell_execute(w!("runas"), exe.as_os_str(), args, owner, true)?
         .ok_or_else(|| ActionError::Other("the elevated process could not be watched".into()))?;
-    // SAFETY: `process` is the live process handle ShellExecuteEx returned; waiting has no other
-    // effect.
-    if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
-        return Err(ActionError::Other("waiting for the elevated process failed".into()));
+    finish(
+        // SAFETY: `process` is the live process handle ShellExecuteEx returned; waiting has no
+        // other effect.
+        |timeout| unsafe { WaitForSingleObject(process.0, timeout.as_millis() as u32) },
+        || {
+            let mut code = 0u32;
+            // SAFETY: `process` has exited (waited); `code` is writable.
+            unsafe { GetExitCodeProcess(process.0, &mut code) }.map_err(|e| ActionError::from_win(&e))?;
+            Ok(code)
+        },
+    )
+}
+
+/// An elevated command's outcome: `wait` for it (at most [`ELEVATED_WAIT`]), then its exit code.
+/// A process still running then is left to finish on its own.
+fn finish(
+    wait: impl FnOnce(Duration) -> WAIT_EVENT,
+    exit_code: impl FnOnce() -> Result<u32, ActionError>,
+) -> Result<(), ActionError> {
+    match wait(ELEVATED_WAIT) {
+        WAIT_OBJECT_0 => exit_status(exit_code()?),
+        WAIT_TIMEOUT => Err(ActionError::Other(format!(
+            "the elevated command didn't finish within {} seconds",
+            ELEVATED_WAIT.as_secs()
+        ))),
+        _ => Err(ActionError::Other("waiting for the elevated process failed".into())),
     }
-    let mut code = 0u32;
-    // SAFETY: `process` has exited (waited above); `code` is writable.
-    unsafe { GetExitCodeProcess(process.0, &mut code) }.map_err(|e| ActionError::from_win(&e))?;
-    exit_status(code)
 }
 
 /// An elevated command's exit code as a result (0 is success).
 fn exit_status(code: u32) -> Result<(), ActionError> {
     if code == 0 { Ok(()) } else { Err(ActionError::Other(format!("the elevated command failed (exit code {code})"))) }
-}
-
-/// ShellExecuteEx `runas` on the current exe ([`shell_execute`]).
-fn runas(args: &str, owner: isize, keep_process: bool) -> Result<Option<OwnedHandle>, ActionError> {
-    let exe = std::env::current_exe().map_err(|e| ActionError::Other(e.to_string()))?;
-    shell_execute(w!("runas"), exe.as_os_str(), args, owner, keep_process)
 }
 
 /// ShellExecuteEx `verb` on `file` with `args`; with `keep_process` it returns the new process's
@@ -148,5 +174,20 @@ mod tests {
         assert_eq!(exit_status(0), Ok(()));
         assert_eq!(exit_status(1), Err(ActionError::Other("the elevated command failed (exit code 1)".into())));
         assert!(exit_status(2).is_err());
+    }
+
+    #[test]
+    fn a_hung_elevated_command_ends_the_wait() {
+        let timed_out = finish(
+            |timeout| {
+                assert_eq!(timeout, Duration::from_secs(30));
+                WAIT_TIMEOUT
+            },
+            || panic!("no exit code while it still runs"),
+        );
+        assert_eq!(timed_out, Err(ActionError::Other("the elevated command didn't finish within 30 seconds".into())));
+        assert_eq!(finish(|_| WAIT_OBJECT_0, || Ok(0)), Ok(()));
+        assert!(finish(|_| WAIT_OBJECT_0, || Ok(3)).is_err());
+        assert!(finish(|_| windows::Win32::Foundation::WAIT_FAILED, || Ok(0)).is_err());
     }
 }

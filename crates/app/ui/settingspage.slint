@@ -340,14 +340,16 @@ export component SettingsPage inherits VerticalLayout {
             }
             admin-row := SettingRow {
                 title: "Admin mode";
-                description: "Start with admin rights without a prompt.";
+                description: "Start with admin rights without a prompt. Anything that can start Negotium then gets it with admin rights.";
                 note: !root.installed ? "Install Negotium to use this"
-                    : root.admin-mode-state == 2 ? "Needs repair: turn it off and on again to fix it."
-                    : root.admin-mode-state == 3 ? "Not available on this account." : "";
+                    : root.admin-mode-state == 2 ? "Needs repair. Turn on again to repair"
+                    : root.admin-mode-state == 3 ? "Needs an administrator account" : "";
                 available: root.installed && root.admin-mode-state != 3;
                 Toggle {
                     label: admin-row.title;
-                    description: root.installed ? admin-row.description : "Install Negotium to use this";
+                    description: !root.installed ? "Install Negotium to use this"
+                        : root.admin-mode-state == 2 ? "Turn on again to repair"
+                        : root.admin-mode-state == 3 ? "Needs an administrator account" : admin-row.description;
                     checked: root.installed && root.admin-mode-state == 1;
                     interactive: root.interactive && root.installed && root.admin-mode-state != 3;
                     toggled(on) => { root.admin-mode-toggled(on); }

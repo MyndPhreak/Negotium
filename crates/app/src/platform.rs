@@ -415,6 +415,15 @@ pub fn activate_existing_instance(timeout: Duration) -> bool {
     }
 }
 
+/// Lets whichever process comes next take the foreground (this launch has it): admin mode's
+/// task starts the elevated copy, which isn't this process's child.
+pub fn allow_any_foreground() {
+    // SAFETY: plain call; failure only means the started copy may open behind other windows.
+    unsafe {
+        let _ = AllowSetForegroundWindow(windows::Win32::UI::WindowsAndMessaging::ASFW_ANY);
+    }
+}
+
 pub const INSTANCE_MUTEX: &str = r"Local\Negotium.SingleInstance";
 
 /// Held for the life of the primary instance.

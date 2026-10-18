@@ -366,6 +366,102 @@ pub fn task_manager_path() -> Option<PathBuf> {
     s.filter(|s| !s.is_empty()).map(|s| PathBuf::from(s).join("Taskmgr.exe"))
 }
 
+/// What a launch does about admin mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Launch {
+    /// Carry on in this process.
+    RunHere,
+    /// Start the user's admin task (an elevated copy) and exit.
+    HandOff,
+}
+
+/// Whether this launch hands off to the admin task: only the installed copy, not elevated, for an
+/// Administrators member whose task is ready, and never a start that came from the task itself
+/// (`--from-task` without elevation means the task couldn't elevate: starting it again would
+/// loop).
+pub fn launch_plan(installed: bool, elevated: bool, admin_member: bool, task: TaskState, from_task: bool) -> Launch {
+    if installed && !elevated && admin_member && task == TaskState::Ready && !from_task {
+        Launch::HandOff
+    } else {
+        Launch::RunHere
+    }
+}
+
+/// The command line (after [`own_args`]) split into whether the admin task started it and the
+/// rest: a leading [`FROM_TASK`] is removed, and after it the literal
+/// `integration::ARG_PLACEHOLDER` a logon start may leave (no arguments).
+pub fn task_args(args: Vec<OsString>) -> (bool, Vec<OsString>) {
+    match args.split_first() {
+        Some((first, rest)) if first == FROM_TASK => {
+            (true, rest.iter().filter(|a| *a != integration::ARG_PLACEHOLDER).cloned().collect())
+        }
+        _ => (false, args),
+    }
+}
+
+/// What [`hand_off`] decides with.
+pub struct LaunchCtx<'a> {
+    /// This is the installed copy (`install::current`).
+    pub installed: bool,
+    pub elevated: bool,
+    /// The user is in Administrators (`integration::is_admin_member`).
+    pub admin_member: bool,
+    /// [`task_args`] found [`FROM_TASK`].
+    pub from_task: bool,
+    /// This user's SID, read only when the task is consulted.
+    pub user_sid: &'a dyn Fn() -> Option<String>,
+    pub machine: &'a dyn Machine,
+    /// Shows an instance that is already running, if there is one (true: there was, and it was
+    /// asked to show itself), so the task isn't started for nothing.
+    pub activate_running: &'a dyn Fn() -> bool,
+    /// Lets the copy the task starts take the foreground (this launch has it).
+    pub allow_foreground: &'a dyn Fn(),
+}
+
+/// Admin mode at launch, before the window and the single-instance lock (so the elevated copy
+/// the task starts can claim it): with [`Launch::HandOff`], an instance already running is shown,
+/// or the task is started with `args` (the page and the rest of this command line). Returns true
+/// when this process should exit. A task that is disabled or broken, or one that can't be
+/// started, is logged once and the launch runs here, non-elevated.
+pub fn hand_off(ctx: &LaunchCtx, args: &[String], log: &mut dyn FnMut(&str)) -> bool {
+    if ctx.from_task && !ctx.elevated {
+        log("admin mode: the task started Negotium without admin rights; carrying on without them");
+        return false;
+    }
+    if !ctx.installed || ctx.elevated || !ctx.admin_member || ctx.from_task {
+        return false;
+    }
+    let Some(sid) = (ctx.user_sid)().filter(|sid| integration::is_account_sid(sid)) else {
+        return false;
+    };
+    let task = ctx.machine.task_state(&sid);
+    match launch_plan(ctx.installed, ctx.elevated, ctx.admin_member, task.clone(), ctx.from_task) {
+        Launch::RunHere => {
+            match task {
+                TaskState::Disabled => log("admin mode: the task is disabled; starting without admin rights"),
+                TaskState::Broken(why) => {
+                    log(&format!("admin mode: the task is broken ({why}); starting without admin rights"))
+                }
+                TaskState::Missing | TaskState::Ready => {}
+            }
+            false
+        }
+        Launch::HandOff => {
+            if (ctx.activate_running)() {
+                return true;
+            }
+            (ctx.allow_foreground)();
+            match ctx.machine.start_task(&sid, args) {
+                Ok(()) => true,
+                Err(e) => {
+                    log(&format!("admin mode: the task couldn't be started ({e}); starting without admin rights"));
+                    false
+                }
+            }
+        }
+    }
+}
+
 /// The real starter for open-task-manager (run elevated, so Task Manager's "highest available"
 /// manifest needs no prompt): CreateProcess returns once the process exists, having consulted the
 /// (lifted) redirect, so the redirect can be restored as soon as this returns. The process is
@@ -464,6 +560,10 @@ mod tests {
         calls: RefCell<Vec<String>>,
         /// Mutating calls whose name is listed fail.
         failing: Vec<&'static str>,
+        /// What `task_state` reports instead of Ready/Missing from `tasks`.
+        state: Option<TaskState>,
+        /// Every `start_task`'s arguments.
+        started: RefCell<Vec<Vec<String>>>,
     }
 
     impl Fake {
@@ -501,6 +601,9 @@ mod tests {
             Ok(())
         }
         fn task_state(&self, sid: &str) -> TaskState {
+            if let Some(state) = &self.state {
+                return state.clone();
+            }
             if self.tasks.borrow().contains_key(sid) { TaskState::Ready } else { TaskState::Missing }
         }
         fn delete_task_folder(&self) -> Result<(), IntegrateError> {
@@ -508,7 +611,9 @@ mod tests {
             self.tasks.borrow_mut().clear();
             Ok(())
         }
-        fn start_task(&self, _: &str, _: &[String]) -> Result<(), IntegrateError> {
+        fn start_task(&self, sid: &str, args: &[String]) -> Result<(), IntegrateError> {
+            assert_eq!(sid, SID);
+            self.started.borrow_mut().push(args.to_vec());
             self.call("start_task")
         }
     }
@@ -921,6 +1026,165 @@ mod tests {
         ] {
             assert_eq!(task_state(status), state);
         }
+    }
+
+    #[test]
+    fn launch_plan_hands_off_only_to_a_ready_task_from_a_plain_launch() {
+        use Launch::{HandOff, RunHere};
+        let broken = TaskState::Broken("why".into());
+        for installed in [false, true] {
+            for elevated in [false, true] {
+                for admin in [false, true] {
+                    for task in [TaskState::Missing, TaskState::Ready, TaskState::Disabled, broken.clone()] {
+                        for from_task in [false, true] {
+                            let want = if installed && !elevated && admin && task == TaskState::Ready && !from_task {
+                                HandOff
+                            } else {
+                                RunHere
+                            };
+                            let got = launch_plan(installed, elevated, admin, task.clone(), from_task);
+                            assert_eq!(got, want, "{installed} {elevated} {admin} {task:?} {from_task}");
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(launch_plan(true, false, true, TaskState::Ready, false), HandOff);
+    }
+
+    #[test]
+    fn the_tasks_own_arguments_are_recognised() {
+        let os = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(task_args(os(&["--from-task", "--page=startup"])), (true, os(&["--page=startup"])));
+        // A logon start may leave the placeholder: no arguments.
+        assert_eq!(task_args(os(&["--from-task", integration::ARG_PLACEHOLDER])), (true, vec![]));
+        assert_eq!(task_args(os(&["--from-task", "--tray"])), (true, os(&["--tray"])));
+        assert_eq!(task_args(os(&["--from-task"])), (true, vec![]));
+        assert_eq!(task_args(os(&["--page=startup"])), (false, os(&["--page=startup"])));
+        assert_eq!(task_args(os(&["--tray", "--from-task"])), (false, os(&["--tray", "--from-task"])), "only first");
+        assert_eq!(task_args(vec![]), (false, vec![]));
+        // The task can never reach the integration command: `--from-task --integrate …` is not
+        // a valid command line.
+        assert_eq!(Action::parse(["--from-task", "--integrate", "hotkey-on"]), None);
+    }
+
+    /// `hand_off` for the installed copy of an administrator, over a fake machine.
+    struct Launcher {
+        fake: Fake,
+        running: bool,
+        activated: std::cell::Cell<usize>,
+        allowed: std::cell::Cell<usize>,
+        log: RefCell<Vec<String>>,
+    }
+
+    impl Launcher {
+        fn new(state: TaskState) -> Launcher {
+            Launcher::with(Fake { state: Some(state), ..Fake::default() })
+        }
+
+        fn with(fake: Fake) -> Launcher {
+            Launcher { fake, running: false, activated: Default::default(), allowed: Default::default(), log: Default::default() }
+        }
+
+        fn launch(&self, elevated: bool, from_task: bool, args: &[&str]) -> bool {
+            let sid = || Some(SID.to_string());
+            let activate = || {
+                self.activated.set(self.activated.get() + 1);
+                self.running
+            };
+            let allow = || self.allowed.set(self.allowed.get() + 1);
+            let ctx = LaunchCtx {
+                installed: true,
+                elevated,
+                admin_member: true,
+                from_task,
+                user_sid: &sid,
+                machine: &self.fake,
+                activate_running: &activate,
+                allow_foreground: &allow,
+            };
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            hand_off(&ctx, &args, &mut |l| self.log.borrow_mut().push(l.to_string()))
+        }
+    }
+
+    #[test]
+    fn a_ready_task_is_started_with_the_page_and_this_launch_exits() {
+        let l = Launcher::new(TaskState::Ready);
+        assert!(l.launch(false, false, &["--page=startup"]));
+        assert_eq!(*l.fake.started.borrow(), [vec!["--page=startup".to_string()]]);
+        assert_eq!(l.allowed.get(), 1, "the elevated copy may take the foreground");
+        assert!(l.log.borrow().is_empty());
+        // An instance already running is shown instead; nothing is started.
+        let l = Launcher { running: true, ..Launcher::new(TaskState::Ready) };
+        assert!(l.launch(false, false, &[]));
+        assert!(l.fake.started.borrow().is_empty());
+        assert_eq!(l.activated.get(), 1);
+        // Elevated already (the copy the task started, a restart as admin): run here.
+        let l = Launcher::new(TaskState::Ready);
+        assert!(!l.launch(true, false, &[]));
+        assert!(!l.launch(true, true, &[]));
+        assert!(l.fake.started.borrow().is_empty());
+        assert_eq!(l.activated.get(), 0);
+        assert!(l.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_hand_off_runs_here_and_never_loops() {
+        // The task can't be started: logged once, run here.
+        let l = Launcher::with(Fake { state: Some(TaskState::Ready), failing: vec!["start_task"], ..Fake::default() });
+        assert!(!l.launch(false, false, &[]));
+        assert_eq!(l.fake.started.borrow().len(), 1);
+        assert_eq!(l.log.borrow().len(), 1, "{:?}", l.log.borrow());
+        assert!(l.log.borrow()[0].contains("start_task failed"), "{:?}", l.log.borrow());
+        // The task ran but its copy isn't elevated: never start it again.
+        assert_eq!(launch_plan(true, false, true, TaskState::Ready, true), Launch::RunHere);
+        let l = Launcher::new(TaskState::Ready);
+        assert!(!l.launch(false, true, &[]));
+        assert!(l.fake.started.borrow().is_empty());
+        assert_eq!(l.activated.get(), 0);
+        assert_eq!(l.log.borrow().len(), 1, "{:?}", l.log.borrow());
+        // Disabled or broken: logged with the reason, run here; missing (admin mode off): quiet.
+        for (state, logged) in [
+            (TaskState::Disabled, Some("disabled")),
+            (TaskState::Broken("its exe is gone".into()), Some("its exe is gone")),
+            (TaskState::Missing, None),
+        ] {
+            let l = Launcher::new(state.clone());
+            assert!(!l.launch(false, false, &[]), "{state:?}");
+            assert!(l.fake.started.borrow().is_empty());
+            match logged {
+                Some(why) => assert!(l.log.borrow().len() == 1 && l.log.borrow()[0].contains(why), "{:?}", l.log.borrow()),
+                None => assert!(l.log.borrow().is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_installed_copy_of_an_administrator_hands_off() {
+        let fake = Fake { state: Some(TaskState::Ready), ..Fake::default() };
+        let sid = || Some(SID.to_string());
+        let service = || Some("S-1-5-18".to_string());
+        let unknown = || None;
+        let running = || true;
+        let nothing = || {};
+        type Sid<'a> = &'a dyn Fn() -> Option<String>;
+        let cases: [(bool, bool, Sid); 4] =
+            [(false, true, &sid), (true, false, &sid), (true, true, &service), (true, true, &unknown)];
+        for (installed, admin_member, user_sid) in cases {
+            let ctx = LaunchCtx {
+                installed,
+                elevated: false,
+                admin_member,
+                from_task: false,
+                user_sid,
+                machine: &fake,
+                activate_running: &running,
+                allow_foreground: &nothing,
+            };
+            assert!(!hand_off(&ctx, &[], &mut |_| {}), "{installed} {admin_member}");
+        }
+        assert!(fake.started.borrow().is_empty());
     }
 
     #[test]

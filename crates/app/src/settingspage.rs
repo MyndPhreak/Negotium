@@ -4,14 +4,15 @@
 use crate::controls::{Controls, header_click, sort_column_from_index, sort_column_index};
 use negotium_model::{Metric, Sort, SortColumn};
 use crate::install::{self, Install};
-use crate::integrate::Action;
+use crate::controls::Page;
+use crate::integrate::{Action, TaskState};
 use crate::settings::{Saver, Settings, ThemeChoice, refresh_from_index};
 use crate::renderer::{self, Renderer};
 use crate::{MainWindow, platform};
 use slint::ComponentHandle;
 use negotium_actions::ActionError;
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -61,21 +62,32 @@ pub struct SettingsWiring {
     pub running: Renderer,
     /// The tray shows the CPU graph or the app icon (`crate::tray::set_enabled` in the app).
     pub tray_cpu_changed: Rc<dyn Fn(bool)>,
-    /// This copy, and what the Ctrl+Shift+Esc switch and "Open Windows Task Manager" act on.
+    /// This copy, and what the Ctrl+Shift+Esc and admin mode switches and "Open Windows Task
+    /// Manager" act on.
     pub integration: Integration,
 }
 
-/// What the Ctrl+Shift+Esc switch and "Open Windows Task Manager" read and run. The app passes
-/// the registry and the elevated `--integrate` command (`main.rs`); tests pass fakes.
+/// What the Ctrl+Shift+Esc and admin mode switches and "Open Windows Task Manager" read and run.
+/// The app passes the registry, Task Scheduler and the elevated `--integrate` command
+/// (`main.rs`); tests pass fakes.
 pub struct Integration {
     /// This copy (`install::current()` in the app).
     pub install: Install,
+    /// Where the installed copy lives (`<Program Files>\Negotium\negotium.exe`), installed or
+    /// not: a development build asks it to lift its redirect for "Open Windows Task Manager".
+    pub installed_exe: Option<PathBuf>,
     /// The exe taskmgr.exe's redirect names (`integrate::Machine::ifeo`).
     pub redirect: Box<dyn Fn() -> Option<PathBuf>>,
-    /// Runs this exe with the arguments elevated (one UAC prompt; the `isize` is the window's
+    /// The user is in Administrators (`integration::is_admin_member`): admin mode is offered
+    /// only then.
+    pub admin_member: bool,
+    /// This user's admin task (`integrate::Machine::task_state`); read only for the installed
+    /// copy of an administrator.
+    pub task_state: Box<dyn Fn() -> TaskState>,
+    /// Runs the exe with the arguments elevated (one UAC prompt; the `isize` is the window's
     /// HWND, 0 for none) off the UI thread; the outcome comes back on the UI thread
     /// ([`elevate_in_background`] in the app).
-    pub elevate: Box<dyn Fn(Vec<String>, isize, ElevatedDone)>,
+    pub elevate: Box<dyn Fn(PathBuf, Vec<String>, isize, ElevatedDone)>,
     /// Starts Windows' own Task Manager when no redirect of ours is in the way
     /// ([`start_task_manager_in_background`] in the app).
     pub start_task_manager: Box<dyn Fn()>,
@@ -87,12 +99,26 @@ pub struct Integration {
 /// An elevated command's outcome, delivered on the UI thread.
 pub type ElevatedDone = Box<dyn FnOnce(Result<(), ActionError>)>;
 
-/// The Ctrl+Shift+Esc switch and "Open Windows Task Manager", wired. One elevated command at a
-/// time: a click while a UAC prompt (or its command) is still open does nothing.
+/// The Ctrl+Shift+Esc and admin mode switches and "Open Windows Task Manager", wired. One
+/// elevated command at a time: a click while a UAC prompt (or its command) is still open does
+/// nothing.
 pub struct Integrations {
     io: Integration,
+    /// Start with Windows decides whether admin mode's task also starts at sign-in.
+    settings: Rc<RefCell<Settings>>,
     weak: slint::Weak<MainWindow>,
     busy: Cell<bool>,
+}
+
+/// The admin mode row's state (`settings-admin-mode-state`): 0 off, 1 on, 2 needs repair, 3 not
+/// available on this account.
+pub fn admin_mode_state(admin_member: bool, task: &TaskState) -> i32 {
+    match task {
+        _ if !admin_member => 3,
+        TaskState::Ready => 1,
+        TaskState::Missing => 0,
+        TaskState::Disabled | TaskState::Broken(_) => 2,
+    }
 }
 
 impl Integrations {
@@ -102,13 +128,41 @@ impl Integrations {
         install.installed && (self.io.redirect)().is_some_and(|exe| crate::integrate::same_path(&exe, &install.exe))
     }
 
-    /// Reads the redirect again and shows it: the switch, and the tray menu.
+    /// The exe whose elevated open-task-manager lifts the redirect, when the redirect is in the
+    /// way: this copy with its own redirect, or, for a development build, the installed copy
+    /// whose redirect is on (only it may change it).
+    fn redirect_lifter(&self) -> Option<PathBuf> {
+        if self.redirect_is_ours() {
+            return Some(self.io.install.exe.clone());
+        }
+        let installed = self.io.installed_exe.as_deref().filter(|_| !self.io.install.installed)?;
+        let names = |exe: &Path| crate::integrate::same_path(exe, installed);
+        (self.io.redirect)().is_some_and(|exe| names(&exe)).then(|| installed.to_path_buf())
+    }
+
+    /// Reads the machine again and shows it: the switches, and the tray menu.
     pub fn show(&self) {
         let ours = self.redirect_is_ours();
+        let admin = if !self.io.admin_member {
+            admin_mode_state(false, &TaskState::Missing)
+        } else if self.io.install.installed {
+            admin_mode_state(true, &(self.io.task_state)())
+        } else {
+            0
+        };
         if let Some(ui) = self.weak.upgrade() {
             ui.set_settings_hotkey(ours);
+            ui.set_settings_admin_mode_state(admin);
         }
         (self.io.redirect_shown)(ours);
+    }
+
+    /// A page was shown: the Settings page reads the machine again, so a change made outside
+    /// Negotium (or by the installer) shows.
+    pub fn page_shown(&self, page: Page) {
+        if page == Page::Settings {
+            self.show();
+        }
     }
 
     /// The switch asked for `on`: the elevated hotkey-on/off. The switch shows the machine's
@@ -123,11 +177,28 @@ impl Integrations {
         self.run_elevated(action, |e| e.message("Open on Ctrl+Shift+Esc", false));
     }
 
-    /// "Open Windows Task Manager" (Settings, the tray): with our redirect set, the elevated
-    /// open-task-manager lifts it while Task Manager starts; otherwise Task Manager just starts.
+    /// The admin mode switch asked for `on`: the elevated admin-on (with `--logon` while Start
+    /// with Windows is on) or admin-off. Turning it on also repairs a broken task (it is
+    /// recreated). As for the hotkey, the switch then shows what Task Scheduler says.
+    pub fn toggle_admin_mode(self: &Rc<Self>, on: bool) {
+        if !self.io.install.installed || !self.io.admin_member {
+            self.show();
+            return;
+        }
+        let action = if on {
+            Action::AdminOn { logon: self.settings.borrow().start_with_windows }
+        } else {
+            Action::AdminOff
+        };
+        self.run_elevated(action, |e| e.message("Admin mode", false));
+    }
+
+    /// "Open Windows Task Manager" (Settings, the tray): with a Negotium redirect set, the
+    /// elevated open-task-manager lifts it while Task Manager starts; otherwise Task Manager just
+    /// starts.
     pub fn open_task_manager(self: &Rc<Self>) {
-        if self.redirect_is_ours() {
-            self.run_elevated(Action::OpenTaskManager, |e| {
+        if let Some(exe) = self.redirect_lifter() {
+            self.run_elevated_as(exe, Action::OpenTaskManager, |e| {
                 format!("Couldn't open Windows Task Manager: {}.", e.to_string().trim_end_matches('.'))
             });
         } else if !self.busy.get() {
@@ -136,6 +207,10 @@ impl Integrations {
     }
 
     fn run_elevated(self: &Rc<Self>, action: Action, failure: fn(&ActionError) -> String) {
+        self.run_elevated_as(self.io.install.exe.clone(), action, failure);
+    }
+
+    fn run_elevated_as(self: &Rc<Self>, exe: PathBuf, action: Action, failure: fn(&ActionError) -> String) {
         if self.busy.replace(true) {
             self.show();
             return;
@@ -143,6 +218,7 @@ impl Integrations {
         let owner = self.weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
         let this = self.clone();
         (self.io.elevate)(
+            exe,
             action.to_args(),
             owner,
             Box::new(move |result| {
@@ -165,14 +241,14 @@ thread_local! {
     static ELEVATED_DONE: RefCell<Option<ElevatedDone>> = const { RefCell::new(None) };
 }
 
-/// The app's [`Integration::elevate`]: `negotium_actions::run_elevated` on its own thread (it
-/// waits for the UAC prompt and the command), then `done` on the UI thread. A failure is logged
-/// (the command logs its own reason). Called on the UI thread; never by tests.
-pub fn elevate_in_background(args: Vec<String>, owner: isize, done: ElevatedDone) {
+/// The app's [`Integration::elevate`]: `negotium_actions::run_elevated_exe` on its own thread (it
+/// waits for the UAC prompt and, bounded, the command), then `done` on the UI thread. A failure
+/// is logged (the command logs its own reason). Called on the UI thread; never by tests.
+pub fn elevate_in_background(exe: PathBuf, args: Vec<String>, owner: isize, done: ElevatedDone) {
     ELEVATED_DONE.with(|d| *d.borrow_mut() = Some(done));
     std::thread::spawn(move || {
         let command = args.join(" ");
-        let result = negotium_actions::run_elevated(&command, owner);
+        let result = negotium_actions::run_elevated_exe(&exe, &command, owner);
         if let Err(e) = &result
             && !matches!(e, ActionError::Cancelled)
         {
@@ -212,7 +288,12 @@ impl SettingsWiring {
         ui.set_settings_gpu_running(self.running == Renderer::Gpu);
         ui.set_settings_gpu_env_override(self.running == Renderer::FromEnv);
         show_install(ui, &self.integration.install);
-        let integrations = Rc::new(Integrations { io: self.integration, weak: ui.as_weak(), busy: Cell::new(false) });
+        let integrations = Rc::new(Integrations {
+            io: self.integration,
+            settings: self.settings.clone(),
+            weak: ui.as_weak(),
+            busy: Cell::new(false),
+        });
         integrations.show();
         {
             let integrations = integrations.clone();
@@ -222,8 +303,11 @@ impl SettingsWiring {
             let integrations = integrations.clone();
             ui.on_open_windows_task_manager(move || integrations.open_task_manager());
         }
+        {
+            let integrations = integrations.clone();
+            ui.on_admin_mode_toggled(move |on| integrations.toggle_admin_mode(on));
+        }
         // Filled in by the tasks that implement them; until then the page only asks.
-        ui.on_admin_mode_toggled(|_| {});
         ui.on_start_with_windows_toggled(|_| {});
         ui.on_check_updates_toggled(|_| {});
         ui.on_check_updates_now(|| {});

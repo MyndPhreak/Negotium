@@ -2254,25 +2254,47 @@ const INSTALLED_EXE: &str = r"C:\Program Files\Negotium\negotium.exe";
 #[derive(Clone, Default)]
 struct FakeIntegration {
     redirect: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// The user's admin task (none set: missing).
+    task: Rc<RefCell<Option<negotium::integrate::TaskState>>>,
+    /// How often the task was read.
+    task_reads: Rc<std::cell::Cell<usize>>,
     asked: Rc<RefCell<Vec<String>>>,
+    /// The exe each elevated command ran as.
+    exes: Rc<RefCell<Vec<std::path::PathBuf>>>,
     pending: Rc<RefCell<Option<negotium::settingspage::ElevatedDone>>>,
     tray: Rc<RefCell<Vec<bool>>>,
 }
 
 impl FakeIntegration {
+    /// An administrator's copy: installed, or a development build.
     fn new(installed: bool) -> (negotium::settingspage::Integration, FakeIntegration) {
+        FakeIntegration::for_account(installed, true)
+    }
+
+    fn for_account(installed: bool, admin_member: bool) -> (negotium::settingspage::Integration, FakeIntegration) {
         let fake = FakeIntegration::default();
         let f = fake.clone();
+        let exe = if installed { INSTALLED_EXE } else { DEV_EXE };
         let integration = negotium::settingspage::Integration {
-            install: negotium::install::Install { exe: INSTALLED_EXE.into(), installed },
+            install: negotium::install::Install { exe: exe.into(), installed },
+            installed_exe: Some(INSTALLED_EXE.into()),
             redirect: Box::new({
                 let r = f.redirect.clone();
                 move || r.borrow().clone()
             }),
+            admin_member,
+            task_state: Box::new({
+                let (task, reads) = (f.task.clone(), f.task_reads.clone());
+                move || {
+                    reads.set(reads.get() + 1);
+                    task.borrow().clone().unwrap_or(negotium::integrate::TaskState::Missing)
+                }
+            }),
             elevate: Box::new({
-                let (asked, pending) = (f.asked.clone(), f.pending.clone());
-                move |args, _owner, done| {
+                let (asked, exes, pending) = (f.asked.clone(), f.exes.clone(), f.pending.clone());
+                move |exe, args, _owner, done| {
                     asked.borrow_mut().push(args.join(" "));
+                    exes.borrow_mut().push(exe);
                     assert!(pending.borrow_mut().replace(done).is_none(), "one elevated command at a time");
                 }
             }),
@@ -2297,7 +2319,14 @@ impl FakeIntegration {
     fn set_redirect(&self, exe: Option<&str>) {
         *self.redirect.borrow_mut() = exe.map(Into::into);
     }
+
+    fn set_task(&self, state: negotium::integrate::TaskState) {
+        *self.task.borrow_mut() = Some(state);
+    }
 }
+
+/// A development build's exe.
+const DEV_EXE: &str = r"C:\Users\me\DEV\Negotium\target\release\negotium.exe";
 
 const HOTKEY: &str = "Open on Ctrl+Shift+Esc";
 
@@ -2390,9 +2419,162 @@ fn a_dev_build_never_runs_the_hotkey_command() {
     assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
     integrations.toggle_hotkey(true);
     assert!(!ui.get_settings_hotkey());
-    integrations.open_task_manager();
-    assert_eq!(*fake.asked.borrow(), ["start Task Manager"]);
+    assert!(fake.asked.borrow().is_empty());
     assert_eq!(fake.tray.borrow().last(), Some(&false));
+}
+
+/// A development build can't change the installed copy's redirect itself (`--integrate` refuses
+/// any exe but the installed one), so "Open Windows Task Manager" asks the installed copy.
+#[test]
+fn a_dev_build_asks_the_installed_copy_to_lift_its_redirect() {
+    let dir = Scratch::new("taskmgr-dev");
+    let (integration, fake) = FakeIntegration::new(false);
+    let (ui, _, _, _) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    // No redirect, another tool's, or one naming this build: Task Manager just starts.
+    for redirect in [None, Some(r"C:\Tools\procexp64.exe"), Some(DEV_EXE)] {
+        fake.set_redirect(redirect);
+        task_manager_button(&ui).invoke_accessible_default_action();
+    }
+    assert_eq!(*fake.asked.borrow(), ["start Task Manager"; 3]);
+    assert!(fake.exes.borrow().is_empty());
+    // The installed copy's (however it is spelled): it runs open-task-manager, elevated.
+    fake.set_redirect(Some(&INSTALLED_EXE.to_uppercase()));
+    task_manager_button(&ui).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate open-task-manager"));
+    assert_eq!(*fake.exes.borrow(), [std::path::PathBuf::from(INSTALLED_EXE)]);
+    fake.finish(Ok(()));
+    assert_eq!(ui.get_toast(), "");
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false), "a dev build's switch stays off");
+}
+
+const ADMIN: &str = "Admin mode";
+
+#[test]
+fn the_admin_mode_switch_shows_the_task_and_runs_the_elevated_command() {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("admin");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    let checked = || switch(&ui, ADMIN).accessible_checked();
+    assert_eq!(checked(), Some(false), "no task");
+    assert_eq!(switch(&ui, ADMIN).accessible_enabled(), Some(true));
+    fake.set_task(TaskState::Ready);
+    integrations.show();
+    assert_eq!(checked(), Some(true));
+    assert_eq!(ui.get_settings_admin_mode_state(), 1);
+
+    // Off: the elevated admin-off; the switch follows the task, not the click.
+    switch(&ui, ADMIN).invoke_accessible_default_action();
+    assert_eq!(*fake.asked.borrow(), ["--integrate admin-off"]);
+    assert_eq!(*fake.exes.borrow(), [std::path::PathBuf::from(INSTALLED_EXE)]);
+    switch(&ui, HOTKEY).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().len(), 1, "one elevated command at a time");
+    fake.set_task(TaskState::Missing);
+    fake.finish(Ok(()));
+    assert_eq!(checked(), Some(false));
+
+    // On; a declined prompt snaps it back, quietly.
+    switch(&ui, ADMIN).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate admin-on"));
+    fake.finish(Err(negotium_actions::ActionError::Cancelled));
+    assert_eq!(checked(), Some(false));
+    assert_eq!(ui.get_toast(), "");
+
+    // With Start with Windows on, the task also starts at sign-in; a failure says so.
+    settings.borrow_mut().start_with_windows = true;
+    switch(&ui, ADMIN).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate admin-on --logon"));
+    fake.finish(Err(negotium_actions::ActionError::Other("the elevated command failed (exit code 1)".into())));
+    assert_eq!(checked(), Some(false));
+    assert_eq!(ui.get_toast(), "Couldn't change Admin mode: the elevated command failed (exit code 1).");
+}
+
+#[test]
+fn admin_mode_needs_repair_when_the_task_is_broken() {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("admin-repair");
+    let (integration, fake) = FakeIntegration::new(true);
+    fake.set_task(TaskState::Broken("its exe is gone".into()));
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    for state in [TaskState::Broken("its exe is gone".into()), TaskState::Disabled] {
+        fake.set_task(state.clone());
+        integrations.show();
+        assert_eq!(ui.get_settings_admin_mode_state(), 2, "{state:?}");
+        let s = switch(&ui, ADMIN);
+        assert_eq!(s.accessible_checked(), Some(false), "{state:?}");
+        assert_eq!(s.accessible_enabled(), Some(true), "{state:?}: it can be repaired");
+        assert_eq!(s.accessible_description().as_deref(), Some("Turn on again to repair"), "{state:?}");
+        assert!(text(&ui, "Needs repair. Turn on again to repair").is_some(), "{state:?}: the row says so");
+    }
+    // Turning it on again recreates the task.
+    switch(&ui, ADMIN).invoke_accessible_default_action();
+    assert_eq!(*fake.asked.borrow(), ["--integrate admin-on"]);
+    fake.set_task(TaskState::Ready);
+    fake.finish(Ok(()));
+    assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(true));
+    assert_eq!(switch(&ui, ADMIN).accessible_description().as_deref(), Some(ADMIN_DESCRIPTION));
+}
+
+const ADMIN_DESCRIPTION: &str =
+    "Start with admin rights without a prompt. Anything that can start Negotium then gets it with admin rights.";
+
+#[test]
+fn a_standard_account_cannot_turn_on_admin_mode() {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("admin-standard");
+    let (integration, fake) = FakeIntegration::for_account(true, false);
+    fake.set_task(TaskState::Ready);
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    assert_eq!(ui.get_settings_admin_mode_state(), 3);
+    let s = switch(&ui, ADMIN);
+    assert_eq!(s.accessible_enabled(), Some(false));
+    assert_eq!(s.accessible_checked(), Some(false));
+    assert_eq!(s.accessible_description().as_deref(), Some("Needs an administrator account"));
+    assert!(s.computed_opacity() < 1.0, "dimmed");
+    assert!(text(&ui, "Needs an administrator account").is_some());
+    integrations.toggle_admin_mode(true);
+    assert!(fake.asked.borrow().is_empty(), "nothing runs");
+    assert_eq!(fake.task_reads.get(), 0, "Task Scheduler isn't even asked");
+    // The hotkey stays available to a standard account's installed copy.
+    assert_eq!(switch(&ui, HOTKEY).accessible_enabled(), Some(true));
+}
+
+#[test]
+fn a_dev_build_never_reads_or_runs_admin_mode() {
+    let dir = Scratch::new("admin-dev");
+    let (integration, fake) = FakeIntegration::new(false);
+    fake.set_task(negotium::integrate::TaskState::Ready);
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(false));
+    assert_eq!(switch(&ui, ADMIN).accessible_description().as_deref(), Some("Install Negotium to use this"));
+    integrations.toggle_admin_mode(true);
+    assert!(fake.asked.borrow().is_empty());
+    assert_eq!(fake.task_reads.get(), 0);
+}
+
+#[test]
+fn the_switches_read_the_machine_when_the_settings_page_is_shown() {
+    use negotium::integrate::TaskState;
+    let dir = Scratch::new("integration-refresh");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
+    assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(false));
+    // Changed outside Negotium (the installer, another copy).
+    fake.set_redirect(Some(INSTALLED_EXE));
+    fake.set_task(TaskState::Ready);
+    integrations.page_shown(Page::Overview);
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false), "only the Settings page reads it");
+    integrations.page_shown(Page::Settings);
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(true));
+    assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(true));
+    assert_eq!(fake.tray.borrow().last(), Some(&true));
 }
 
 /// As [`settings_wired_with`], running what `decide` picks for `s` and `fallback`.
