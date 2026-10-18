@@ -2,6 +2,7 @@
 //! defaults. An unreadable or invalid file is moved aside to settings.json.bad and defaults are
 //! used: a bad file never stops Negotium from starting. Unknown fields are ignored and missing
 //! ones take their defaults, so files from older or newer versions load.
+use crate::appdata::Writes;
 use crate::controls::sort_column_index;
 use negotium_model::{Metric, Sort, SortColumn};
 use serde::{Deserialize, Serialize};
@@ -139,9 +140,10 @@ pub fn close_action(keep_in_tray: bool, exit_on_close: bool) -> CloseAction {
 
 /// The settings file: `%LOCALAPPDATA%\Negotium\settings.json` (the temp directory if
 /// `LOCALAPPDATA` is unset). The benchmark gives Negotium a scratch LOCALAPPDATA with settings of
-/// its own there, so it never reads or changes the user's.
+/// its own there, so it never reads or changes the user's. Elevated, LocalAppData is its known
+/// folder, whatever the environment says (crate::appdata).
 pub fn default_path() -> PathBuf {
-    path_from(std::env::var_os("LOCALAPPDATA"))
+    crate::appdata::negotium_dir().join("settings.json")
 }
 
 /// [`default_path`] from LOCALAPPDATA's value.
@@ -153,7 +155,8 @@ pub fn path_from(local_app_data: Option<std::ffi::OsString>) -> PathBuf {
 pub enum Loaded {
     Defaults,
     File,
-    /// The file was unusable (the reason) and was renamed to settings.json.bad.
+    /// The file was unusable (the reason) and was renamed to settings.json.bad (elevated: copied
+    /// there, the original left for the next save to replace).
     Recovered(String),
     /// Some fields were invalid (their names) and took their defaults; the valid ones were kept.
     /// The original text was copied to settings.json.bad, so it survives the next save.
@@ -167,19 +170,24 @@ pub enum Loaded {
 }
 
 pub fn load(path: &Path) -> (Settings, Loaded) {
+    load_with(&crate::appdata::writes(), path)
+}
+
+/// [`load`], setting a bad file aside through `writes` (elevated: copied, never renamed).
+pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), Loaded::Defaults),
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-            return (Settings::default(), set_aside(path, &e.to_string()));
+            return (Settings::default(), set_aside(writes, path, &e.to_string()));
         }
         // A sharing violation or missing permission says nothing about the file's content.
         Err(e) => return (Settings::default(), Loaded::Unreadable(e.to_string())),
     };
     let fields = match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(serde_json::Value::Object(fields)) => fields,
-        Ok(_) => return (Settings::default(), set_aside(path, "the file is not a JSON object")),
-        Err(e) => return (Settings::default(), set_aside(path, &e.to_string())),
+        Ok(_) => return (Settings::default(), set_aside(writes, path, "the file is not a JSON object")),
+        Err(e) => return (Settings::default(), set_aside(writes, path, &e.to_string())),
     };
     let mut bad: Vec<String> = Vec::new();
     let mut s = Settings::default();
@@ -215,32 +223,50 @@ pub fn load(path: &Path) -> (Settings, Loaded) {
     if bad.is_empty() {
         (s, Loaded::File)
     } else {
-        match std::fs::copy(path, path.with_extension("json.bad")) {
-            Ok(_) => (s, Loaded::Partial(bad)),
+        match copy_aside(writes, path) {
+            Ok(()) => (s, Loaded::Partial(bad)),
             Err(e) => (s, Loaded::PartialNotKept(bad, e.to_string())),
         }
     }
 }
 
-/// Moves an unusable file to settings.json.bad (replacing an older one). If that fails, the
-/// result says so instead of claiming the file was set aside.
-fn set_aside(path: &Path, reason: &str) -> Loaded {
-    match std::fs::rename(path, path.with_extension("json.bad")) {
+/// Moves an unusable file to settings.json.bad (replacing an older one); elevated, copies it
+/// there instead (nothing is renamed: [`copy_aside`]). If that fails, the result says so instead
+/// of claiming the file was set aside.
+fn set_aside(writes: &Writes, path: &Path, reason: &str) -> Loaded {
+    let moved = if writes.may_move() { std::fs::rename(path, path.with_extension("json.bad")) } else { copy_aside(writes, path) };
+    match moved {
         Ok(()) => Loaded::Recovered(reason.to_string()),
         Err(e) => Loaded::Unreadable(format!("{reason}; it could not be set aside: {e}")),
     }
 }
 
+/// Copies the file's bytes to settings.json.bad (replacing an older one) through `writes`.
+fn copy_aside(writes: &Writes, path: &Path) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    writes.write_all(&path.with_extension("json.bad"), &bytes)
+}
+
 /// Writes atomically: a temporary file next to the target, flushed, then a rename over it. The
-/// fixed `.tmp` name relies on Negotium being a single-instance app.
+/// fixed `.tmp` name relies on Negotium being a single-instance app. Elevated, written in place
+/// through the guarded write instead (no rename: crate::appdata).
 pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
+    save_with(&crate::appdata::writes(), path, s)
+}
+
+/// [`save`] through `writes`.
+pub fn save_with(writes: &Writes, path: &Path, s: &Settings) -> std::io::Result<()> {
     use std::io::Write;
+    let json = serde_json::to_vec_pretty(s).map_err(std::io::Error::other)?;
+    if !writes.may_move() {
+        return writes.write_all(path, &json);
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&serde_json::to_vec_pretty(s).map_err(std::io::Error::other)?)?;
+    f.write_all(&json)?;
     f.sync_all()?;
     drop(f);
     std::fs::rename(&tmp, path)
@@ -340,6 +366,30 @@ mod tests {
         use std::ffi::OsString;
         assert_eq!(path_from(Some(OsString::from(r"C:\L"))), PathBuf::from(r"C:\L\Negotium\settings.json"));
         assert_eq!(path_from(None), std::env::temp_dir().join("Negotium").join("settings.json"));
+    }
+
+    /// Elevated: a bad file is copied aside (never renamed), and saves overwrite the file in place
+    /// (no temporary file renamed over it), through the guarded write.
+    #[test]
+    fn elevated_nothing_is_renamed() {
+        let dir = TempDir::new("elevated");
+        let guarded = Writes::Guarded(Some(dir.0.clone()));
+        std::fs::write(dir.file(), b"not json").unwrap();
+        let (s, loaded) = load_with(&guarded, &dir.file());
+        assert!(matches!(loaded, Loaded::Recovered(_)), "{loaded:?}");
+        assert_eq!(s, Settings::default());
+        assert_eq!(std::fs::read(dir.file().with_extension("json.bad")).unwrap(), b"not json");
+        assert!(dir.file().exists(), "the original stays (the next save replaces it)");
+        // Partly invalid: copied aside too.
+        std::fs::write(dir.file(), br#"{"refresh_ms":"fast"}"#).unwrap();
+        let (_, loaded) = load_with(&guarded, &dir.file());
+        assert_eq!(loaded, Loaded::Partial(vec!["refresh_ms".into()]));
+        assert_eq!(std::fs::read(dir.file().with_extension("json.bad")).unwrap(), br#"{"refresh_ms":"fast"}"#);
+        // Saved in place, read back.
+        let changed = Settings { always_on_top: true, ..Settings::default() };
+        save_with(&guarded, &dir.file(), &changed).unwrap();
+        assert!(!dir.file().with_extension("json.tmp").exists(), "no temporary file");
+        assert_eq!(load_with(&guarded, &dir.file()), (changed.normalized(), Loaded::File));
     }
 
     /// A fresh directory under the temp dir, removed when dropped (also when a test fails).

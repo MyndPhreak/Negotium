@@ -1,7 +1,21 @@
 //! Optional render-time statistics for the benchmark (NEGOTIUM_FRAME_STATS=<path>).
 //! The first completed frame (GL initialisation and first paint) is reported separately as
 //! `first_frame_ms` and excluded from `render_ms` and `over_16ms`; `frames` counts every frame.
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::time::Instant;
+
+/// The variable naming the file the summary is written to at exit.
+pub const ENV: &str = "NEGOTIUM_FRAME_STATS";
+/// The bench's flag: a release build honours [`ENV`] only with it.
+pub const BENCH_ARG: &str = "--bench";
+
+/// Where to write the frame statistics: [`ENV`]'s path, only when `allowed` (a debug build, or
+/// the bench's [`BENCH_ARG`]) and never `elevated` (admin mode: the variable is anyone's who can
+/// set the user's environment, and the file is written at exit with admin rights).
+pub fn path(elevated: bool, allowed: bool, env: Option<OsString>) -> Option<PathBuf> {
+    env.filter(|_| allowed && !elevated).map(PathBuf::from)
+}
 
 #[derive(Default)]
 pub struct FrameStats {
@@ -51,6 +65,15 @@ mod tests {
             s.push_ms(ms);
         }
         serde_json::from_str(&s.summary_json()).unwrap()
+    }
+
+    #[test]
+    fn the_stats_file_is_written_only_for_the_bench_and_never_elevated() {
+        let env = || Some(OsString::from(r"C:\Temp\stats.json"));
+        assert_eq!(path(false, true, env()), Some(PathBuf::from(r"C:\Temp\stats.json")));
+        assert_eq!(path(true, true, env()), None, "elevated: never");
+        assert_eq!(path(false, false, env()), None, "a release build without the bench's flag");
+        assert_eq!(path(false, true, None), None);
     }
 
     #[test]

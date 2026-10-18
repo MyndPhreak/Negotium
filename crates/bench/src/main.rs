@@ -99,10 +99,14 @@ impl NegotiumRun {
         v.to_string()
     }
 
-    /// `--exit-on-close` makes closing exit, which is how a visible run ends; a hidden run needs
-    /// closing to hide instead and is ended by the bench.
+    /// `--bench` lets a release build write NEGOTIUM_FRAME_STATS (the app's
+    /// `framestats::BENCH_ARG`). `--exit-on-close` makes closing exit, which is how a visible run
+    /// ends; a hidden run needs closing to hide instead and is ended by the bench.
     fn args(&self) -> String {
-        let mut args = if self.hidden { vec![] } else { vec!["--exit-on-close".to_string()] };
+        let mut args = vec!["--bench".to_string()];
+        if !self.hidden {
+            args.push("--exit-on-close".to_string());
+        }
         args.extend(self.page.as_ref().map(|p| format!("--page={p}")));
         args.join(" ")
     }
@@ -658,14 +662,14 @@ mod tests {
     #[test]
     fn a_negotium_run_starts_with_its_own_settings_renderer_and_page() {
         let mut run = NegotiumRun::default();
-        assert_eq!(run.args(), "--exit-on-close");
+        assert_eq!(run.args(), "--bench --exit-on-close");
         assert_eq!(serde_json::from_str::<serde_json::Value>(&run.settings_json()).unwrap(), serde_json::json!({ "smooth_graphs": true, "tray_cpu": true }));
         assert_eq!(run.backend().unwrap(), None);
         run.renderer = Some("software".into());
         run.smooth_graphs = false;
         run.page = Some("performance".into());
         assert_eq!(run.backend().unwrap(), Some("winit-software"));
-        assert_eq!(run.args(), "--exit-on-close --page=performance");
+        assert_eq!(run.args(), "--bench --exit-on-close --page=performance");
         assert!(run.settings_json().contains("\"smooth_graphs\":false"));
         run.renderer = Some("vulkan".into());
         assert!(run.backend().is_err());
@@ -675,7 +679,7 @@ mod tests {
     #[test]
     fn a_hidden_run_keeps_the_window_hidden_in_the_tray_and_does_not_exit_on_close() {
         let run = NegotiumRun { hidden: true, page: Some("performance".into()), ..NegotiumRun::default() };
-        assert_eq!(run.args(), "--page=performance", "closing must hide to the tray, not exit");
+        assert_eq!(run.args(), "--bench --page=performance", "closing must hide to the tray, not exit");
         let v: serde_json::Value = serde_json::from_str(&run.settings_json()).unwrap();
         assert_eq!(v["keep_in_tray"], true);
         assert_eq!(v["tray_cpu"], true);

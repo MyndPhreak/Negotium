@@ -21,6 +21,7 @@
 //! durable record of an automatic fallback (the watchdog writes it from a background thread just before
 //! terminating); settings.json holds the user's own choice (`gpu_rendering`). The GPU is used only
 //! when the setting is on AND no marker exists. `SLINT_BACKEND` overrides all of it.
+use crate::appdata::Writes;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -73,10 +74,10 @@ pub fn decide(
     Decision { renderer, watchdog: renderer == Renderer::Gpu }
 }
 
-/// `%LOCALAPPDATA%\Negotium\renderer-fallback` (the temp directory if LOCALAPPDATA is unset).
+/// `%LOCALAPPDATA%\Negotium\renderer-fallback` (the temp directory if LOCALAPPDATA is unset;
+/// elevated, LocalAppData's known folder: crate::appdata).
 pub fn fallback_path() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("Negotium").join("renderer-fallback")
+    crate::appdata::negotium_dir().join("renderer-fallback")
 }
 
 /// Whether a fallback to software has been recorded.
@@ -106,23 +107,33 @@ pub fn set_gpu_rendering_at(marker: &Path, on: bool) -> std::io::Result<()> {
     if on { clear_fallback_at(marker) } else { Ok(()) }
 }
 
+/// A fallback is recorded when the marker exists with something in it: an elevated Negotium
+/// clears it by emptying it, as it deletes nothing (crate::appdata).
 pub fn fallback_recorded_at(path: &Path) -> bool {
-    path.is_file()
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
 /// Writes and flushes the marker; the file is closed on return (the watchdog then terminates the
 /// process without any cleanup).
 pub fn record_fallback_at(path: &Path) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(b"The GPU renderer stalled at startup; Negotium uses the software renderer.\n")?;
-    f.sync_all()
+    record_fallback_with(&crate::appdata::writes(), path)
+}
+
+/// [`record_fallback_at`] through `writes`.
+pub fn record_fallback_with(writes: &Writes, path: &Path) -> std::io::Result<()> {
+    writes.write_all(path, b"The GPU renderer stalled at startup; Negotium uses the software renderer.\n")
 }
 
 pub fn clear_fallback_at(path: &Path) -> std::io::Result<()> {
+    clear_fallback_with(&crate::appdata::writes(), path)
+}
+
+/// [`clear_fallback_at`] through `writes`: the marker is deleted, or, elevated, emptied (an
+/// absent one is left absent).
+pub fn clear_fallback_with(writes: &Writes, path: &Path) -> std::io::Result<()> {
+    if !writes.may_move() {
+        return if fallback_recorded_at(path) { writes.write_all(path, b"") } else { Ok(()) };
+    }
     match std::fs::remove_file(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         r => r,
@@ -422,6 +433,25 @@ mod tests {
         clear_fallback_at(&path).unwrap();
         assert!(!fallback_recorded_at(&path));
         clear_fallback_at(&path).unwrap(); // clearing when absent is fine
+    }
+
+    /// Elevated: recorded and cleared through the guarded write, never deleted (emptied instead);
+    /// an empty marker is no record.
+    #[test]
+    fn elevated_the_marker_is_emptied_not_deleted() {
+        let dir = temp_marker("elevated");
+        let path = dir.path();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let guarded = Writes::Guarded(Some(dir.0.clone()));
+        clear_fallback_with(&guarded, &path).unwrap();
+        assert!(!path.exists(), "clearing an absent marker creates nothing");
+        record_fallback_with(&guarded, &path).unwrap();
+        assert!(fallback_recorded_at(&path));
+        clear_fallback_with(&guarded, &path).unwrap();
+        assert!(path.is_file(), "not deleted");
+        assert!(!fallback_recorded_at(&path), "an empty marker is no record");
+        record_fallback_with(&guarded, &path).unwrap();
+        assert!(fallback_recorded_at(&path));
     }
 
     #[test]
