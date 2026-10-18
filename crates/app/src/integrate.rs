@@ -10,7 +10,7 @@
 use crate::install;
 use negotium_actions::ActionError;
 use negotium_actions::integration::{self, Roots, TaskStatus};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -92,6 +92,27 @@ impl Action {
         }
         args
     }
+}
+
+/// The command line (after the program name) without what Windows appends when the redirect
+/// starts Negotium: the original Task Manager command line (`"C:\Windows\System32\Taskmgr.exe"
+/// /4`) follows Negotium's own arguments (none, from the redirect). Everything from an argument
+/// naming taskmgr.exe (any case, any path, with or without `.exe`) on is dropped, so such a start
+/// is a normal launch.
+pub fn own_args<I, S>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    args.into_iter().map(|a| a.as_ref().to_os_string()).take_while(|a| !names_task_manager(a)).collect()
+}
+
+/// Whether `arg` is a path (or bare name) of taskmgr.exe.
+fn names_task_manager(arg: &OsStr) -> bool {
+    let arg = arg.to_string_lossy();
+    let arg = arg.trim().trim_matches('"');
+    let name = arg.rsplit(['\\', '/']).next().unwrap_or_default();
+    name.eq_ignore_ascii_case("taskmgr.exe") || name.eq_ignore_ascii_case("taskmgr")
 }
 
 /// Whether the command line (after the program name) asks for the integration command at all;
@@ -179,6 +200,9 @@ pub struct Ctx<'a> {
     /// The user the admin task is for (its name), e.g. `S-1-5-21-…-1001`.
     pub user_sid: String,
     pub machine: &'a dyn Machine,
+    /// Starts Windows' own Task Manager and returns once its process exists (open-task-manager);
+    /// [`start_task_manager`] in the app.
+    pub start_task_manager: &'a dyn Fn() -> Result<(), IntegrateError>,
 }
 
 /// The installed exe, when `ctx.exe` is it and it exists; this path (not `ctx.exe`'s spelling)
@@ -202,7 +226,7 @@ pub fn run_command(exe: &Path) -> String {
     format!("\"{}\" {TRAY}", exe.display())
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
     norm(a) == norm(b)
 }
@@ -213,6 +237,59 @@ fn clear_redirect(machine: &dyn Machine, exe: &Path) -> Result<(), IntegrateErro
     match machine.ifeo() {
         Some(current) if !same_path(&current, exe) => Ok(()),
         _ => machine.set_ifeo(None),
+    }
+}
+
+/// Whether taskmgr.exe's redirect is set to `exe` (the Settings switch and the tray's "Open
+/// Windows Task Manager" show this).
+pub fn redirect_is(machine: &dyn Machine, exe: &Path) -> bool {
+    machine.ifeo().is_some_and(|current| same_path(&current, exe))
+}
+
+/// The redirect lifted for a moment: it is put back when this is dropped, on every path out of
+/// [`open_task_manager`] (an error, a panic in the starter); [`Lifted::restore`] reports how that
+/// went.
+struct Lifted<'a> {
+    machine: &'a dyn Machine,
+    exe: &'a Path,
+    restored: bool,
+}
+
+impl Lifted<'_> {
+    fn restore(mut self) -> Result<(), IntegrateError> {
+        self.restored = true;
+        self.machine.set_ifeo(Some(self.exe))
+    }
+}
+
+impl Drop for Lifted<'_> {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = self.machine.set_ifeo(Some(self.exe));
+        }
+    }
+}
+
+/// Starts Windows' own Task Manager. With Negotium's redirect set, the redirect is lifted first
+/// (Task Manager would otherwise open Negotium) and put back once Task Manager's process exists,
+/// whether or not it started. Another tool's redirect, or none, is left alone.
+fn open_task_manager(
+    machine: &dyn Machine,
+    exe: &Path,
+    start: &dyn Fn() -> Result<(), IntegrateError>,
+) -> Result<(), IntegrateError> {
+    if !redirect_is(machine, exe) {
+        return start();
+    }
+    // Armed before the value is touched: even a failed removal puts our value back.
+    let lifted = Lifted { machine, exe, restored: false };
+    machine.set_ifeo(None)?;
+    let started = start();
+    let restored = lifted.restore();
+    match (started, restored) {
+        (Ok(()), restored) => restored,
+        (Err(e), Ok(())) => Err(e),
+        (Err(e), Err(r)) => Err(IntegrateError::Failed(format!("{e}; and the redirect could not be restored: {r}"))),
     }
 }
 
@@ -235,7 +312,7 @@ pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
         }
         Action::AdminOn { logon } => machine.create_task(&user_sid(ctx)?, &exe, logon),
         Action::AdminOff => machine.delete_task(&user_sid(ctx)?),
-        Action::OpenTaskManager => Err(IntegrateError::NotImplemented("open-task-manager")),
+        Action::OpenTaskManager => open_task_manager(machine, &exe, ctx.start_task_manager),
         // Every step is attempted; the first failure is reported.
         Action::Uninstall => [clear_redirect(machine, &exe), machine.set_run(None), machine.delete_task_folder()]
             .into_iter()
@@ -262,6 +339,7 @@ where
         program_files: install::program_files(),
         user_sid,
         machine,
+        start_task_manager: &start_task_manager,
     };
     match run(action, &ctx) {
         Ok(()) => 0,
@@ -270,6 +348,34 @@ where
             1
         }
     }
+}
+
+/// Windows' own Task Manager, `<System32>\Taskmgr.exe`, from the shell's known folder (not
+/// `%SystemRoot%`, which the user can point anywhere: an elevated open-task-manager must never
+/// start a file the user picked).
+pub fn task_manager_path() -> Option<PathBuf> {
+    use std::ffi::c_void;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_System, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+    // SAFETY: returns a CoTaskMem string that is freed below.
+    let p = unsafe { SHGetKnownFolderPath(&FOLDERID_System, KNOWN_FOLDER_FLAG(0), None) }.ok()?;
+    // SAFETY: `p` is a valid NUL-terminated string until freed.
+    let s = unsafe { p.to_string() }.ok();
+    // SAFETY: allocated by SHGetKnownFolderPath; freed exactly once.
+    unsafe { CoTaskMemFree(Some(p.0 as *const c_void)) };
+    s.filter(|s| !s.is_empty()).map(|s| PathBuf::from(s).join("Taskmgr.exe"))
+}
+
+/// The real starter for open-task-manager (run elevated, so Task Manager's "highest available"
+/// manifest needs no prompt): CreateProcess returns once the process exists, having consulted the
+/// (lifted) redirect, so the redirect can be restored as soon as this returns. The process is
+/// left running. Never called by tests.
+pub fn start_task_manager() -> Result<(), IntegrateError> {
+    let path = task_manager_path().ok_or_else(|| IntegrateError::Failed("System32 could not be found".into()))?;
+    std::process::Command::new(&path)
+        .spawn()
+        .map(drop)
+        .map_err(|e| IntegrateError::Failed(format!("{} could not be started: {e}", path.display())))
 }
 
 /// The real machine: the registry (through its write guard) and Task Scheduler, over
@@ -430,8 +536,18 @@ mod tests {
             self.0.join("Negotium").join("negotium.exe")
         }
         fn ctx<'a>(&self, machine: &'a dyn Machine) -> Ctx<'a> {
-            Ctx { exe: self.exe(), program_files: Some(self.0.clone()), user_sid: SID.to_string(), machine }
+            Ctx {
+                exe: self.exe(),
+                program_files: Some(self.0.clone()),
+                user_sid: SID.to_string(),
+                machine,
+                start_task_manager: &never_started,
+            }
         }
+    }
+
+    fn never_started() -> Result<(), IntegrateError> {
+        panic!("this test never starts Task Manager")
     }
 
     impl Drop for Root {
@@ -564,12 +680,120 @@ mod tests {
         run(Action::StartupOn, &ctx).unwrap();
     }
 
+    /// Started by the redirect, Negotium sees `"C:\Windows\System32\Taskmgr.exe" /4` after its own
+    /// (empty) arguments: dropped, however the path is spelled.
     #[test]
-    fn open_task_manager_is_not_implemented_yet() {
+    fn the_taskmgr_argument_is_ignored() {
+        for args in [
+            &[r"C:\Windows\System32\Taskmgr.exe", "/4"][..],
+            &[r"C:\WINDOWS\system32\taskmgr.exe"],
+            &[r#""C:\Windows\System32\Taskmgr.exe""#, "/7", "/startup"],
+            &["taskmgr.exe", "/0"],
+            &["TASKMGR"],
+            &[r"\\?\C:\Windows\System32\Taskmgr.exe"],
+            &["C:/Windows/System32/taskmgr.EXE", "--integrate", "hotkey-off"],
+            &[r"C:\Windows\SysWOW64\Taskmgr.exe"],
+        ] {
+            assert!(own_args(args).is_empty(), "{args:?}");
+            assert!(!requested(own_args(args)), "{args:?}");
+        }
+        // Negotium's own arguments before it are kept; anything else is untouched.
+        assert_eq!(own_args(["--tray", r"C:\Windows\System32\Taskmgr.exe", "/4"]), ["--tray"]);
+        assert_eq!(own_args(["--page=startup", "--restarted"]), ["--page=startup", "--restarted"]);
+        assert_eq!(own_args(["--integrate", "hotkey-on"]), ["--integrate", "hotkey-on"]);
+        for kept in ["taskmgr.exe2", "mytaskmgr.exe", r"C:\taskmgr.exe\other.exe", "--page=taskmgr.exe"] {
+            assert_eq!(own_args([kept]), [kept], "{kept}");
+        }
+        assert!(own_args(Vec::<OsString>::new()).is_empty());
+    }
+
+    #[test]
+    fn opening_task_manager_lifts_the_redirect_while_it_starts() {
         let root = Root::new();
         let fake = Fake::default();
-        assert!(matches!(run(Action::OpenTaskManager, &root.ctx(&fake)), Err(IntegrateError::NotImplemented(_))));
-        assert!(fake.calls.borrow().is_empty());
+        run(Action::HotkeyOn, &root.ctx(&fake)).unwrap();
+        let seen = RefCell::new(Vec::new());
+        let start = || {
+            seen.borrow_mut().push(fake.ifeo());
+            Ok(())
+        };
+        run(Action::OpenTaskManager, &Ctx { start_task_manager: &start, ..root.ctx(&fake) }).unwrap();
+        assert_eq!(*seen.borrow(), [None], "Task Manager starts with no redirect");
+        assert_eq!(fake.ifeo(), Some(root.exe()), "and it is back");
+        assert_eq!(*fake.calls.borrow(), ["set_ifeo", "set_ifeo", "set_ifeo"]);
+    }
+
+    #[test]
+    fn opening_task_manager_restores_the_redirect_even_on_error() {
+        let root = Root::new();
+        let fake = Fake::default();
+        *fake.ifeo.borrow_mut() = Some(root.exe());
+        let start = || {
+            assert_eq!(fake.ifeo(), None, "lifted while it starts");
+            Err(IntegrateError::Failed("Taskmgr.exe could not be started".into()))
+        };
+        let ctx = Ctx { start_task_manager: &start, ..root.ctx(&fake) };
+        assert_eq!(run(Action::OpenTaskManager, &ctx), Err(IntegrateError::Failed("Taskmgr.exe could not be started".into())));
+        assert_eq!(fake.ifeo(), Some(root.exe()));
+        // A starter that panics still leaves the redirect in place.
+        let panics = || -> Result<(), IntegrateError> { panic!("starter panicked") };
+        let ctx = Ctx { start_task_manager: &panics, ..root.ctx(&fake) };
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(Action::OpenTaskManager, &ctx))).is_err());
+        assert_eq!(fake.ifeo(), Some(root.exe()));
+    }
+
+    #[test]
+    fn opening_task_manager_does_not_start_it_while_the_redirect_stays() {
+        let root = Root::new();
+        // Every write fails: the value can't be lifted, so Task Manager isn't started (it would
+        // open Negotium); the restore is still tried and the failure is reported.
+        let fake = Fake { failing: vec!["set_ifeo"], ..Fake::default() };
+        *fake.ifeo.borrow_mut() = Some(root.exe());
+        let started = std::cell::Cell::new(false);
+        let start = || {
+            started.set(true);
+            Ok(())
+        };
+        let ctx = Ctx { start_task_manager: &start, ..root.ctx(&fake) };
+        assert_eq!(run(Action::OpenTaskManager, &ctx), Err(IntegrateError::Failed("set_ifeo failed".into())));
+        assert!(!started.get());
+        assert_eq!(*fake.calls.borrow(), ["set_ifeo", "set_ifeo"], "the removal, then the restore");
+    }
+
+    #[test]
+    fn opening_task_manager_leaves_another_redirect_or_none_alone() {
+        let root = Root::new();
+        for current in [None, Some(PathBuf::from(r"C:\Tools\procexp64.exe"))] {
+            let fake = Fake::default();
+            *fake.ifeo.borrow_mut() = current.clone();
+            let started = std::cell::Cell::new(0);
+            let start = || {
+                started.set(started.get() + 1);
+                Ok(())
+            };
+            run(Action::OpenTaskManager, &Ctx { start_task_manager: &start, ..root.ctx(&fake) }).unwrap();
+            assert_eq!(started.get(), 1);
+            assert_eq!(fake.ifeo(), current);
+            assert!(fake.calls.borrow().is_empty(), "{:?}", fake.calls.borrow());
+        }
+    }
+
+    #[test]
+    fn the_redirect_is_recognised_however_it_is_spelled() {
+        let root = Root::new();
+        let fake = Fake::default();
+        assert!(!redirect_is(&fake, &root.exe()));
+        *fake.ifeo.borrow_mut() = Some(PathBuf::from(root.exe().to_string_lossy().to_uppercase()));
+        assert!(redirect_is(&fake, &root.exe()));
+        *fake.ifeo.borrow_mut() = Some(PathBuf::from(r"C:\Tools\procexp64.exe"));
+        assert!(!redirect_is(&fake, &root.exe()));
+    }
+
+    #[test]
+    fn task_manager_is_in_system32() {
+        let path = task_manager_path().unwrap();
+        assert!(path.is_absolute(), "{}", path.display());
+        assert!(path.to_string_lossy().to_lowercase().ends_with(r"\system32\taskmgr.exe"), "{}", path.display());
     }
 
     #[test]

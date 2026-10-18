@@ -5,10 +5,11 @@ use negotium::controls::Controls;
 use negotium::platform::{self, ShellEvent};
 use negotium::renderer;
 use negotium::settings;
+use negotium::settingspage::Integrations;
 use negotium::smooth::OnScreen;
 use negotium::{MainWindow, NegotiumTray, worker};
 use slint::ComponentHandle;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,16 +53,30 @@ fn begin_exit(controls: &Controls, weak: &slint::Weak<MainWindow>, saver: &setti
     let _ = slint::quit_event_loop();
 }
 
+/// What a new tray icon needs besides the window: the settings writer (exit) and the Task
+/// Manager handler with whether to offer it (the installed copy's redirect is on).
+struct TrayWiring {
+    saver: settings::Saver,
+    integrations: Rc<Integrations>,
+    taskmgr_shown: Rc<Cell<bool>>,
+}
+
 fn make_tray(
     controls: &Arc<Controls>,
     on_screen: &Rc<OnScreen>,
     weak: &slint::Weak<MainWindow>,
-    saver: &settings::Saver,
+    wiring: &TrayWiring,
 ) -> Result<NegotiumTray, slint::PlatformError> {
+    let saver = &wiring.saver;
     let tray = NegotiumTray::new()?;
     {
         let (on_screen, weak) = (on_screen.clone(), weak.clone());
         tray.on_open(move || show_main(&on_screen, &weak));
+    }
+    tray.set_taskmgr_shown(wiring.taskmgr_shown.get());
+    {
+        let integrations = wiring.integrations.clone();
+        tray.on_open_task_manager(move || integrations.open_task_manager());
     }
     {
         let (controls, weak, saver) = (controls.clone(), weak.clone(), saver.clone());
@@ -75,9 +90,13 @@ fn make_tray(
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Negotium's own arguments: started by the Ctrl+Shift+Esc redirect, Windows appends Task
+    // Manager's command line, which is ignored (a normal launch).
+    let args = negotium::integrate::own_args(std::env::args_os().skip(1));
+    let has_arg = |flag: &str| args.iter().any(|a| a == flag);
     // `--integrate <action>` (the installer and the Settings switches): no window, no renderer, no
     // instance lock, no settings; the exit code says whether it worked, a failure is logged.
-    if negotium::integrate::requested(std::env::args_os().skip(1)) {
+    if negotium::integrate::requested(&args) {
         // The registry guard then allows exactly the two integration values (and the startup
         // state keys, which this path never writes). The task is named by this process's user:
         // an administrator's SID is the same before and after the UAC prompt.
@@ -88,7 +107,7 @@ fn main() -> Result<(), slint::PlatformError> {
             String::new()
         });
         let code = negotium::integrate::command(
-            std::env::args_os().skip(1),
+            &args,
             &negotium::integrate::System::new(),
             sid,
             &mut |line| log.warn(line),
@@ -97,7 +116,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // One instance per session. A second launch shows the running one (even from the tray) and
     // exits; a restart (as admin) waits for the old instance to finish quitting.
-    let restarted = std::env::args_os().any(|a| a == "--restarted");
+    let restarted = has_arg("--restarted");
     let wait = if restarted { Duration::from_secs(10) } else { Duration::ZERO };
     let _instance = match platform::claim_instance(platform::INSTANCE_MUTEX, wait) {
         Some(lock) => lock,
@@ -124,7 +143,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // GPU (FemtoVG) by default, software once a stall has been recorded, SLINT_BACKEND over both
     // (crate::renderer; docs/benchmarks/README.md, "Renderer").
-    let relaunched = std::env::args_os().any(|a| a == renderer::FALLBACK_ARG);
+    let relaunched = has_arg(renderer::FALLBACK_ARG);
     // Read once, before the window shows (allowed on the UI thread).
     let settings_path = settings::default_path();
     let (settings, loaded) = settings::load(&settings_path);
@@ -219,7 +238,23 @@ fn main() -> Result<(), slint::PlatformError> {
     controls.set_tray_cpu(initial.tray_cpu);
     // Shared with every exit path, which waits for its writes (`begin_exit`).
     let saver = settings::Saver::new(settings_path);
-    negotium::settingspage::SettingsWiring {
+    // The tray icon, once made (below); the tray menu offers "Open Windows Task Manager" while the
+    // installed copy's redirect is on.
+    let tray: Rc<RefCell<Option<NegotiumTray>>> = Default::default();
+    let taskmgr_shown: Rc<Cell<bool>> = Default::default();
+    let redirect_shown = {
+        // Weak: the tray's own menu handler holds these integrations, which hold this.
+        let (tray, taskmgr_shown) = (Rc::downgrade(&tray), taskmgr_shown.clone());
+        move |on: bool| {
+            taskmgr_shown.set(on);
+            if let Some(tray) = tray.upgrade()
+                && let Some(t) = tray.borrow().as_ref()
+            {
+                t.set_taskmgr_shown(on);
+            }
+        }
+    };
+    let integrations = negotium::settingspage::SettingsWiring {
         settings: settings.clone(),
         saver: saver.clone(),
         controls: controls.clone(),
@@ -227,8 +262,18 @@ fn main() -> Result<(), slint::PlatformError> {
         fallback_recorded,
         running,
         tray_cpu_changed: Rc::new(negotium::tray::set_enabled),
+        integration: negotium::settingspage::Integration {
+            install: negotium::install::current(),
+            // One registry value, read on the UI thread when the page is wired and after each
+            // elevated command.
+            redirect: Box::new(|| negotium::integrate::Machine::ifeo(&negotium::integrate::System::new())),
+            elevate: Box::new(negotium::settingspage::elevate_in_background),
+            start_task_manager: Box::new(negotium::settingspage::start_task_manager_in_background),
+            redirect_shown: Box::new(redirect_shown),
+        },
     }
     .install(&ui);
+    let tray_wiring = Rc::new(TrayWiring { saver: saver.clone(), integrations, taskmgr_shown });
     let bridge = Bridge::install(&ui, controls.clone());
     // Program icons: extracted on the loader's own thread (shell and GDI calls, never in a frame);
     // each result comes back to the bridge's cache on the UI thread, which re-pushes the rows
@@ -318,7 +363,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // A restart (as admin) comes back on the page it left (spec §6); anything else opens on the
     // Overview.
-    if let Some(page) = negotium::controls::page_from_os_args(std::env::args_os()) {
+    if let Some(page) = negotium::controls::page_from_os_args(args.iter().cloned()) {
         show_page(page);
     }
     ui.on_refresh_startup(load_startup.clone());
@@ -429,7 +474,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Close hides to tray (spec 5.5) while "Keep running in tray" is on; the worker then ticks every
     // 2 s (or slower, Controls::interval). Otherwise, or with --exit-on-close (benchmark use only),
     // it quits, so a WM_CLOSE from the bench ends the process.
-    let exit_on_close = std::env::args_os().any(|a| a == "--exit-on-close");
+    let exit_on_close = has_arg("--exit-on-close");
     // Whether the window is on screen: graphs scroll only then (negotium::smooth). Every path that
     // hides, shows, minimises or restores it goes through this.
     let on_screen = OnScreen::new(controls.clone(), &ui);
@@ -619,7 +664,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // once: apply the chrome, hook the window (tray re-creation, activation by a second launch)
     // and mark it for that second launch. Every tick is also the renderer watchdog's heartbeat
     // (the UI thread is alive), and the tray icon waits until the watchdog has resolved.
-    let tray: Rc<RefCell<Option<NegotiumTray>>> = Default::default();
     let chrome_timer = Rc::new(slint::Timer::default());
     {
         let weak = weak.clone();
@@ -637,7 +681,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 platform::apply_window_chrome(&ui);
                 let hooked = {
                     let (tray, controls, weak, on_screen) = (tray.clone(), controls.clone(), weak.clone(), on_screen.clone());
-                    let (tray_allowed, settings, saver) = (tray_allowed.clone(), settings.clone(), saver.clone());
+                    let (tray_allowed, settings, tray_wiring) = (tray_allowed.clone(), settings.clone(), tray_wiring.clone());
                     platform::install_window_hooks(hwnd, move |event| {
                         if let ShellEvent::Minimised(m) = event {
                             on_screen.on_size(m);
@@ -645,13 +689,13 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                         // The hook runs inside the window procedure: act from the event loop instead.
                         let (tray, controls, weak, on_screen) = (tray.clone(), controls.clone(), weak.clone(), on_screen.clone());
-                        let (tray_allowed, settings, saver) = (tray_allowed.clone(), settings.clone(), saver.clone());
+                        let (tray_allowed, settings, tray_wiring) = (tray_allowed.clone(), settings.clone(), tray_wiring.clone());
                         slint::Timer::single_shot(Duration::ZERO, move || match event {
                             // Explorer restarted (perhaps ended from this very list): add the icon again.
                             // Before the watchdog resolves, the first creation below adds it.
                             ShellEvent::TaskbarCreated if tray_allowed() => {
                                 drop(tray.borrow_mut().take());
-                                *tray.borrow_mut() = make_tray(&controls, &on_screen, &weak, &saver)
+                                *tray.borrow_mut() = make_tray(&controls, &on_screen, &weak, &tray_wiring)
                                     .map_err(|e| warn(&format!("tray icon could not be re-created: {e}")))
                                     .ok();
                             }
@@ -686,7 +730,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if !tray_allowed() {
                 return;
             }
-            *tray.borrow_mut() = make_tray(&controls, &on_screen, &weak, &saver)
+            *tray.borrow_mut() = make_tray(&controls, &on_screen, &weak, &tray_wiring)
                 .map_err(|e| warn(&format!("tray icon could not be created: {e}")))
                 .ok();
             if let Some(t) = handle.upgrade() {

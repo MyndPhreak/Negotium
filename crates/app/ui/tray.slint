@@ -6,12 +6,16 @@ export component NegotiumTray inherits SystemTrayIcon {
     in property <string> live-tooltip: "Negotium";
     icon: root.live ? root.live-icon : @image-url("../assets/negotium.svg");
     tooltip: root.live-tooltip;
+    // crate::settingspage::Integrations: the installed copy with its Ctrl+Shift+Esc redirect on.
+    in property <bool> taskmgr-shown;
     callback open();
+    callback open-task-manager();
     callback exit();
     // Left-click on the icon opens the window too.
     clicked => { root.open(); }
     Menu {
         MenuItem { title: "Open"; activated => { root.open(); } }
+        if root.taskmgr-shown: MenuItem { title: "Open Windows Task Manager"; activated => { root.open-task-manager(); } }
         MenuItem { title: "Exit"; activated => { root.exit(); } }
     }
 }

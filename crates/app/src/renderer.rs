@@ -303,7 +303,9 @@ impl SoftwareRelaunch {
     pub fn resolve() -> Self {
         Self {
             exe: std::env::current_exe().map_err(|e| e.to_string()),
-            args: relaunch_args(std::env::args_os().skip(1)),
+            // Without a Task Manager command line the redirect appended (`integrate::own_args`),
+            // which would hide the fallback flag from the relaunched instance.
+            args: relaunch_args(crate::integrate::own_args(std::env::args_os().skip(1))),
             marker: fallback_path(),
             log: crate::log::Log::default_path(),
         }

@@ -2202,13 +2202,26 @@ thread_local! {
 }
 
 /// The Settings page wired the way main.rs wires it, saving under `dir`; this instance draws with
-/// `running`.
+/// `running` and is a development build that never runs anything elevated.
 fn settings_wired_with(
     dir: &Scratch,
     s: Settings,
     fallback: bool,
     running: Renderer,
 ) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>) {
+    let (ui, controls, settings, _) = settings_wired_integrated(dir, s, fallback, running, FakeIntegration::new(false).0);
+    (ui, controls, settings)
+}
+
+/// [`settings_wired_with`] with `integration` behind the Ctrl+Shift+Esc switch and "Open Windows
+/// Task Manager".
+fn settings_wired_integrated(
+    dir: &Scratch,
+    s: Settings,
+    fallback: bool,
+    running: Renderer,
+    integration: negotium::settingspage::Integration,
+) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>, Rc<negotium::settingspage::Integrations>) {
     let ui = shown_window();
     ui.set_page(3);
     let controls = Arc::new(Controls::default());
@@ -2218,7 +2231,7 @@ fn settings_wired_with(
         negotium::renderer::record_fallback_at(&marker).unwrap();
     }
     negotium::settingspage::apply_settings(&ui, &settings.borrow());
-    negotium::settingspage::SettingsWiring {
+    let integrations = negotium::settingspage::SettingsWiring {
         settings: settings.clone(),
         saver: negotium::settings::Saver::new(dir.0.join("settings.json")),
         controls: controls.clone(),
@@ -2226,9 +2239,160 @@ fn settings_wired_with(
         fallback_recorded: fallback,
         running,
         tray_cpu_changed: Rc::new(|on| TRAY_TOLD.with(|t| t.borrow_mut().push(on))),
+        integration,
     }
     .install(&ui);
-    (ui, controls, settings)
+    (ui, controls, settings, integrations)
+}
+
+/// The installed exe the fake integration reports for an installed copy.
+const INSTALLED_EXE: &str = r"C:\Program Files\Negotium\negotium.exe";
+
+/// The machine behind a fake [`negotium::settingspage::Integration`]: the redirect it reads, what
+/// it was asked to run (elevated commands, plain Task Manager starts), the elevated command still
+/// waiting for its outcome, and what the tray was told.
+#[derive(Clone, Default)]
+struct FakeIntegration {
+    redirect: Rc<RefCell<Option<std::path::PathBuf>>>,
+    asked: Rc<RefCell<Vec<String>>>,
+    pending: Rc<RefCell<Option<negotium::settingspage::ElevatedDone>>>,
+    tray: Rc<RefCell<Vec<bool>>>,
+}
+
+impl FakeIntegration {
+    fn new(installed: bool) -> (negotium::settingspage::Integration, FakeIntegration) {
+        let fake = FakeIntegration::default();
+        let f = fake.clone();
+        let integration = negotium::settingspage::Integration {
+            install: negotium::install::Install { exe: INSTALLED_EXE.into(), installed },
+            redirect: Box::new({
+                let r = f.redirect.clone();
+                move || r.borrow().clone()
+            }),
+            elevate: Box::new({
+                let (asked, pending) = (f.asked.clone(), f.pending.clone());
+                move |args, _owner, done| {
+                    asked.borrow_mut().push(args.join(" "));
+                    assert!(pending.borrow_mut().replace(done).is_none(), "one elevated command at a time");
+                }
+            }),
+            start_task_manager: Box::new({
+                let asked = f.asked.clone();
+                move || asked.borrow_mut().push("start Task Manager".into())
+            }),
+            redirect_shown: Box::new({
+                let tray = f.tray.clone();
+                move |on| tray.borrow_mut().push(on)
+            }),
+        };
+        (integration, fake)
+    }
+
+    /// The elevated command returns `result`.
+    fn finish(&self, result: Result<(), negotium_actions::ActionError>) {
+        let done = self.pending.borrow_mut().take().expect("an elevated command is running");
+        done(result);
+    }
+
+    fn set_redirect(&self, exe: Option<&str>) {
+        *self.redirect.borrow_mut() = exe.map(Into::into);
+    }
+}
+
+const HOTKEY: &str = "Open on Ctrl+Shift+Esc";
+
+fn task_manager_button(ui: &MainWindow) -> El {
+    El::find_by_accessible_label(ui, "Open Windows Task Manager").find(|e| e.accessible_role() == Some(AccessibleRole::Button)).unwrap()
+}
+
+#[test]
+fn the_hotkey_switch_shows_the_machine_state() {
+    let dir = Scratch::new("hotkey");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    let checked = || switch(&ui, HOTKEY).accessible_checked();
+    assert_eq!(checked(), Some(false), "no redirect");
+    for (redirect, on) in [
+        (Some(INSTALLED_EXE.to_string()), true),
+        (Some(INSTALLED_EXE.to_uppercase()), true),
+        (Some(r"C:\Tools\procexp64.exe".to_string()), false),
+        (Some(r"C:\Users\me\DEV\Negotium\target\release\negotium.exe".to_string()), false),
+        (None, false),
+    ] {
+        fake.set_redirect(redirect.as_deref());
+        integrations.show();
+        assert_eq!(checked(), Some(on), "{redirect:?}");
+        assert_eq!(fake.tray.borrow().last(), Some(&on), "the tray offers Task Manager only with our redirect");
+    }
+
+    // On: the elevated hotkey-on; the switch shows what the machine then says.
+    switch(&ui, HOTKEY).invoke_accessible_default_action();
+    assert_eq!(*fake.asked.borrow(), ["--integrate hotkey-on"]);
+    assert_eq!(checked(), Some(false), "not on until the command has set it");
+    switch(&ui, HOTKEY).invoke_accessible_default_action();
+    task_manager_button(&ui).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().len(), 1, "nothing else runs while the UAC prompt is open");
+    fake.set_redirect(Some(INSTALLED_EXE));
+    fake.finish(Ok(()));
+    assert_eq!(checked(), Some(true));
+
+    // A declined UAC prompt changes nothing: the switch snaps back, quietly.
+    switch(&ui, HOTKEY).invoke_accessible_default_action();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate hotkey-off"));
+    fake.finish(Err(negotium_actions::ActionError::Cancelled));
+    assert_eq!(checked(), Some(true));
+    assert_eq!(ui.get_toast(), "");
+
+    // A failed command says so.
+    switch(&ui, HOTKEY).invoke_accessible_default_action();
+    fake.finish(Err(negotium_actions::ActionError::Other("the elevated command failed (exit code 1)".into())));
+    assert_eq!(checked(), Some(true));
+    assert_eq!(ui.get_toast(), "Couldn't change Open on Ctrl+Shift+Esc: the elevated command failed (exit code 1).");
+    ui.set_toast("".into());
+
+    // Off, approved.
+    switch(&ui, HOTKEY).invoke_accessible_default_action();
+    fake.set_redirect(None);
+    fake.finish(Ok(()));
+    assert_eq!(checked(), Some(false));
+}
+
+#[test]
+fn open_windows_task_manager_lifts_only_our_redirect() {
+    let dir = Scratch::new("taskmgr");
+    let (integration, fake) = FakeIntegration::new(true);
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    // No redirect, or another tool's: Task Manager just starts.
+    for redirect in [None, Some(r"C:\Tools\procexp64.exe")] {
+        fake.set_redirect(redirect);
+        task_manager_button(&ui).invoke_accessible_default_action();
+    }
+    assert_eq!(*fake.asked.borrow(), ["start Task Manager", "start Task Manager"]);
+    // Ours: the elevated open-task-manager (the tray asks the same way).
+    fake.set_redirect(Some(INSTALLED_EXE));
+    integrations.open_task_manager();
+    assert_eq!(fake.asked.borrow().last().map(String::as_str), Some("--integrate open-task-manager"));
+    fake.finish(Err(negotium_actions::ActionError::Other("Taskmgr.exe could not be started".into())));
+    assert_eq!(ui.get_toast(), "Couldn't open Windows Task Manager: Taskmgr.exe could not be started.");
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(true), "the redirect is still ours");
+}
+
+#[test]
+fn a_dev_build_never_runs_the_hotkey_command() {
+    let dir = Scratch::new("hotkey-dev");
+    let (integration, fake) = FakeIntegration::new(false);
+    // Even with the installed copy's redirect on, a dev build's switch is off and asks nothing.
+    fake.set_redirect(Some(INSTALLED_EXE));
+    let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
+    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
+    integrations.toggle_hotkey(true);
+    assert!(!ui.get_settings_hotkey());
+    integrations.open_task_manager();
+    assert_eq!(*fake.asked.borrow(), ["start Task Manager"]);
+    assert_eq!(fake.tray.borrow().last(), Some(&false));
 }
 
 /// As [`settings_wired_with`], running what `decide` picks for `s` and `fallback`.

@@ -12,7 +12,7 @@ mod terminate;
 pub use close::{FORCE_CLOSE_GRACE, force_close};
 pub use details::{Details, process_details};
 pub use efficiency::toggle_efficiency_mode;
-pub use elevation::{enable_debug_privilege, is_elevated, restart_as_admin};
+pub use elevation::{enable_debug_privilege, is_elevated, restart_as_admin, run_elevated, shell_open};
 pub use location::open_file_location;
 pub use terminate::{end_many, end_process};
 

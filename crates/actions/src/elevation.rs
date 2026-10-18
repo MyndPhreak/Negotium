@@ -1,13 +1,15 @@
 use crate::{ActionError, OwnedHandle};
-use std::ffi::c_void;
+use std::ffi::{OsStr, c_void};
+use std::path::Path;
 use std::mem::size_of;
 use windows::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HWND, LUID};
 use windows::Win32::Security::{
     AdjustTokenPrivileges, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_DEBUG_NAME,
     SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject};
+use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -69,22 +71,82 @@ pub fn enable_debug_privilege() -> Result<(), ActionError> {
 /// `owner` is the main window's HWND as an integer (0: none), so the UAC prompt can come to the
 /// front instead of flashing in the taskbar.
 pub fn restart_as_admin(args: &str, owner: isize) -> Result<(), ActionError> {
-    let _com = crate::startup::ComApartment::enter();
+    runas(args, owner, false).map(drop)
+}
+
+/// Opens `path` the way Explorer would (the `open` verb), so a program whose manifest asks for
+/// elevation gets its UAC prompt. Returns once the launch is done; call it off the UI thread.
+pub fn shell_open(path: &Path, owner: isize) -> Result<(), ActionError> {
+    shell_execute(w!("open"), path.as_os_str(), "", owner, false).map(drop)
+}
+
+/// Runs the current executable with `args` elevated (the `runas` verb: a UAC prompt unless this
+/// process is already elevated) and waits for it to finish: `Ok` once it exits with code 0, an
+/// error for any other exit code. A declined prompt is `Cancelled` and nothing runs. Blocks until
+/// the elevated process exits, so call it off the UI thread; `owner` as for [`restart_as_admin`].
+pub fn run_elevated(args: &str, owner: isize) -> Result<(), ActionError> {
+    let process = runas(args, owner, true)?
+        .ok_or_else(|| ActionError::Other("the elevated process could not be watched".into()))?;
+    // SAFETY: `process` is the live process handle ShellExecuteEx returned; waiting has no other
+    // effect.
+    if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
+        return Err(ActionError::Other("waiting for the elevated process failed".into()));
+    }
+    let mut code = 0u32;
+    // SAFETY: `process` has exited (waited above); `code` is writable.
+    unsafe { GetExitCodeProcess(process.0, &mut code) }.map_err(|e| ActionError::from_win(&e))?;
+    exit_status(code)
+}
+
+/// An elevated command's exit code as a result (0 is success).
+fn exit_status(code: u32) -> Result<(), ActionError> {
+    if code == 0 { Ok(()) } else { Err(ActionError::Other(format!("the elevated command failed (exit code {code})"))) }
+}
+
+/// ShellExecuteEx `runas` on the current exe ([`shell_execute`]).
+fn runas(args: &str, owner: isize, keep_process: bool) -> Result<Option<OwnedHandle>, ActionError> {
     let exe = std::env::current_exe().map_err(|e| ActionError::Other(e.to_string()))?;
-    let file = HSTRING::from(exe.as_os_str());
+    shell_execute(w!("runas"), exe.as_os_str(), args, owner, keep_process)
+}
+
+/// ShellExecuteEx `verb` on `file` with `args`; with `keep_process` it returns the new process's
+/// handle (`None` if Windows gave none). The calling thread gets a COM apartment for the call.
+fn shell_execute(
+    verb: PCWSTR,
+    file: &OsStr,
+    args: &str,
+    owner: isize,
+    keep_process: bool,
+) -> Result<Option<OwnedHandle>, ActionError> {
+    let _com = crate::startup::ComApartment::enter();
+    let file = HSTRING::from(file);
     let params = HSTRING::from(args);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         // Only the UAC prompt's owner (z-order): 0 means none, and a destroyed handle is tolerated.
         hwnd: HWND(owner as *mut c_void),
-        // The caller exits right after: the launch must complete inside this call.
-        fMask: SEE_MASK_NOASYNC,
-        lpVerb: w!("runas"),
+        // The caller may exit right after: the launch must complete inside this call.
+        fMask: if keep_process { SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS } else { SEE_MASK_NOASYNC },
+        lpVerb: verb,
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: PCWSTR(params.as_ptr()),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
     // SAFETY: `info` is initialised and its strings outlive the call.
-    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| ActionError::from_win(&e))
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| ActionError::from_win(&e))?;
+    // With SEE_MASK_NOCLOSEPROCESS the handle (if any) is ours to close: OwnedHandle does.
+    Ok((keep_process && !info.hProcess.is_invalid()).then_some(OwnedHandle(info.hProcess)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_elevated_commands_exit_code_is_its_result() {
+        assert_eq!(exit_status(0), Ok(()));
+        assert_eq!(exit_status(1), Err(ActionError::Other("the elevated command failed (exit code 1)".into())));
+        assert!(exit_status(2).is_err());
+    }
 }

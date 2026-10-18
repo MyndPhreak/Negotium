@@ -4,11 +4,13 @@
 use crate::controls::{Controls, header_click, sort_column_from_index, sort_column_index};
 use negotium_model::{Metric, Sort, SortColumn};
 use crate::install::{self, Install};
+use crate::integrate::Action;
 use crate::settings::{Saver, Settings, ThemeChoice, refresh_from_index};
 use crate::renderer::{self, Renderer};
 use crate::{MainWindow, platform};
 use slint::ComponentHandle;
-use std::cell::RefCell;
+use negotium_actions::ActionError;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -59,22 +61,172 @@ pub struct SettingsWiring {
     pub running: Renderer,
     /// The tray shows the CPU graph or the app icon (`crate::tray::set_enabled` in the app).
     pub tray_cpu_changed: Rc<dyn Fn(bool)>,
+    /// This copy, and what the Ctrl+Shift+Esc switch and "Open Windows Task Manager" act on.
+    pub integration: Integration,
+}
+
+/// What the Ctrl+Shift+Esc switch and "Open Windows Task Manager" read and run. The app passes
+/// the registry and the elevated `--integrate` command (`main.rs`); tests pass fakes.
+pub struct Integration {
+    /// This copy (`install::current()` in the app).
+    pub install: Install,
+    /// The exe taskmgr.exe's redirect names (`integrate::Machine::ifeo`).
+    pub redirect: Box<dyn Fn() -> Option<PathBuf>>,
+    /// Runs this exe with the arguments elevated (one UAC prompt; the `isize` is the window's
+    /// HWND, 0 for none) off the UI thread; the outcome comes back on the UI thread
+    /// ([`elevate_in_background`] in the app).
+    pub elevate: Box<dyn Fn(Vec<String>, isize, ElevatedDone)>,
+    /// Starts Windows' own Task Manager when no redirect of ours is in the way
+    /// ([`start_task_manager_in_background`] in the app).
+    pub start_task_manager: Box<dyn Fn()>,
+    /// Told whether the redirect is ours each time it is read (the tray offers "Open Windows Task
+    /// Manager" only then).
+    pub redirect_shown: Box<dyn Fn(bool)>,
+}
+
+/// An elevated command's outcome, delivered on the UI thread.
+pub type ElevatedDone = Box<dyn FnOnce(Result<(), ActionError>)>;
+
+/// The Ctrl+Shift+Esc switch and "Open Windows Task Manager", wired. One elevated command at a
+/// time: a click while a UAC prompt (or its command) is still open does nothing.
+pub struct Integrations {
+    io: Integration,
+    weak: slint::Weak<MainWindow>,
+    busy: Cell<bool>,
+}
+
+impl Integrations {
+    /// Whether the redirect names this copy; only the installed copy's redirect counts.
+    fn redirect_is_ours(&self) -> bool {
+        let install = &self.io.install;
+        install.installed && (self.io.redirect)().is_some_and(|exe| crate::integrate::same_path(&exe, &install.exe))
+    }
+
+    /// Reads the redirect again and shows it: the switch, and the tray menu.
+    pub fn show(&self) {
+        let ours = self.redirect_is_ours();
+        if let Some(ui) = self.weak.upgrade() {
+            ui.set_settings_hotkey(ours);
+        }
+        (self.io.redirect_shown)(ours);
+    }
+
+    /// The switch asked for `on`: the elevated hotkey-on/off. The switch shows the machine's
+    /// state again once the command returns, so a declined UAC prompt (nothing changed) snaps it
+    /// back.
+    pub fn toggle_hotkey(self: &Rc<Self>, on: bool) {
+        if !self.io.install.installed {
+            self.show();
+            return;
+        }
+        let action = if on { Action::HotkeyOn } else { Action::HotkeyOff };
+        self.run_elevated(action, |e| e.message("Open on Ctrl+Shift+Esc", false));
+    }
+
+    /// "Open Windows Task Manager" (Settings, the tray): with our redirect set, the elevated
+    /// open-task-manager lifts it while Task Manager starts; otherwise Task Manager just starts.
+    pub fn open_task_manager(self: &Rc<Self>) {
+        if self.redirect_is_ours() {
+            self.run_elevated(Action::OpenTaskManager, |e| {
+                format!("Couldn't open Windows Task Manager: {}.", e.to_string().trim_end_matches('.'))
+            });
+        } else if !self.busy.get() {
+            (self.io.start_task_manager)();
+        }
+    }
+
+    fn run_elevated(self: &Rc<Self>, action: Action, failure: fn(&ActionError) -> String) {
+        if self.busy.replace(true) {
+            self.show();
+            return;
+        }
+        let owner = self.weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
+        let this = self.clone();
+        (self.io.elevate)(
+            action.to_args(),
+            owner,
+            Box::new(move |result| {
+                this.busy.set(false);
+                this.show();
+                if let Err(e) = result
+                    && !matches!(e, ActionError::Cancelled)
+                    && let Some(ui) = this.weak.upgrade()
+                {
+                    ui.set_toast(failure(&e).into());
+                }
+            }),
+        );
+    }
+}
+
+thread_local! {
+    /// The elevated command's outcome handler, waiting on the UI thread (`Integrations` runs one
+    /// command at a time).
+    static ELEVATED_DONE: RefCell<Option<ElevatedDone>> = const { RefCell::new(None) };
+}
+
+/// The app's [`Integration::elevate`]: `negotium_actions::run_elevated` on its own thread (it
+/// waits for the UAC prompt and the command), then `done` on the UI thread. A failure is logged
+/// (the command logs its own reason). Called on the UI thread; never by tests.
+pub fn elevate_in_background(args: Vec<String>, owner: isize, done: ElevatedDone) {
+    ELEVATED_DONE.with(|d| *d.borrow_mut() = Some(done));
+    std::thread::spawn(move || {
+        let command = args.join(" ");
+        let result = negotium_actions::run_elevated(&command, owner);
+        if let Err(e) = &result
+            && !matches!(e, ActionError::Cancelled)
+        {
+            crate::log::Log::new(crate::log::Log::default_path()).warn(&format!("{command} failed: {e}"));
+        }
+        // Fails only once the event loop is gone (quitting): nothing left to show.
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(done) = ELEVATED_DONE.with(|d| d.borrow_mut().take()) {
+                done(result);
+            }
+        });
+    });
+}
+
+/// The app's [`Integration::start_task_manager`]: Windows' own Task Manager through the shell (so
+/// its "highest available" manifest gets its UAC prompt), on its own thread. A failure is logged.
+/// Never called by tests.
+pub fn start_task_manager_in_background() {
+    std::thread::spawn(|| {
+        let started = crate::integrate::task_manager_path()
+            .ok_or_else(|| ActionError::Other("System32 could not be found".into()))
+            .and_then(|path| negotium_actions::shell_open(&path, 0));
+        if let Err(e) = started
+            && !matches!(e, ActionError::Cancelled)
+        {
+            crate::log::Log::new(crate::log::Log::default_path())
+                .warn(&format!("Windows Task Manager could not be started: {e}"));
+        }
+    });
 }
 
 impl SettingsWiring {
-    /// Shows the GPU switch's launch state and connects the page's callbacks.
-    pub fn install(self, ui: &MainWindow) {
+    /// Shows the GPU switch's launch state and connects the page's callbacks. Returns the
+    /// Ctrl+Shift+Esc and Task Manager handlers, which the tray uses too.
+    pub fn install(self, ui: &MainWindow) -> Rc<Integrations> {
         ui.set_settings_gpu_fallback(self.fallback_recorded);
         ui.set_settings_gpu_running(self.running == Renderer::Gpu);
         ui.set_settings_gpu_env_override(self.running == Renderer::FromEnv);
-        show_install(ui, &install::current());
+        show_install(ui, &self.integration.install);
+        let integrations = Rc::new(Integrations { io: self.integration, weak: ui.as_weak(), busy: Cell::new(false) });
+        integrations.show();
+        {
+            let integrations = integrations.clone();
+            ui.on_hotkey_toggled(move |on| integrations.toggle_hotkey(on));
+        }
+        {
+            let integrations = integrations.clone();
+            ui.on_open_windows_task_manager(move || integrations.open_task_manager());
+        }
         // Filled in by the tasks that implement them; until then the page only asks.
         ui.on_admin_mode_toggled(|_| {});
-        ui.on_hotkey_toggled(|_| {});
         ui.on_start_with_windows_toggled(|_| {});
         ui.on_check_updates_toggled(|_| {});
         ui.on_check_updates_now(|| {});
-        ui.on_open_windows_task_manager(|| {});
         let change = Rc::new(Change { settings: self.settings, saver: self.saver, weak: ui.as_weak() });
         let controls = self.controls;
         {
@@ -178,6 +330,7 @@ impl SettingsWiring {
                 }));
             });
         }
+        integrations
     }
 }
 
