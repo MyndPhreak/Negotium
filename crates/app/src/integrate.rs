@@ -105,13 +105,14 @@ where
 }
 
 /// The admin task's state, as Task Scheduler reports it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskState {
     Missing,
     Ready,
     Disabled,
-    /// Registered but unusable (wrong action, failed last run, unreadable definition).
-    Broken,
+    /// Registered but unusable (wrong action, failed last start, unreadable), with the reason for
+    /// the log and Settings' "needs repair".
+    Broken(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,7 +194,7 @@ fn installed_exe(ctx: &Ctx) -> Result<PathBuf, IntegrateError> {
 /// name (no path separators or wildcards).
 fn user_sid(ctx: &Ctx) -> Result<String, IntegrateError> {
     let sid = ctx.user_sid.as_str();
-    if integration::is_string_sid(sid) { Ok(sid.to_string()) } else { Err(IntegrateError::BadSid(sid.to_string())) }
+    if integration::is_account_sid(sid) { Ok(sid.to_string()) } else { Err(IntegrateError::BadSid(sid.to_string())) }
 }
 
 /// The Run value: the installed exe, quoted (Program Files has a space), started in the tray.
@@ -222,8 +223,16 @@ pub fn run(action: Action, ctx: &Ctx) -> Result<(), IntegrateError> {
     match action {
         Action::HotkeyOn => machine.set_ifeo(Some(&exe)),
         Action::HotkeyOff => clear_redirect(machine, &exe),
-        Action::StartupOn => machine.set_run(Some(&run_command(&exe))),
-        Action::StartupOff => machine.set_run(None),
+        // HKCU's Run value belongs to the user running this; a service account (SYSTEM, from an
+        // installer step) has no sign-in to start at, so it is refused like admin mode.
+        Action::StartupOn => {
+            user_sid(ctx)?;
+            machine.set_run(Some(&run_command(&exe)))
+        }
+        Action::StartupOff => {
+            user_sid(ctx)?;
+            machine.set_run(None)
+        }
         Action::AdminOn { logon } => machine.create_task(&user_sid(ctx)?, &exe, logon),
         Action::AdminOff => machine.delete_task(&user_sid(ctx)?),
         Action::OpenTaskManager => Err(IntegrateError::NotImplemented("open-task-manager")),
@@ -327,7 +336,7 @@ fn task_state(status: TaskStatus) -> TaskState {
         TaskStatus::Missing => TaskState::Missing,
         TaskStatus::Ready => TaskState::Ready,
         TaskStatus::Disabled => TaskState::Disabled,
-        TaskStatus::Broken => TaskState::Broken,
+        TaskStatus::Broken(why) => TaskState::Broken(why),
     }
 }
 
@@ -526,6 +535,35 @@ mod tests {
         assert!(fake.calls.borrow().is_empty());
     }
 
+    /// An installer step running as SYSTEM (or another service account) fails loudly: no task
+    /// `\Negotium\S-1-5-18` and no Run value in SYSTEM's HKCU. Uninstall still cleans up.
+    #[test]
+    fn admin_mode_and_startup_refuse_service_and_well_known_sids() {
+        let root = Root::new();
+        let fake = Fake::default();
+        let refused = [
+            Action::AdminOn { logon: false },
+            Action::AdminOn { logon: true },
+            Action::AdminOff,
+            Action::StartupOn,
+            Action::StartupOff,
+        ];
+        for sid in ["S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-32-544", "S-1-1-0", "S-1-5-21-1-2-3"] {
+            let ctx = Ctx { user_sid: sid.to_string(), ..root.ctx(&fake) };
+            for action in refused {
+                assert_eq!(run(action, &ctx), Err(IntegrateError::BadSid(sid.to_string())), "{action:?} {sid}");
+            }
+        }
+        assert!(fake.calls.borrow().is_empty(), "{:?}", fake.calls.borrow());
+        let ctx = Ctx { user_sid: "S-1-5-18".into(), ..root.ctx(&fake) };
+        run(Action::HotkeyOn, &ctx).unwrap();
+        run(Action::Uninstall, &ctx).unwrap();
+        // An Entra ID account is a user.
+        let ctx = Ctx { user_sid: "S-1-12-1-1885673120-1143434361-2093374368-2546219385".into(), ..root.ctx(&fake) };
+        run(Action::AdminOn { logon: false }, &ctx).unwrap();
+        run(Action::StartupOn, &ctx).unwrap();
+    }
+
     #[test]
     fn open_task_manager_is_not_implemented_yet() {
         let root = Root::new();
@@ -655,7 +693,7 @@ mod tests {
             (TaskStatus::Missing, TaskState::Missing),
             (TaskStatus::Ready, TaskState::Ready),
             (TaskStatus::Disabled, TaskState::Disabled),
-            (TaskStatus::Broken, TaskState::Broken),
+            (TaskStatus::Broken("why".into()), TaskState::Broken("why".into())),
         ] {
             assert_eq!(task_state(status), state);
         }

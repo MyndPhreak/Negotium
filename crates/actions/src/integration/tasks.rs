@@ -5,7 +5,7 @@
 //!
 //! The action's arguments are `<prefix> $(Arg0)`: `start_task` passes its arguments as that one
 //! value (Task Scheduler substitutes it), so a start can carry e.g. a page to open.
-use super::{Roots, is_string_sid};
+use super::{Roots, is_account_sid};
 use crate::ActionError;
 use crate::startup::ComApartment;
 use std::path::{Path, PathBuf};
@@ -37,14 +37,15 @@ pub struct TaskView {
     pub last_result: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskStatus {
     Missing,
     Ready,
     Disabled,
-    /// Registered but unusable: not exactly one exec action, its exe is gone, the last start
-    /// failed, or the task can't be read.
-    Broken,
+    /// Registered but unusable, or unreadable, with the reason (for the log and "needs repair"):
+    /// not exactly one exec action, its exe is gone, the last start failed, or the task, its
+    /// folder or Task Scheduler couldn't be read.
+    Broken(String),
 }
 
 /// Whether `LastTaskResult` says Task Scheduler couldn't start the task (an HRESULT of the Win32
@@ -61,12 +62,24 @@ pub fn task_status(view: Option<&TaskView>, exists: impl Fn(&Path) -> bool) -> T
     let Some(view) = view else {
         return TaskStatus::Missing;
     };
-    let exe_ok = match view.exec_paths.as_slice() {
-        [path] if view.other_actions == 0 => exists(&action_path(path)),
-        _ => false,
-    };
-    if !exe_ok || failed_to_start(view.last_result) {
-        TaskStatus::Broken
+    let broken = |why: String| TaskStatus::Broken(why);
+    match view.exec_paths.as_slice() {
+        [path] if view.other_actions == 0 => {
+            let exe = action_path(path);
+            if !exists(&exe) {
+                return broken(format!("its program is missing: {}", exe.display()));
+            }
+        }
+        _ => {
+            return broken(format!(
+                "it has {} program and {} other actions, not one program",
+                view.exec_paths.len(),
+                view.other_actions
+            ));
+        }
+    }
+    if failed_to_start(view.last_result) {
+        broken(format!("its last start failed (0x{:08X})", view.last_result as u32))
     } else if !view.enabled || view.state_disabled {
         TaskStatus::Disabled
     } else {
@@ -193,18 +206,25 @@ fn is_not_found(e: &windows::core::Error) -> bool {
     code == ERROR_FILE_NOT_FOUND.to_hresult() || code == ERROR_PATH_NOT_FOUND.to_hresult()
 }
 
-/// `\<name>`, for a folder name without separators.
+/// A name Task Scheduler takes as one plain component: `[A-Za-z0-9_-]+` (so never `.`, `..`,
+/// a separator, a wildcard or whitespace).
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// `\<name>`, for a plain folder name (`is_plain_name`).
 fn folder_path(roots: &Roots) -> Result<BSTR, ActionError> {
     let name = roots.task_folder.as_str();
-    if name.is_empty() || name.contains(['\\', '/']) || name.trim() != name {
+    if !is_plain_name(name) {
         return Err(ActionError::Other(format!("not a task folder name: {name:?}")));
     }
     Ok(BSTR::from(format!("\\{name}")))
 }
 
+/// The task's name: an account SID (`is_account_sid`), which is also a plain name.
 fn task_name(sid: &str) -> Result<BSTR, ActionError> {
-    if !is_string_sid(sid) {
-        return Err(ActionError::Other(format!("not a user SID: {sid:?}")));
+    if !is_account_sid(sid) || !is_plain_name(sid) {
+        return Err(ActionError::Other(format!("not a user account's SID: {sid:?}")));
     }
     Ok(BSTR::from(sid))
 }
@@ -312,21 +332,27 @@ fn view(task: &IRegisteredTask) -> windows::core::Result<TaskView> {
     }
 }
 
-/// User `sid`'s task state; a task (or folder) that exists but can't be read is `Broken`.
+/// User `sid`'s task state. Anything that stops it being read (a bad SID or folder name, COM,
+/// Task Scheduler not running, access) is `Broken` with that reason.
 pub fn task_state(roots: &Roots, sid: &str) -> TaskStatus {
     let _com = ComApartment::enter();
     let read = || -> Result<Option<TaskView>, ActionError> {
+        // Names first: a bad one never reaches Task Scheduler.
+        task_name(sid)?;
+        folder_path(roots)?;
         let service = service()?;
         registered(&service, roots, sid)?.map(|t| view(&t).map_err(com)).transpose()
     };
     match read() {
         Ok(v) => task_status(v.as_ref(), Path::is_file),
-        Err(_) => TaskStatus::Broken,
+        Err(e) => TaskStatus::Broken(format!("it couldn't be read: {e}")),
     }
 }
 
 /// Starts user `sid`'s task now, with `args` as its `$(Arg0)` (`join_args`).
 pub fn start_task(roots: &Roots, sid: &str, args: &[String]) -> Result<(), ActionError> {
+    task_name(sid)?;
+    folder_path(roots)?;
     let _com = ComApartment::enter();
     let service = service()?;
     let task = registered(&service, roots, sid)?
@@ -340,6 +366,7 @@ pub fn start_task(roots: &Roots, sid: &str, args: &[String]) -> Result<(), Actio
 /// Deletes user `sid`'s task (a missing task or folder is fine); the folder stays.
 pub fn delete_task(roots: &Roots, sid: &str) -> Result<(), ActionError> {
     let name = task_name(sid)?;
+    folder_path(roots)?;
     let _com = ComApartment::enter();
     let service = service()?;
     let Some(folder) = folder(&service, roots)? else {
@@ -485,14 +512,20 @@ mod tests {
         assert_eq!(st(view(&[EXE], 0, true, false, hr(0xC000_0005))), TaskStatus::Ready, "a crash isn't a broken task");
         assert_eq!(st(view(&[EXE], 0, false, false, 0)), TaskStatus::Disabled);
         assert_eq!(st(view(&[EXE], 0, true, true, 0)), TaskStatus::Disabled);
-        // Broken: the exe is gone, the action isn't one exec action, the last start failed.
-        assert_eq!(st(view(&[r"C:\gone\negotium.exe"], 0, true, false, 0)), TaskStatus::Broken);
-        assert_eq!(st(view(&[], 0, true, false, 0)), TaskStatus::Broken);
-        assert_eq!(st(view(&[EXE, EXE], 0, true, false, 0)), TaskStatus::Broken);
-        assert_eq!(st(view(&[EXE], 1, true, false, 0)), TaskStatus::Broken);
-        assert_eq!(st(view(&[EXE], 0, true, false, hr(0x8007_0002))), TaskStatus::Broken);
-        assert_eq!(st(view(&[EXE], 0, true, false, hr(0x8004_1315))), TaskStatus::Broken);
-        assert_eq!(st(view(&[r"C:\gone\negotium.exe"], 0, false, false, 0)), TaskStatus::Broken, "broken wins");
+        // Broken, with the reason: the exe is gone, the action isn't one exec action, the last
+        // start failed.
+        let reason = |v: TaskView| match st(v) {
+            TaskStatus::Broken(why) => why,
+            other => panic!("not broken: {other:?}"),
+        };
+        let gone = r"C:\gone\negotium.exe";
+        assert_eq!(reason(view(&[gone], 0, true, false, 0)), format!("its program is missing: {gone}"));
+        assert_eq!(reason(view(&[], 0, true, false, 0)), "it has 0 program and 0 other actions, not one program");
+        assert_eq!(reason(view(&[EXE, EXE], 0, true, false, 0)), "it has 2 program and 0 other actions, not one program");
+        assert_eq!(reason(view(&[EXE], 1, true, false, 0)), "it has 1 program and 1 other actions, not one program");
+        assert_eq!(reason(view(&[EXE], 0, true, false, hr(0x8007_0002))), "its last start failed (0x80070002)");
+        assert_eq!(reason(view(&[EXE], 0, true, false, hr(0x8004_1315))), "its last start failed (0x80041315)");
+        assert!(matches!(st(view(&[gone], 0, false, false, 0)), TaskStatus::Broken(_)), "broken wins");
     }
 
     #[test]
@@ -507,13 +540,25 @@ mod tests {
 
     #[test]
     fn names_are_checked_before_task_scheduler_is_asked() {
-        for bad in ["", r"a\b", "a/b", " x", r"Negotium\..\Microsoft"] {
+        for bad in ["", ".", "..", r"a\b", "a/b", " x", "x ", "a.b", "a*", "Négotium", r"Negotium\..\Microsoft"] {
             let roots = Roots { task_folder: bad.into(), ..Roots::system() };
             assert!(folder_path(&roots).is_err(), "{bad:?}");
             assert!(matches!(delete_task_folder(&roots), Err(ActionError::Other(_))), "{bad:?}");
+            // Refused before COM, so the reason names the folder.
+            match task_state(&roots, SID) {
+                TaskStatus::Broken(why) => assert!(why.contains("not a task folder name"), "{why}"),
+                other => panic!("{bad:?}: {other:?}"),
+            }
         }
-        assert!(matches!(delete_task(&Roots::system(), r"..\x"), Err(ActionError::Other(_))));
-        assert!(matches!(create_task(&Roots::system(), "*", Path::new(EXE), "", false), Err(ActionError::Other(_))));
+        for good in ["Negotium", "Negotium-test-1234", "a_b"] {
+            let roots = Roots { task_folder: good.into(), ..Roots::system() };
+            assert_eq!(folder_path(&roots).unwrap(), format!("\\{good}"));
+        }
+        for bad in [r"..\x", "*", ".", "S-1-5-18", "S-1-5-21-1-2-3"] {
+            assert!(matches!(delete_task(&Roots::system(), bad), Err(ActionError::Other(_))), "{bad}");
+            assert!(matches!(create_task(&Roots::system(), bad, Path::new(EXE), "", false), Err(ActionError::Other(_))), "{bad}");
+            assert!(matches!(start_task(&Roots::system(), bad, &[]), Err(ActionError::Other(_))), "{bad}");
+        }
         assert_eq!(folder_path(&Roots::system()).unwrap(), "\\Negotium");
     }
 
@@ -549,7 +594,7 @@ mod tests {
         // A task whose exe is gone reads as broken.
         let gone = std::env::temp_dir().join(format!("negotium-test-gone-{}.exe", std::process::id()));
         create_task(&roots, &sid, &gone, "/c", false).unwrap();
-        assert_eq!(task_state(&roots, &sid), TaskStatus::Broken);
+        assert!(matches!(task_state(&roots, &sid), TaskStatus::Broken(why) if why.contains("missing")));
         // The folder goes with every task in it.
         create_task(&roots, &sid, &cmd, "/c", false).unwrap();
         delete_task_folder(&roots).unwrap();

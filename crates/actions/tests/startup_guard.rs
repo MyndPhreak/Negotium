@@ -34,3 +34,14 @@ fn a_process_that_never_unlocks_may_not_write_the_integration_values() {
     assert!(!registry::may_write_value(&ifeo, "Debugger"));
     assert!(!registry::may_write_value(&run, "Negotium"));
 }
+
+/// The unit tests' test-image sandbox (`negotium-test-<digits>.exe`) is compiled only into that
+/// crate's own test build: the library this binary links, like the app's, refuses it.
+#[test]
+fn the_production_guard_refuses_a_test_images_redirect() {
+    for image in ["negotium-test-42.exe", &format!("negotium-test-{}.exe", std::process::id())] {
+        let key = RegKey::new(Hive::LocalMachine, &format!(r"{}\{image}", registry::IFEO_ROOT));
+        assert!(!registry::may_write_value(&key, "Debugger"), "{}", key.display());
+        assert!(!registry::may_write(&key), "{}", key.display());
+    }
+}

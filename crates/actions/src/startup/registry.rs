@@ -4,7 +4,8 @@
 //! even then anything but the startup state keys a toggle writes (`may_write`) and the two
 //! integration values (`may_write_value`: the taskmgr.exe redirect and the HKCU Run value).
 //! `delete_value` removes a value under the same check. Elevated tests get one more sandbox: the
-//! `Debugger` value of a made-up image `negotium-test-<digits>.exe` (`is_test_ifeo_value`).
+//! `Debugger` value of a made-up image `negotium-test-<digits>.exe` (`is_test_ifeo_value`), in
+//! this crate's unit-test builds only.
 use crate::ActionError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::{
@@ -14,7 +15,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD,
     REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND,
-    RRF_RT_ANY, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegDeleteTreeW, RegDeleteValueW,
+    RRF_RT_ANY, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
     RegEnumKeyExW, RegEnumValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
@@ -235,16 +236,20 @@ fn may_write_value_with(key: &RegKey, name: &str, unlocked: bool) -> bool {
 /// Image File Execution Options: one subkey per image name.
 pub const IFEO_ROOT: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
 /// Elevated tests' image names, `negotium-test-<digits>.exe` (`test_ifeo_image`): no real program
-/// is called that, so redirecting one changes nothing that runs.
-pub const TEST_IFEO_PREFIX: &str = "negotium-test-";
+/// is called that, so redirecting one changes nothing that runs. Unit-test builds only: the guard
+/// of every other build (the app, integration tests) allows exactly the two integration values.
+#[cfg(test)]
+pub(crate) const TEST_IFEO_PREFIX: &str = "negotium-test-";
 
 /// This process's test image name, `negotium-test-<pid>.exe`.
-pub fn test_ifeo_image() -> String {
+#[cfg(test)]
+pub(crate) fn test_ifeo_image() -> String {
     format!("{TEST_IFEO_PREFIX}{}.exe", std::process::id())
 }
 
 /// `HKLM\…\Image File Execution Options\negotium-test-<digits>.exe` exactly (names compare
 /// case-insensitively; no subkey, no doubled or trailing backslash).
+#[cfg(test)]
 fn is_test_ifeo_key(key: &RegKey) -> bool {
     let prefix = format!("{IFEO_ROOT}\\");
     if key.hive != Hive::LocalMachine
@@ -259,9 +264,17 @@ fn is_test_ifeo_key(key: &RegKey) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// A test image's `Debugger` value: writable without the unlock, like the HKCU sandbox.
+/// A test image's `Debugger` value: writable without the unlock, like the HKCU sandbox, in this
+/// crate's unit tests only.
+#[cfg(test)]
 fn is_test_ifeo_value(key: &RegKey, name: &str) -> bool {
     is_test_ifeo_key(key) && name.eq_ignore_ascii_case("Debugger")
+}
+
+/// Outside this crate's unit tests no test image is writable.
+#[cfg(not(test))]
+fn is_test_ifeo_value(_: &RegKey, _: &str) -> bool {
+    false
 }
 
 /// The Ctrl+Shift+Esc redirect's key (its `Debugger` value is the only one written).
@@ -546,13 +559,14 @@ pub fn delete_value(key: &RegKey, name: &str) -> Result<(), ActionError> {
 
 /// Deletes an elevated test's image key (`negotium-test-<digits>.exe` under IFEO, created by
 /// writing its `Debugger` value). Refuses every other key; a missing one is fine.
-pub fn delete_test_ifeo_key(key: &RegKey) -> Result<(), ActionError> {
+#[cfg(test)]
+pub(crate) fn delete_test_ifeo_key(key: &RegKey) -> Result<(), ActionError> {
     if !is_test_ifeo_key(key) {
         return Err(ActionError::Other(format!("refusing to delete {}", key.display())));
     }
     let path = HSTRING::from(key.path.as_str());
     // SAFETY: deletes one HKLM key (only if it has no subkeys) checked to be a test image's.
-    match unsafe { RegDeleteKeyW(HKEY_LOCAL_MACHINE, &path) } {
+    match unsafe { windows::Win32::System::Registry::RegDeleteKeyW(HKEY_LOCAL_MACHINE, &path) } {
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
         e => Err(error(e)),
     }
