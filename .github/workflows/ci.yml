@@ -33,3 +33,9 @@ jobs:
       # flaky, listed in the plan's follow-ups); it must not block CI.
       - name: Test
         run: cargo test --workspace -- --skip busy_child_reports_one_core_of_cpu
+      # The MSI ships only negotium.exe: it must not need the Visual C++ Redistributable.
+      - name: Build release
+        run: cargo build --release -p negotium
+      - name: Check the release exe imports no Visual C++ runtime
+        shell: pwsh
+        run: ./.github/scripts/check-imports.ps1 target/release/negotium.exe
