@@ -277,7 +277,7 @@ pub fn parse_smbios_memory(raw: &[u8]) -> MemoryHardware {
         return MemoryHardware::default();
     };
     let len = u32::from_le_bytes(len_bytes) as usize;
-    let Some(table) = raw.get(8..8usize.checked_add(len).unwrap_or(usize::MAX)).or_else(|| raw.get(8..)) else {
+    let Some(table) = raw.get(8..8usize.saturating_add(len)).or_else(|| raw.get(8..)) else {
         return MemoryHardware::default();
     };
     let mut best_speed: Option<u32> = None;
@@ -448,7 +448,7 @@ fn query_physical_drive(number: u32) -> Option<DiskInfo> {
         )
     }
     .is_ok()
-        .then(|| seek_ret >= 9)
+        .then_some(seek_ret >= 9)
         .filter(|&ok| ok)
         .map(|_| seek_buf[8] != 0);
 

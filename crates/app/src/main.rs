@@ -681,15 +681,15 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let weak = weak.clone();
             std::thread::spawn(move || {
-                if let Err(e) = negotium_actions::runtask::run_new_task(&opts, owner) {
-                    if !matches!(e, negotium_actions::ActionError::Cancelled) {
-                        let msg = format!("Could not run task: {e}");
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.set_toast(msg.into());
-                            }
-                        });
-                    }
+                if let Err(e) = negotium_actions::runtask::run_new_task(&opts, owner)
+                    && !matches!(e, negotium_actions::ActionError::Cancelled)
+                {
+                    let msg = format!("Could not run task: {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_toast(msg.into());
+                        }
+                    });
                 }
             });
         });

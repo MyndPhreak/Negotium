@@ -276,7 +276,7 @@ fn launch_low_integrity(
     }
     let _free_sid = FreeSid(low_sid);
 
-    let tml = TOKEN_MANDATORY_LABEL { Label: SID_AND_ATTRIBUTES { Sid: low_sid, Attributes: SE_GROUP_INTEGRITY as u32 } };
+    let tml = TOKEN_MANDATORY_LABEL { Label: SID_AND_ATTRIBUTES { Sid: low_sid, Attributes: SE_GROUP_INTEGRITY } };
     // SAFETY: sets the restricted token's integrity level to Low.
     unsafe {
         SetTokenInformation(
