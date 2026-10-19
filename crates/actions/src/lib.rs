@@ -6,6 +6,8 @@ mod efficiency;
 mod elevation;
 pub mod integration;
 mod location;
+pub mod runtask;
+pub mod services;
 pub mod startup;
 mod terminate;
 

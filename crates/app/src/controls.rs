@@ -15,10 +15,19 @@ pub enum Page {
     Performance = 1,
     Startup = 2,
     Settings = 3,
+    AppHistory = 4,
+    Services = 5,
 }
 
 impl Page {
-    pub const ALL: [Page; 4] = [Page::Overview, Page::Performance, Page::Startup, Page::Settings];
+    pub const ALL: [Page; 6] = [
+        Page::Overview,
+        Page::Performance,
+        Page::Startup,
+        Page::Settings,
+        Page::AppHistory,
+        Page::Services,
+    ];
 
     /// Unknown indexes fall back to the Overview.
     pub fn from_index(i: i32) -> Page {
@@ -26,6 +35,8 @@ impl Page {
             1 => Page::Performance,
             2 => Page::Startup,
             3 => Page::Settings,
+            4 => Page::AppHistory,
+            5 => Page::Services,
             _ => Page::Overview,
         }
     }
@@ -41,6 +52,8 @@ impl Page {
             Page::Performance => "performance",
             Page::Startup => "startup",
             Page::Settings => "settings",
+            Page::AppHistory => "history",
+            Page::Services => "services",
         }
     }
 
@@ -98,6 +111,11 @@ pub struct Controls {
     /// The list's sort packed as `column + 1` in the low bits (0 = name) and the direction in bit 7,
     /// so the worker reads both in one load.
     sort: AtomicU8,
+    /// App History sort column (low bits, 0 = Name, 1 = CPU, 2 = Net, 3 = Disk, 4 = Peak Mem) and
+    /// direction in bit 7.
+    history_sort: AtomicU8,
+    /// Reset cumulative app history on the next worker tick.
+    reset_history: AtomicBool,
     /// Overview list grouped under Apps / Background processes / Windows processes headings.
     grouped: AtomicBool,
     page: AtomicU8,
@@ -133,6 +151,8 @@ impl Default for Controls {
         Self {
             metric: AtomicU8::new(0),
             sort: AtomicU8::new(pack_sort(Sort::default())),
+            history_sort: AtomicU8::new(1 | DESCENDING_BIT),
+            reset_history: AtomicBool::new(false),
             grouped: AtomicBool::new(true),
             page: AtomicU8::new(Page::Overview as u8),
             perf: Mutex::new(("cpu".to_string(), Range::Minute)),
@@ -165,6 +185,22 @@ impl Controls {
     pub fn sort(&self) -> Sort {
         let v = self.sort.load(Ordering::Relaxed);
         Sort { column: sort_column_from_index((v & !DESCENDING_BIT) as i32 - 1), descending: v & DESCENDING_BIT != 0 }
+    }
+    pub fn set_history_sort(&self, col: i32, descending: bool) {
+        let packed = (col.clamp(0, 4) as u8) | if descending { DESCENDING_BIT } else { 0 };
+        self.history_sort.store(packed, Ordering::Relaxed);
+        self.poke();
+    }
+    pub fn history_sort(&self) -> (i32, bool) {
+        let v = self.history_sort.load(Ordering::Relaxed);
+        ((v & !DESCENDING_BIT) as i32, v & DESCENDING_BIT != 0)
+    }
+    pub fn request_reset_history(&self) {
+        self.reset_history.store(true, Ordering::Relaxed);
+        self.poke();
+    }
+    pub fn take_reset_history(&self) -> bool {
+        self.reset_history.swap(false, Ordering::Relaxed)
     }
     pub fn set_grouped(&self, on: bool) {
         self.grouped.store(on, Ordering::Relaxed);
@@ -358,8 +394,10 @@ mod tests {
         c.adopt_device("cpu");
         assert!(!c.wait(Duration::from_millis(20)), "a fallback adopted from a frame needs no new frame");
         assert_eq!(c.perf().0, "cpu");
-        assert_eq!(Page::ALL.map(Page::index), [0, 1, 2, 3]);
+        assert_eq!(Page::ALL.map(Page::index), [0, 1, 2, 3, 4, 5]);
         assert_eq!(Page::from_index(3), Page::Settings);
+        assert_eq!(Page::from_index(4), Page::AppHistory);
+        assert_eq!(Page::from_index(5), Page::Services);
         assert_eq!(Page::from_index(9), Page::Overview, "unknown pages fall back to the Overview");
         assert_eq!(Page::from_index(-2), Page::Overview);
     }
@@ -384,7 +422,7 @@ mod tests {
             assert_eq!(page_from_args(["negotium.exe".to_string(), junk.to_string()]), None, "{junk}");
         }
         assert_eq!(Page::from_name("Performance"), Some(Page::Performance));
-        assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings"]);
+        assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings", "history", "services"]);
     }
 
     #[test]

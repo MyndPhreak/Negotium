@@ -7,7 +7,10 @@ use crate::perf::{GraphView, PerfFrame};
 use crate::smooth::{self, Scroll};
 use crate::view::{Frame, RowKind, RowView, SECTION_APPS, Target, close_cards, row_height, visible_rows};
 use crate::worker::SharedHistory;
-use crate::{DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData, StartupData, StatData, TileData};
+use crate::{
+    AppHistoryData, DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData,
+    ServiceData, StartupData, StatData, TileData,
+};
 use negotium_actions::startup::StartupEntry;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
@@ -376,7 +379,16 @@ pub struct Bridge {
     banner_dismissed: bool,
     /// The startup entries as last listed; a Startup row's id indexes them.
     startup: Vec<StartupEntry>,
+    startup_elevated: bool,
+    startup_sort_col: i32,
+    startup_sort_desc: bool,
     startup_rows: Rc<VecModel<StartupData>>,
+    history_rows: Rc<VecModel<AppHistoryData>>,
+    services: Vec<negotium_actions::services::ServiceEntry>,
+    services_search: String,
+    services_sort_col: i32,
+    services_sort_desc: bool,
+    service_rows: Rc<VecModel<ServiceData>>,
     /// Program icons by image path, and where the ones not yet seen are requested (none in
     /// tests that don't set one: rows then show no icons).
     icons: IconCache,
@@ -429,7 +441,16 @@ impl Bridge {
             list_generation: 0,
             banner_dismissed: false,
             startup: Vec::new(),
+            startup_elevated: false,
+            startup_sort_col: 0,
+            startup_sort_desc: false,
             startup_rows: Rc::new(VecModel::default()),
+            history_rows: Rc::new(VecModel::default()),
+            services: Vec::new(),
+            services_search: String::new(),
+            services_sort_col: 0,
+            services_sort_desc: false,
+            service_rows: Rc::new(VecModel::default()),
             icons: IconCache::default(),
             icon_loader: None,
             icons_pending: false,
@@ -448,6 +469,8 @@ impl Bridge {
         ui.set_perf_segments(ModelRc::from(b.perf_segments.clone()));
         ui.set_scrub_rows(ModelRc::from(b.scrub_rows.clone()));
         ui.set_startup_rows(ModelRc::from(b.startup_rows.clone()));
+        ui.set_history_rows(ModelRc::from(b.history_rows.clone()));
+        ui.set_service_rows(ModelRc::from(b.service_rows.clone()));
         let epoch = b.epoch.clone();
         smooth::install(ui, move || epoch.get().elapsed());
         Rc::new(RefCell::new(b))
@@ -470,7 +493,7 @@ impl Bridge {
             // Likewise the hidden graphs: end any scrub.
             self.scrub(ui, -1.0);
         }
-        if matches!(page, Page::Startup | Page::Settings) {
+        if matches!(page, Page::Startup | Page::Settings | Page::AppHistory | Page::Services) {
             // No graphs there, and no frames: the view rests on the newest sample (PF3).
             self.rest(ui);
         }
@@ -489,8 +512,9 @@ impl Bridge {
                     self.apply_perf(ui, perf);
                 }
             }
+            Page::AppHistory => self.apply_history(ui, frame),
             // The worker builds no frame for these (nothing on them changes per tick).
-            Page::Startup | Page::Settings => {}
+            Page::Startup | Page::Settings | Page::Services => {}
         }
     }
 
@@ -503,7 +527,8 @@ impl Bridge {
             self.controls.adopt_device(&p.selected); // that device is gone: CPU stands in, and stays
         }
         sync_model(&*self.perf_devices, p.devices.iter().map(|d| DeviceData {
-            id: d.id.as_str().into(), title: d.title.as_str().into(), value: d.value.as_str().into(), spark: d.spark.as_str().into(),
+            id: d.id.as_str().into(), title: d.title.as_str().into(), subtitle: d.subtitle.as_str().into(),
+            value: d.value.as_str().into(), spark: d.spark.as_str().into(),
         }).collect());
         ui.set_perf_selected(p.selected.as_str().into());
         ui.set_perf_title(p.title.as_str().into());
@@ -581,15 +606,35 @@ impl Bridge {
     /// A startup list (or a toggle's re-read) landed: the Startup page shows it, and the next job
     /// may start.
     pub fn set_startup(&mut self, ui: &MainWindow, entries: Vec<StartupEntry>, elevated: bool) {
-        let rows = crate::startup::startup_rows(&entries, elevated);
+        self.startup = entries;
+        self.startup_elevated = elevated;
+        self.sync_startup_rows();
+        ui.set_startup_admin_banner(crate::startup::needs_admin_banner(&self.startup, elevated));
+        ui.set_startup_loading(false);
+    }
+
+    pub fn sort_startup(&mut self, ui: &MainWindow, col: i32) {
+        if col == self.startup_sort_col {
+            self.startup_sort_desc = !self.startup_sort_desc;
+        } else {
+            self.startup_sort_col = col;
+            self.startup_sort_desc = false;
+        }
+        ui.set_startup_sort_column(self.startup_sort_col);
+        ui.set_startup_sort_descending(self.startup_sort_desc);
+        self.sync_startup_rows();
+    }
+
+    fn sync_startup_rows(&self) {
+        let mut rows = crate::startup::startup_rows(&self.startup, self.startup_elevated);
+        if self.startup_sort_col != 0 || self.startup_sort_desc {
+            crate::startup::sort_startup_rows(&mut rows, self.startup_sort_col, self.startup_sort_desc);
+        }
         sync_model(&*self.startup_rows, rows.iter().map(|r| StartupData {
             id: r.id, name: r.name.as_str().into(), publisher: r.publisher.as_str().into(), status: r.status.as_str().into(),
             location: r.location.as_str().into(), command: r.command.as_str().into(), enabled: r.enabled,
             can_change: r.can_change, note: r.note.as_str().into(),
         }).collect());
-        ui.set_startup_admin_banner(crate::startup::needs_admin_banner(&entries, elevated));
-        ui.set_startup_loading(false);
-        self.startup = entries;
     }
 
     /// The startup entries as last listed.
@@ -613,6 +658,87 @@ impl Bridge {
                 self.startup_rows.set_row_data(i, row);
             }
         }
+    }
+
+    fn apply_history(&mut self, ui: &MainWindow, frame: Frame) {
+        ui.set_history_duration(crate::format::uptime(frame.history_elapsed_s.max(1)).into());
+        let loader = self.icon_loader.as_deref();
+        let rows: Vec<AppHistoryData> = frame.history_rows.iter().map(|r| {
+            let icon = match loader {
+                Some(l) if !r.icon.is_empty() => self.icons.get(&r.icon, l),
+                _ => None,
+            };
+            AppHistoryData {
+                name: r.name.as_str().into(),
+                has_icon: icon.is_some(),
+                icon: icon.unwrap_or_else(|| self.no_icon.clone()),
+                running: r.running,
+                cpu_time: r.cpu_time.as_str().into(),
+                cpu_frac: r.cpu_frac,
+                net_data: r.net_data.as_str().into(),
+                net_frac: r.net_frac,
+                disk_data: r.disk_data.as_str().into(),
+                disk_frac: r.disk_frac,
+                peak_mem: r.peak_mem.as_str().into(),
+                mem_frac: r.mem_frac,
+            }
+        }).collect();
+        sync_model(&*self.history_rows, rows);
+    }
+
+    pub fn set_services(&mut self, ui: &MainWindow, entries: Vec<negotium_actions::services::ServiceEntry>) {
+        self.services = entries;
+        self.sync_service_rows();
+        ui.set_services_loading(false);
+    }
+
+    pub fn sort_services(&mut self, ui: &MainWindow, col: i32) {
+        if col == self.services_sort_col {
+            self.services_sort_desc = !self.services_sort_desc;
+        } else {
+            self.services_sort_col = col;
+            self.services_sort_desc = false;
+        }
+        ui.set_services_sort_column(self.services_sort_col);
+        ui.set_services_sort_descending(self.services_sort_desc);
+        self.sync_service_rows();
+    }
+
+    pub fn set_services_search(&mut self, text: &str) {
+        self.services_search = text.to_string();
+        self.sync_service_rows();
+    }
+
+    fn sync_service_rows(&self) {
+        let mut rows = crate::services::service_rows(&self.services);
+        rows = crate::services::filter_service_rows(&rows, &self.services_search);
+        if self.services_sort_col != 0 || self.services_sort_desc {
+            crate::services::sort_service_rows(&mut rows, self.services_sort_col, self.services_sort_desc);
+        }
+        sync_model(&*self.service_rows, rows.iter().map(|r| ServiceData {
+            id: r.id,
+            name: r.name.as_str().into(),
+            pid: r.pid.as_str().into(),
+            pid_num: r.pid_num as i32,
+            description: r.description.as_str().into(),
+            status: r.status.as_str().into(),
+            group: r.group.as_str().into(),
+            start_type: r.start_type.as_str().into(),
+            running: r.running,
+            can_stop: r.can_stop,
+        }).collect());
+    }
+
+    pub fn service_entry(&self, id: i32) -> Option<negotium_actions::services::ServiceEntry> {
+        usize::try_from(id).ok().and_then(|i| self.services.get(i)).cloned()
+    }
+
+    /// Switches to Overview and filters to `pid` ("Go to process" from Services).
+    pub fn select_pid(&mut self, ui: &MainWindow, pid: u32) {
+        let query = pid.to_string();
+        self.set_page(ui, Page::Overview);
+        ui.set_search_text(query.as_str().into());
+        self.set_search(&query);
     }
 
     pub fn set_history(&mut self, history: SharedHistory) {
@@ -753,6 +879,8 @@ impl Bridge {
             hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.is_open(r),
             actionable: r.actionable, exited: r.exited, has_icon: icon.is_some(),
             icon: icon.unwrap_or_else(|| self.no_icon.clone()), windows: r.windows, last_in_card: r.last_in_card, pid: r.pid.clone().into(),
+            col_pid: r.col_pid.clone().into(), col_proc_name: r.col_proc_name.clone().into(), col_status: r.col_status.clone().into(),
+            col_threads: r.col_threads.clone().into(), col_handles: r.col_handles.clone().into(), col_publisher: r.col_publisher.clone().into(),
         }).collect();
         sync_model(&*self.rows, rows);
         self.sync_current();

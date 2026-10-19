@@ -1,0 +1,211 @@
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { RevealScrollView } from "revealscroll.slint";
+import { SortHeader, RowIcon } from "applist.slint";
+
+export struct AppHistoryData {
+    name: string,
+    icon: image,
+    has-icon: bool,
+    running: bool,
+    cpu-time: string,
+    cpu-frac: float,
+    net-data: string,
+    net-frac: float,
+    disk-data: string,
+    disk-frac: float,
+    peak-mem: string,
+    mem-frac: float,
+}
+
+component HistoryBarCell inherits Rectangle {
+    in property <string> text;
+    in property <float> frac;
+    width: 120px;
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: 12.5px;
+            horizontal-alignment: right;
+            accessible-role: none;
+        }
+        HorizontalLayout {
+            alignment: end;
+            Rectangle {
+                width: 96px;
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.card-border;
+                Rectangle {
+                    x: parent.width - self.width;
+                    width: parent.width * clamp(root.frac, 0, 1);
+                    height: parent.height;
+                    border-radius: 2px;
+                    background: Theme.accent;
+                }
+            }
+        }
+    }
+}
+
+export component AppHistoryPage inherits VerticalLayout {
+    in property <[AppHistoryData]> rows;
+    in property <string> duration-text: "0 s";
+    in property <int> sort-column: 1;
+    in property <bool> sort-descending: true;
+    in property <length> bottom-inset;
+    in property <bool> interactive: true;
+    callback sort-clicked(int);
+    callback reset();
+    property <length> gutter: 14px;
+    max-width: 16384px;
+    padding: 12px;
+    padding-bottom: 12px + root.bottom-inset;
+    spacing: 10px;
+
+    HorizontalLayout {
+        vertical-stretch: 0;
+        spacing: 12px;
+        Text {
+            text: "App history";
+            color: Theme.text;
+            font-size: 24px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Reset history";
+            enabled: root.interactive;
+            clicked => { root.reset(); }
+        }
+    }
+    Rectangle {
+        vertical-stretch: 0;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        background: Theme.card;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 4px;
+            Text {
+                text: "Cumulative resource usage since Negotium started (" + root.duration-text + ")";
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            Text {
+                text: "Unlike the Overview page (which shows what apps are doing right this second), App history adds up total CPU time, network data, disk I/O, and peak memory for every app — even after you close it.";
+                color: Theme.muted;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
+        }
+    }
+    HorizontalLayout {
+        vertical-stretch: 0;
+        height: 24px;
+        padding-left: 10px;
+        padding-right: 10px + root.gutter;
+        spacing: 12px;
+        SortHeader {
+            label: "Name";
+            left: true;
+            horizontal-stretch: 1;
+            sorted: root.sort-column == 0;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(0); }
+        }
+        SortHeader {
+            label: "CPU time";
+            width: 120px;
+            sorted: root.sort-column == 1;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(1); }
+        }
+        SortHeader {
+            label: "Network";
+            width: 120px;
+            sorted: root.sort-column == 2;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(2); }
+        }
+        SortHeader {
+            label: "Disk I/O";
+            width: 120px;
+            sorted: root.sort-column == 3;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(3); }
+        }
+        SortHeader {
+            label: "Peak memory";
+            width: 120px;
+            sorted: root.sort-column == 4;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(4); }
+        }
+    }
+    sv := RevealScrollView {
+        vertical-stretch: 1;
+        property <length> content-w: max(0px, self.width - root.gutter);
+        content-width: self.content-w;
+        content-height: entries.height;
+        entries := Rectangle {
+            width: sv.content-w;
+            height: rows-layout.preferred-height;
+            accessible-role: list;
+            accessible-label: "App history";
+            rows-layout := VerticalLayout {
+                alignment: start;
+                spacing: 4px;
+                max-width: 16384px;
+                for r in root.rows : Rectangle {
+                    height: 46px;
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    background: ta.has-hover ? Theme.card-hover : Theme.card;
+                    accessible-role: list-item;
+                    accessible-label: r.name + ", CPU time " + r.cpu-time + ", network " + r.net-data + ", disk " + r.disk-data + ", peak memory " + r.peak-mem;
+                    ta := TouchArea { }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 12px;
+                        RowIcon {
+                            size: 24px;
+                            source: r.icon;
+                            has-icon: r.has-icon;
+                            windows: false;
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 1px;
+                            Text { text: r.name; color: Theme.text; font-size: 13px; overflow: elide; accessible-role: none; }
+                            Text {
+                                text: r.running ? "Running now" : "Closed";
+                                color: r.running ? Theme.accent : Theme.muted;
+                                font-size: 11px;
+                                accessible-role: none;
+                            }
+                        }
+                        HistoryBarCell { text: r.cpu-time; frac: r.cpu-frac; }
+                        HistoryBarCell { text: r.net-data; frac: r.net-frac; }
+                        HistoryBarCell { text: r.disk-data; frac: r.disk-frac; }
+                        HistoryBarCell { text: r.peak-mem; frac: r.mem-frac; }
+                    }
+                }
+            }
+        }
+    }
+}

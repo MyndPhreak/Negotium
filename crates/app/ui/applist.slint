@@ -24,6 +24,13 @@ export struct RowData {
     last-in-card: bool,
     // A process row's PID, shown muted after its name; empty on cards and headings.
     pid: string,
+    // Optional table columns.
+    col-pid: string,
+    col-proc-name: string,
+    col-status: string,
+    col-threads: string,
+    col-handles: string,
+    col-publisher: string,
 }
 
 // Column geometry shared by the header and every row, so each number sits under its header.
@@ -82,6 +89,23 @@ component NumCell inherits Rectangle {
     }
 }
 
+component OptTextCell inherits Rectangle {
+    in property <string> text;
+    in property <length> size: 12.5px;
+    in property <bool> right-align: false;
+    Text {
+        x: 0;
+        y: (root.height - self.height) / 2;
+        width: root.width;
+        height: self.preferred-height;
+        text: root.text;
+        horizontal-alignment: root.right-align ? right : left;
+        font-size: root.size;
+        color: Theme.muted;
+        overflow: elide;
+    }
+}
+
 // Drawn, not a glyph: Segoe UI Variable lacks U+25B8/U+25BE, which rendered as tofu.
 component Chevron inherits Rectangle {
     in property <bool> open;
@@ -102,7 +126,7 @@ component Chevron inherits Rectangle {
 
 // A row's program icon; the Windows group's glyph; or, for anything without an icon (none yet, a
 // monochrome one, none at all), a generic program window.
-component RowIcon inherits Rectangle {
+export component RowIcon inherits Rectangle {
     in property <image> source;
     in property <bool> has-icon;
     in property <bool> windows;
@@ -221,7 +245,7 @@ component EndTaskButton inherits FocusButton {
 
 // A column header: sorts the list by its column (again: flips the direction). The sorted one is
 // in the accent colour with ▾ (descending) or ▴ (ascending), drawn.
-component SortHeader inherits FocusButton {
+export component SortHeader inherits FocusButton {
     in property <string> label;
     in property <bool> sorted;
     in property <bool> descending;
@@ -257,6 +281,22 @@ component SortHeader inherits FocusButton {
                 fill: Theme.accent;
             }
         }
+    }
+}
+
+component StaticHeader inherits Rectangle {
+    in property <string> label;
+    in property <bool> right-align: false;
+    Text {
+        x: 2px;
+        y: (root.height - self.height) / 2;
+        width: root.width - 4px;
+        height: self.preferred-height;
+        text: root.label.to-uppercase();
+        horizontal-alignment: root.right-align ? right : left;
+        font-size: 11.5px;
+        letter-spacing: 0.5px;
+        color: Theme.muted;
     }
 }
 
@@ -297,6 +337,15 @@ export component AppList inherits VerticalLayout {
     // The list's sort (crate::controls): -1 the name column, 0..4 a metric's index.
     in property <int> sort-column;
     in property <bool> sort-descending;
+    // Optional columns.
+    in property <bool> col-pid;
+    in property <bool> col-proc-name;
+    in property <bool> col-status;
+    in property <bool> col-threads;
+    in property <bool> col-handles;
+    in property <bool> col-publisher;
+    callback toggle-column(int);
+    callback open-run-task();
     // Keyboard navigation (ruling P3-7): the current row's index and id, and whether it can be acted on.
     in property <int> current-row: -1;
     // The current row's top within the list and its height (rows differ in height).
@@ -351,6 +400,10 @@ export component AppList inherits VerticalLayout {
         list-keys.focus();
     }
 
+    public function focus-search() {
+        search-box.focus();
+    }
+
     // The current row's menu from the keyboard (Menu key, Shift+F10) while the list has focus.
     // Same capture rule as a row's own menu: the target is fixed before the menu shows.
     function open-key-menu() {
@@ -364,12 +417,120 @@ export component AppList inherits VerticalLayout {
         }
     }
 
-    LineEdit {
-        text <=> root.search-text;
-        placeholder-text: "Search apps and processes";
-        accessible-label: "Search apps and processes";
-        enabled: root.interactive;
-        edited(text) => { root.search(text); }
+    HorizontalLayout {
+        spacing: 8px;
+        Rectangle {
+            horizontal-stretch: 1;
+            search-box := LineEdit {
+                width: parent.width;
+                text <=> root.search-text;
+                placeholder-text: "Type a name, publisher, or PID to search";
+                accessible-label: "Search apps and processes";
+                enabled: root.interactive;
+                edited(text) => { root.search(text); }
+            }
+            if root.search-text != "" : Rectangle {
+                x: parent.width - 28px;
+                y: (parent.height - 22px) / 2;
+                width: 22px;
+                height: 22px;
+                border-radius: 4px;
+                accessible-role: button;
+                accessible-label: "Clear search";
+                accessible-action-default => {
+                    if root.interactive {
+                        root.search-text = "";
+                        root.search("");
+                    }
+                }
+                background: clear-ta.has-hover ? Theme.card-hover : transparent;
+                clear-ta := TouchArea {
+                    enabled: root.interactive;
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.search-text = "";
+                        root.search("");
+                    }
+                }
+                Path {
+                    width: 8px;
+                    height: 8px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 8;
+                    viewbox-height: 8;
+                    commands: "M 1 1 L 7 7 M 7 1 L 1 7";
+                    stroke: Theme.muted;
+                    stroke-width: 1.4px;
+                    fill: transparent;
+                }
+            }
+        }
+        Rectangle {
+            width: 82px;
+            height: 32px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            background: col-ta.has-hover ? Theme.card-hover : Theme.card;
+            accessible-role: button;
+            accessible-label: "Columns";
+            accessible-action-default => {
+                if root.interactive {
+                    cols-menu.show({ x: 0px, y: self.height });
+                }
+            }
+            cols-menu := ContextMenuArea {
+                enabled: false;
+                Menu {
+                    MenuItem { title: (root.col-pid ? "✓ " : "    ") + "PID"; activated => { root.toggle-column(0); } }
+                    MenuItem { title: (root.col-proc-name ? "✓ " : "    ") + "Process name"; activated => { root.toggle-column(1); } }
+                    MenuItem { title: (root.col-status ? "✓ " : "    ") + "Status"; activated => { root.toggle-column(2); } }
+                    MenuItem { title: (root.col-threads ? "✓ " : "    ") + "Threads"; activated => { root.toggle-column(3); } }
+                    MenuItem { title: (root.col-handles ? "✓ " : "    ") + "Handles"; activated => { root.toggle-column(4); } }
+                    MenuItem { title: (root.col-publisher ? "✓ " : "    ") + "Publisher"; activated => { root.toggle-column(5); } }
+                }
+            }
+            Text {
+                text: "Columns ▾";
+                font-size: 12px;
+                color: Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            col-ta := TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { cols-menu.show({ x: 0px, y: parent.height }); }
+            }
+        }
+        Rectangle {
+            width: 106px;
+            height: 32px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            background: run-ta.has-hover ? Theme.card-hover : Theme.card;
+            accessible-role: button;
+            accessible-label: "Run new task";
+            accessible-action-default => {
+                if root.interactive {
+                    root.open-run-task();
+                }
+            }
+            Text {
+                text: "+ Run new task";
+                font-size: 12px;
+                color: Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            run-ta := TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { root.open-run-task(); }
+            }
+        }
     }
     HorizontalLayout {
         padding-left: Columns.left;
@@ -385,6 +546,12 @@ export component AppList inherits VerticalLayout {
             interactive: root.interactive;
             activated => { root.sort-clicked(-1); }
         }
+        if root.col-pid : StaticHeader { label: "PID"; width: 62px; right-align: true; }
+        if root.col-proc-name : StaticHeader { label: "Process"; width: 110px; }
+        if root.col-status : StaticHeader { label: "Status"; width: 96px; }
+        if root.col-publisher : StaticHeader { label: "Publisher"; width: 130px; }
+        if root.col-threads : StaticHeader { label: "Threads"; width: 64px; right-align: true; }
+        if root.col-handles : StaticHeader { label: "Handles"; width: 68px; right-align: true; }
         for label[c] in ["CPU", "Memory", "Disk", "GPU", "Network"] : SortHeader {
             label: label;
             width: Columns.number;
@@ -619,6 +786,12 @@ export component AppList inherits VerticalLayout {
                                                             activated => { root.action("end-task", r.id); }
                                                         }
                                                     }
+                                                    if root.col-pid : OptTextCell { text: r.col-pid; width: 62px; right-align: true; }
+                                                    if root.col-proc-name : OptTextCell { text: r.col-proc-name; width: 110px; }
+                                                    if root.col-status : OptTextCell { text: r.col-status; width: 96px; }
+                                                    if root.col-publisher : OptTextCell { text: r.col-publisher; width: 130px; }
+                                                    if root.col-threads : OptTextCell { text: r.col-threads; width: 64px; right-align: true; }
+                                                    if root.col-handles : OptTextCell { text: r.col-handles; width: 68px; right-align: true; }
                                                     NumCell { text: r.cpu; strong: root.metric == 0; size: 13px; bar: r.bars[0]; }
                                                     NumCell { text: r.mem; strong: root.metric == 1; size: 13px; bar: r.bars[1]; }
                                                     NumCell { text: r.disk; strong: root.metric == 2; size: 13px; bar: r.bars[2]; }
@@ -675,6 +848,12 @@ export component AppList inherits VerticalLayout {
                                                         }
                                                         clicked => { root.action("force-close", r.id); }
                                                     }
+                                                    if root.col-pid : OptTextCell { text: r.col-pid; width: 62px; size: 12px; right-align: true; }
+                                                    if root.col-proc-name : OptTextCell { text: r.col-proc-name; width: 110px; size: 12px; }
+                                                    if root.col-status : OptTextCell { text: r.col-status; width: 96px; size: 12px; }
+                                                    if root.col-publisher : OptTextCell { text: r.col-publisher; width: 130px; size: 12px; }
+                                                    if root.col-threads : OptTextCell { text: r.col-threads; width: 64px; size: 12px; right-align: true; }
+                                                    if root.col-handles : OptTextCell { text: r.col-handles; width: 68px; size: 12px; right-align: true; }
                                                     NumCell { text: r.cpu; strong: root.metric == 0; size: 12.5px; }
                                                     NumCell { text: r.mem; strong: root.metric == 1; size: 12.5px; }
                                                     NumCell { text: r.disk; strong: root.metric == 2; size: 12.5px; }

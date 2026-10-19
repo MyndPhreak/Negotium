@@ -13,6 +13,7 @@ pub struct Identity {
     pub image_path: Option<String>,
     pub package_family: Option<String>,
     pub description: Option<String>,
+    pub publisher: Option<String>,
 }
 
 #[derive(Default)]
@@ -53,8 +54,13 @@ fn query(pid: u32) -> Identity {
         return Identity::default();
     };
     let image_path = image_path(handle);
+    let (description, publisher) = match image_path.as_deref().and_then(VersionInfo::read) {
+        Some(vi) => (vi.string("FileDescription"), vi.string("CompanyName")),
+        None => (None, None),
+    };
     let identity = Identity {
-        description: image_path.as_deref().and_then(file_description),
+        description,
+        publisher,
         package_family: package_family(handle),
         image_path,
     };
@@ -88,10 +94,6 @@ fn package_family(handle: HANDLE) -> Option<String> {
     }
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Some(String::from_utf16_lossy(&buf[..end]))
-}
-
-fn file_description(path: &str) -> Option<String> {
-    version_string(path, "FileDescription")
 }
 
 /// A string value from the first translation of a file's version resource ("FileDescription",

@@ -4,7 +4,7 @@ import { FocusButton } from "focusbutton.slint";
 import { DataPath, Graph, GraphData, ScrubRow } from "graph.slint";
 import { ScrollIndicator } from "scrollindicator.slint";
 
-export struct DeviceData { id: string, title: string, value: string, spark: string }
+export struct DeviceData { id: string, title: string, subtitle: string, value: string, spark: string }
 export struct StatData { label: string, value: string }
 export struct SegmentData { label: string, value: string, fraction: float }
 
@@ -20,7 +20,10 @@ component DeviceButton inherits FocusButton {
     accessible-checkable: true;
     accessible-checked: root.selected;
     HorizontalLayout {
-        padding: 8px;
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 5px;
+        padding-bottom: 5px;
         spacing: 10px;
         Rectangle {
             width: 56px;
@@ -35,7 +38,9 @@ component DeviceButton inherits FocusButton {
         }
         VerticalLayout {
             alignment: center;
+            spacing: 0px;
             Text { text: root.data.title; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+            if root.data.subtitle != "" : Text { text: root.data.subtitle; color: Theme.muted; font-size: 10px; overflow: elide; }
             Text { text: root.data.value; color: Theme.muted; font-size: 11px; overflow: elide; }
         }
     }

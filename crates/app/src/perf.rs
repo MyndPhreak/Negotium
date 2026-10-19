@@ -191,6 +191,7 @@ pub fn devices(snap: &Snapshot, info: &SystemInfo) -> Vec<Device> {
 pub struct DeviceView {
     pub id: String,
     pub title: String,
+    pub subtitle: String,
     pub value: String,
     pub spark: String,
 }
@@ -388,17 +389,33 @@ fn known(v: f32) -> Option<f32> {
 
 fn device_view(e: &Entry, gpu_number: usize, input: &PerfInput) -> DeviceView {
     let t = &input.snap.totals;
-    let (title, value, spark) = match e {
-        Entry::Cpu => ("CPU".to_string(), t.cpu_pct.map(format::pct).unwrap_or_else(dash), input.spark(&Series::Cpu, 100.0)),
+    let (title, subtitle, value, spark) = match e {
+        Entry::Cpu => (
+            "CPU".to_string(),
+            input.info.cpu_name.clone().unwrap_or_default(),
+            t.cpu_pct.map(format::pct).unwrap_or_else(dash),
+            input.spark(&Series::Cpu, 100.0),
+        ),
         Entry::Memory => {
             let m = t.memory.as_ref().filter(|m| m.total > 0);
             let value = m
                 .map(|m| format!("{} ({})", format::gb_of(m.in_use(), m.total), format::pct(m.in_use() as f32 / m.total as f32 * 100.0)))
                 .unwrap_or_else(dash);
             let spark = m.map_or_else(|| EMPTY_PATH.to_string(), |m| input.spark(&Series::MemUsed, m.total as f32));
-            ("Memory".to_string(), value, spark)
+            let sub = input.info.memory_hw.form_factor.clone().unwrap_or_default();
+            ("Memory".to_string(), sub, value, spark)
         }
-        Entry::Disk(d) => (disk_title(&d.name), format::pct(d.active_pct), input.spark(&Series::DiskActive(d.name.clone()), 100.0)),
+        Entry::Disk(d) => {
+            let num = disk_number(&d.name);
+            let sub = input
+                .info
+                .disks
+                .iter()
+                .find(|i| i.number == num)
+                .and_then(|i| i.kind.clone().or_else(|| i.model.clone()))
+                .unwrap_or_default();
+            (disk_title(&d.name), sub, format::pct(d.active_pct), input.spark(&Series::DiskActive(d.name.clone()), 100.0))
+        }
         Entry::Network(a) => {
             let key = Series::NetRecv(a.name.clone());
             let max = graph::nice_max(input.max_over(&key, SPARK_MS) * 8.0, 100_000.0) / 8.0;
@@ -407,7 +424,8 @@ fn device_view(e: &Entry, gpu_number: usize, input: &PerfInput) -> DeviceView {
             } else {
                 "Disconnected".to_string()
             };
-            (adapter_title(a), value, input.spark(&key, max))
+            let sub = a.description.clone().unwrap_or_default();
+            (adapter_title(a), sub, value, input.spark(&key, max))
         }
         Entry::Gpu(g) => {
             let value = match (known(g.util_pct), g.temp_c) {
@@ -416,10 +434,11 @@ fn device_view(e: &Entry, gpu_number: usize, input: &PerfInput) -> DeviceView {
                 (None, Some(c)) => format::temp_c(c),
                 (None, None) => dash(),
             };
-            (format!("GPU {gpu_number}"), value, input.spark(&Series::GpuUtil(g.key.clone()), 100.0))
+            let sub = input.info.gpus.iter().find(|i| i.key == g.key).map(|i| i.name.clone()).unwrap_or_default();
+            (format!("GPU {gpu_number}"), sub, value, input.spark(&Series::GpuUtil(g.key.clone()), 100.0))
         }
     };
-    DeviceView { id: e.id(), title, value, spark }
+    DeviceView { id: e.id(), title, subtitle, value, spark }
 }
 
 pub fn build_perf(input: &PerfInput) -> PerfFrame {
@@ -507,18 +526,33 @@ fn cpu_page(f: &mut PerfFrame, input: &PerfInput) {
     // A failed process read leaves the list empty: unknown, never 0.
     let proc_stat = |n: Option<u64>| n.map(|n| n.to_string()).unwrap_or_else(dash);
     let known = !procs.is_empty();
+    let topo = &input.info.cpu_topology;
     f.stats = vec![
         stat("Utilization", util),
         stat("Speed", t.cpu_mhz.map(format::ghz).unwrap_or_else(dash)),
-        stat("Temperature", dash()),
+        stat("Base speed", input.info.cpu_base_mhz.map(|m| format::ghz(m as f32)).unwrap_or_else(dash)),
+        stat("Temperature", t.cpu_temp_c.map(format::temp_c).unwrap_or_else(dash)),
         stat("Processes", proc_stat(known.then_some(procs.len() as u64))),
         stat("Threads", proc_stat(known.then(|| procs.iter().map(|p| p.threads as u64).sum()))),
         stat("Handles", proc_stat(known.then(|| procs.iter().map(|p| p.handles as u64).sum()))),
         // A zero means the value was never read.
         stat("Up time", if t.uptime_s > 0 { format::uptime(t.uptime_s) } else { dash() }),
+        stat("Sockets", topo.sockets.filter(|&s| s > 0).map(|s| s.to_string()).unwrap_or_else(dash)),
+        stat("Cores", topo.cores.filter(|&c| c > 0).map(|c| c.to_string()).unwrap_or_else(dash)),
         stat("Logical processors", if t.logical_cpus > 0 { t.logical_cpus.to_string() } else { dash() }),
+        stat(
+            "Virtualization",
+            match input.info.cpu_virtualization {
+                Some(true) => "Enabled".into(),
+                Some(false) => "Disabled".into(),
+                None => dash(),
+            },
+        ),
+        stat("L1 cache", topo.l1_bytes.filter(|&b| b > 0).map(|b| format::bytes(b as f64)).unwrap_or_else(dash)),
+        stat("L2 cache", topo.l2_bytes.filter(|&b| b > 0).map(|b| format::bytes(b as f64)).unwrap_or_else(dash)),
+        stat("L3 cache", topo.l3_bytes.filter(|&b| b > 0).map(|b| format::bytes(b as f64)).unwrap_or_else(dash)),
     ];
-    f.note = CPU_TEMP_NOTE.into();
+    f.note = if t.cpu_temp_c.is_some() { String::new() } else { CPU_TEMP_NOTE.into() };
 }
 
 fn memory_page(f: &mut PerfFrame, input: &PerfInput) {
@@ -538,6 +572,13 @@ fn memory_page(f: &mut PerfFrame, input: &PerfInput) {
         input.shape(&Series::MemUsed, m.total as f32, MAIN_BUCKETS),
     )];
     f.segments = composition(m);
+    let hw = &input.info.memory_hw;
+    let slots = hw.slots_used.filter(|&(_, t)| t > 0).map(|(u, t)| format!("{u} of {t}")).unwrap_or_else(dash);
+    let reserved = match hw.installed_bytes {
+        Some(inst) if inst > m.total => format::bytes((inst - m.total) as f64),
+        Some(inst) if inst > 0 => "0 B".into(),
+        _ => dash(),
+    };
     f.stats = vec![
         stat("In use", format::gb(m.in_use())),
         stat("Available", format::gb(m.available())),
@@ -545,6 +586,9 @@ fn memory_page(f: &mut PerfFrame, input: &PerfInput) {
         stat("Cached", m.lists.map(|l| format::gb(l.standby + l.modified)).unwrap_or_else(dash)),
         stat("Compressed", m.compressed.map(|b| format::bytes(b as f64)).unwrap_or_else(dash)),
         stat("Speed", input.info.memory_speed_mts.map(|s| format!("{s} MT/s")).unwrap_or_else(dash)),
+        stat("Slots used", slots),
+        stat("Form factor", hw.form_factor.clone().unwrap_or_else(dash)),
+        stat("Hardware reserved", reserved),
     ];
 }
 
@@ -570,7 +614,10 @@ pub fn composition(m: &MemoryTotals) -> Vec<SegmentView> {
 
 fn disk_page(f: &mut PerfFrame, input: &PerfInput, d: &DiskSample) {
     let name = d.name.as_str();
+    let num = disk_number(name);
+    let disk_info = input.info.disks.iter().find(|i| i.number == num);
     f.title = disk_title(name);
+    f.subtitle = disk_info.and_then(|i| i.model.clone()).unwrap_or_default();
     f.scrub_metric = Metric::Disk;
     f.scrub_series = Some(Series::DiskActive(name.into()));
     f.note = "Top apps show each app's disk use across all disks.".into();
@@ -590,11 +637,16 @@ fn disk_page(f: &mut PerfFrame, input: &PerfInput, d: &DiskSample) {
         graph_view("Active time", format::pct(d.active_pct), "100%".into(), input.shape(&Series::DiskActive(name.into()), 100.0, MAIN_BUCKETS)),
         transfer,
     ];
+    let sys_drive = if input.info.system_drive.is_empty() { "C:" } else { input.info.system_drive.as_str() };
+    let system_disk = if name.split_whitespace().any(|v| v.eq_ignore_ascii_case(sys_drive)) { "Yes" } else { "No" };
     f.stats = vec![
         stat("Active time", format::pct(d.active_pct)),
         stat("Read speed", format::byte_rate(d.read_bps)),
         stat("Write speed", format::byte_rate(d.write_bps)),
         stat("Average response time", d.response_ms.map(format::millis).unwrap_or_else(dash)),
+        stat("Capacity", disk_info.and_then(|i| i.capacity_bytes).filter(|&c| c > 0).map(format::gb).unwrap_or_else(dash)),
+        stat("Type", disk_info.and_then(|i| i.kind.clone()).unwrap_or_else(dash)),
+        stat("System disk", system_disk),
     ];
 }
 
@@ -690,6 +742,9 @@ fn gpu_page(f: &mut PerfFrame, input: &PerfInput, g: &GpuSample, number: usize) 
         stat("Dedicated GPU memory", dedicated),
         stat("Shared GPU memory", shared),
         stat("Temperature", g.temp_c.map(format::temp_c).unwrap_or_else(dash)),
+        stat("Driver version", info.and_then(|i| i.driver_version.clone()).unwrap_or_else(dash)),
+        stat("Driver date", info.and_then(|i| i.driver_date.clone()).unwrap_or_else(dash)),
+        stat("Physical location", info.and_then(|i| i.location.clone()).unwrap_or_else(dash)),
     ];
 }
 
@@ -703,7 +758,7 @@ pub(crate) mod tests {
         ProcessSample {
             pid, parent_pid: 0, create_time: pid as i64, name: format!("p{pid}.exe"), session_id: 1, cpu_time_100ns: 0,
             private_working_set: 0, disk_io_bytes: 0, threads, handles, image_path: None, package_family: None,
-            description: None,
+            description: None, publisher: None,
         }
     }
 
@@ -902,6 +957,8 @@ pub(crate) mod tests {
         ], "connected adapters (hardware first), then disconnected ones; GPUs in DXGI order");
         let titles: Vec<&str> = f.devices.iter().map(|d| d.title.as_str()).collect();
         assert_eq!(&titles[2..], ["Disk 0 (C:)", "Disk 1 (D:)", "Ethernet", "vEthernet (Default Switch)", "Bluetooth Network Connection", "GPU 0", "GPU 1"]);
+        assert_eq!(f.devices[7].subtitle, "NVIDIA GeForce RTX 4090");
+        assert_eq!(f.devices[8].subtitle, "AMD Radeon(TM) Graphics");
         assert_eq!(f.devices[6].value, "Disconnected");
         assert_eq!(f.devices[7].value, "40% (64 °C)");
         assert_eq!(f.devices[8].value, "5%");
@@ -910,6 +967,62 @@ pub(crate) mod tests {
         for d in [Device::Disk("0 C:".into()), Device::Network("x".into()), Device::Gpu("luid_b".into())] {
             assert_eq!(Device::parse(&d.id()), Some(d));
         }
+    }
+
+    #[test]
+    fn hardware_specs_and_subtitles_populate_across_pages() {
+        let mut inf = devices_info();
+        inf.cpu_base_mhz = Some(4200);
+        inf.cpu_virtualization = Some(true);
+        inf.cpu_topology = negotium_collector::sysinfo::CpuTopology {
+            sockets: Some(1),
+            cores: Some(8),
+            l1_bytes: Some(512 << 10),
+            l2_bytes: Some(8 << 20),
+            l3_bytes: Some(32 << 20),
+        };
+        inf.memory_hw = negotium_collector::sysinfo::MemoryHardware {
+            speed_mts: Some(6000),
+            slots_used: Some((2, 4)),
+            form_factor: Some("DIMM".into()),
+            installed_bytes: Some((16 << 30) + (256 << 20)),
+        };
+        inf.disks = vec![negotium_collector::sysinfo::DiskInfo {
+            number: 0,
+            model: Some("Samsung SSD 990 PRO 2TB".into()),
+            kind: Some("SSD (NVMe)".into()),
+            capacity_bytes: Some(2000 << 30),
+        }];
+        inf.gpus[0].driver_version = Some("32.0.15.6094".into());
+        inf.gpus[0].driver_date = Some("8-14-2024".into());
+        inf.gpus[0].location = Some("PCI bus 1, device 0, function 0".into());
+
+        let snap = devices_snapshot();
+        let cpu = build_with(&snap, &inf, "cpu", Range::Minute);
+        assert_eq!(stat(&cpu, "Base speed"), "4.20 GHz");
+        assert_eq!(stat(&cpu, "Sockets"), "1");
+        assert_eq!(stat(&cpu, "Cores"), "8");
+        assert_eq!(stat(&cpu, "Virtualization"), "Enabled");
+        assert_eq!(stat(&cpu, "L1 cache"), "512.0 KB");
+        assert_eq!(stat(&cpu, "L2 cache"), "8.0 MB");
+        assert_eq!(stat(&cpu, "L3 cache"), "32.0 MB");
+        assert_eq!(cpu.devices[2].subtitle, "SSD (NVMe)");
+
+        let mem = build_with(&snap, &inf, "memory", Range::Minute);
+        assert_eq!(stat(&mem, "Slots used"), "2 of 4");
+        assert_eq!(stat(&mem, "Form factor"), "DIMM");
+        assert_eq!(stat(&mem, "Hardware reserved"), "256.0 MB");
+
+        let disk = build_with(&snap, &inf, "disk:0 C:", Range::Minute);
+        assert_eq!(disk.subtitle, "Samsung SSD 990 PRO 2TB");
+        assert_eq!(stat(&disk, "Capacity"), "2000.0 GB");
+        assert_eq!(stat(&disk, "Type"), "SSD (NVMe)");
+        assert_eq!(stat(&disk, "System disk"), "Yes");
+
+        let gpu = build_with(&snap, &inf, "gpu:luid_b", Range::Minute);
+        assert_eq!(stat(&gpu, "Driver version"), "32.0.15.6094");
+        assert_eq!(stat(&gpu, "Driver date"), "8-14-2024");
+        assert_eq!(stat(&gpu, "Physical location"), "PCI bus 1, device 0, function 0");
     }
 
     #[test]

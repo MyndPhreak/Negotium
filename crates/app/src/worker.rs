@@ -117,6 +117,7 @@ pub struct LiveSource {
     model: Model,
     ranker: Ranker,
     top: TopPicker,
+    usage: negotium_model::UsageTracker,
     history: SharedHistory,
     ids: IdMap,
     /// The selected Performance device as last seen, for its page's grace period.
@@ -143,6 +144,7 @@ impl LiveSource {
             model: Model::with_system_root(negotium_collector::windows_dir()),
             ranker: Ranker::new(),
             top: TopPicker::new(),
+            usage: negotium_model::UsageTracker::new(),
             history,
             ids: IdMap::with_seed(ids),
             seen: None,
@@ -179,6 +181,10 @@ impl Source for LiveSource {
             self.log.warn(e);
         }
         let rows = self.model.update(&snap);
+        if controls.take_reset_history() {
+            self.usage.reset();
+        }
+        self.usage.update(&snap, &rows);
         let tray_sample = keep_sample(&self.history, &snap, &rows, controls.tray_cpu() && self.tray.is_some());
         // Every tick, visible or hidden, so the tray never waits on a stale answer (crate::tray, PF2).
         controls.set_shell_hung(crate::platform::shell_tray_hung());
@@ -209,8 +215,12 @@ impl Source for LiveSource {
                 });
                 Some(Frame { page: Page::Performance, perf: Some(perf), ..Default::default() })
             }
+            Page::AppHistory => {
+                let (sort_col, sort_desc) = controls.history_sort();
+                Some(crate::view::build_history_frame(&self.usage, sort_col, sort_desc))
+            }
             // Nothing on these pages changes per tick.
-            Page::Startup | Page::Settings => None,
+            Page::Startup | Page::Settings | Page::Services => None,
         }
     }
 }

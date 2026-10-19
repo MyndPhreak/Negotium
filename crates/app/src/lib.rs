@@ -17,6 +17,7 @@ pub mod renderer;
 pub mod scrub;
 pub mod settings;
 pub mod settingspage;
+pub mod services;
 pub mod smooth;
 pub mod startup;
 pub mod tray;

@@ -4,12 +4,14 @@ pub mod hung;
 pub mod ranking;
 pub mod rates;
 pub mod tree;
+pub mod usage;
 
 pub use grouping::{AppKey, AppKind, SHELL_HOSTS, display_name, group};
 pub use hung::HungTracker;
 pub use ranking::{Metric, Pick, RESORT_INTERVAL_MS, Ranker, Sort, SortColumn, TOP_AVERAGE_MS, TOP_MARGIN, TopPicker, compare_procs, compare_rows, top_n};
 pub use rates::{ProcRates, RateTracker};
 pub use tree::descendants_deepest_first;
+pub use usage::{AppUsage, UsageTracker};
 
 use negotium_snapshot::{NetRate, Snapshot};
 use std::collections::{BTreeMap, HashMap};
@@ -149,7 +151,7 @@ mod tests {
         ProcessSample {
             pid, parent_pid: parent, create_time: pid as i64, name: format!("app{pid}.exe"), session_id: 1,
             cpu_time_100ns: cpu, private_working_set: mem, disk_io_bytes: 0, threads: 1, handles: 0,
-            image_path: None, package_family: None, description: None,
+            image_path: None, package_family: None, description: None, publisher: None,
         }
     }
 

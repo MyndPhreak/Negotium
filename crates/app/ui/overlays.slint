@@ -1,5 +1,6 @@
-import { Button } from "std-widgets.slint";
+import { Button, LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { Choice, Toggle } from "settingspage.slint";
 
 // An inline offer (spec 7: never a dialog): the admin path (why admin rights are needed and a
 // "Restart as admin" button, on the Overview (dismissable) and the Startup page (not)), and an
@@ -80,6 +81,131 @@ export component Modal inherits Rectangle {
                 spacing: 8px;
                 if root.show-cancel : Button { text: "Cancel"; primary: root.cancel-primary; clicked => { root.done(false); } }
                 Button { text: root.confirm-label; primary: !root.cancel-primary; clicked => { root.done(true); } }
+            }
+        }
+    }
+}
+
+export component RunTaskModal inherits Rectangle {
+    in-out property <string> command;
+    in-out property <string> working-dir;
+    in-out property <int> privilege-mode: 0;
+    in-out property <int> compat-mode: 0;
+    in-out property <bool> efficiency-mode: false;
+    callback run(string, string, int, int, bool);
+    callback cancel();
+    background: #00000066;
+    TouchArea { }
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return && root.command != "") {
+                root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
+                return accept;
+            }
+            return reject;
+        }
+    }
+    Rectangle {
+        width: min(parent.width - 48px, 560px);
+        height: layout.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.dark ? #2b2b2b : #ffffff;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        layout := VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            Text { text: "Run new task"; color: Theme.text; font-size: 18px; font-weight: 600; }
+            Text { text: "Type the name of a program, folder, document, or command with arguments."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+            VerticalLayout {
+                spacing: 4px;
+                Text { text: "Open"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                cmd-input := LineEdit {
+                    text <=> root.command;
+                    placeholder-text: "e.g. cmd.exe, powershell, notepad C:\\notes.txt";
+                    accessible-label: "Command or path to run";
+                    init => { self.focus(); }
+                    accepted => {
+                        if (root.command != "") {
+                            root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 4px;
+                Text { text: "Start in (optional working folder)"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                LineEdit {
+                    text <=> root.working-dir;
+                    placeholder-text: "Default working folder";
+                    accessible-label: "Working folder";
+                }
+            }
+            VerticalLayout {
+                spacing: 6px;
+                Text { text: "Privilege & security level"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                Choice {
+                    label: "Privilege level";
+                    description: "Normal, Administrator, Standard User (de-elevated), or Low-Integrity Sandbox";
+                    options: ["Normal", "Admin (Elevated)", "Standard User", "Sandboxed"];
+                    selected: root.privilege-mode;
+                    chosen(i) => { root.privilege-mode = i; }
+                }
+                Text {
+                    text: root.privilege-mode == 1 ? "Runs with full administrative privileges (prompts for UAC if needed)."
+                        : root.privilege-mode == 2 ? "Drops administrative rights and runs as a restricted standard user token."
+                        : root.privilege-mode == 3 ? "Runs with an untrusted Low-Integrity token (cannot modify user profile files or registry)."
+                        : "Runs with Negotium's current user privileges.";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+            VerticalLayout {
+                spacing: 6px;
+                Text { text: "Compatibility layer"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                Choice {
+                    label: "Compatibility mode";
+                    description: "Windows compatibility shims applied to the launched process";
+                    options: ["None", "Windows 8", "Windows 7", "High DPI Aware"];
+                    selected: root.compat-mode;
+                    chosen(i) => { root.compat-mode = i; }
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text { text: "Start in Efficiency mode (EcoQoS)"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                    Text { text: "Launches at low CPU priority and power throttling."; color: Theme.muted; font-size: 11px; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        label: "Start in Efficiency mode";
+                        description: "Launches at low CPU priority and power throttling";
+                        checked: root.efficiency-mode;
+                        toggled(on) => { root.efficiency-mode = on; }
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button { text: "Cancel"; clicked => { root.cancel(); } }
+                Button {
+                    text: "Run";
+                    primary: true;
+                    enabled: root.command != "";
+                    clicked => {
+                        root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
+                    }
+                }
             }
         }
     }

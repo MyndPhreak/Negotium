@@ -534,6 +534,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     negotium::bridge::set_current(bridge.clone());
+    ui.set_settings_pawnio_installed(negotium_collector::cputemp::pawnio_installed());
 
     // Startup page: listing calls the registry, the file system, COM and WinRT, so it runs on an
     // action thread and the result comes back through the bridge (negotium::startup). The list is
@@ -551,9 +552,20 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     };
+    let load_services = {
+        let weak = weak.clone();
+        move || {
+            if weak.upgrade().is_some_and(|ui| negotium::services::begin_job(&ui)) {
+                negotium::services::spawn_job(
+                    weak.clone(),
+                    negotium::services::list_job,
+                );
+            }
+        }
+    };
     // Every page change: a rail click, and the page a restart comes back on.
     let show_page = {
-        let (weak, b, load_startup) = (weak.clone(), bridge.clone(), load_startup.clone());
+        let (weak, b, load_startup, load_services) = (weak.clone(), bridge.clone(), load_startup.clone(), load_services.clone());
         let integrations = tray_wiring.integrations.clone();
         move |page: negotium::controls::Page| {
             if let Some(ui) = weak.upgrade() {
@@ -562,6 +574,8 @@ fn main() -> Result<(), slint::PlatformError> {
             // Outside the bridge borrow.
             if page == negotium::controls::Page::Startup {
                 load_startup();
+            } else if page == negotium::controls::Page::Services {
+                load_services();
             }
             // The Settings switches read the machine again (a change made outside Negotium).
             integrations.page_shown(page);
@@ -578,6 +592,14 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     ui.on_refresh_startup(load_startup.clone());
     {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_sort_startup(move |col| {
+            if let Some(ui) = weak.upgrade() {
+                b.borrow_mut().sort_startup(&ui, col);
+            }
+        });
+    }
+    {
         let (b, weak, load_startup) = (bridge.clone(), weak.clone(), load_startup.clone());
         ui.on_toggle_startup(move |id, on| {
             let Some(ui) = weak.upgrade() else { return };
@@ -593,6 +615,83 @@ fn main() -> Result<(), slint::PlatformError> {
                 // A panicked toggle may have changed the entry: read the real state again.
                 load_startup.clone(),
             );
+        });
+    }
+    {
+        let (controls, weak) = (controls.clone(), weak.clone());
+        ui.on_sort_history(move |col| {
+            let (cur_col, cur_desc) = controls.history_sort();
+            let desc = if col == cur_col { !cur_desc } else { true };
+            controls.set_history_sort(col, desc);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_history_sort_column(col);
+                ui.set_history_sort_descending(desc);
+            }
+        });
+    }
+    {
+        let controls = controls.clone();
+        ui.on_reset_history(move || controls.request_reset_history());
+    }
+    ui.on_refresh_services(load_services.clone());
+    {
+        let b = bridge.clone();
+        ui.on_search_services(move |text| b.borrow_mut().set_services_search(&text));
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_sort_services(move |col| {
+            if let Some(ui) = weak.upgrade() {
+                b.borrow_mut().sort_services(&ui, col);
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_service_action(move |action, id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(entry) = b.borrow().service_entry(id) else { return };
+            if action.as_str() == "goto" {
+                if let Some(pid) = entry.pid.filter(|&p| p > 0) {
+                    b.borrow_mut().select_pid(&ui, pid);
+                }
+                return;
+            }
+            if !negotium::services::begin_job(&ui) {
+                return;
+            }
+            let act = action.to_string();
+            let name = entry.name.clone();
+            negotium::services::spawn_job(
+                weak.clone(),
+                move || negotium::services::action_job(&name, &act, elevated),
+            );
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.on_run_new_task(move |cmd, cwd, mode, compat, eco_qos| {
+            let owner = weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
+            let opts = negotium_actions::runtask::RunTaskOptions {
+                command: cmd.to_string(),
+                working_dir: cwd.to_string(),
+                privilege: negotium_actions::runtask::PrivilegeMode::from_index(mode),
+                compat: negotium_actions::runtask::CompatLayer::from_index(compat),
+                efficiency_mode: eco_qos,
+            };
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = negotium_actions::runtask::run_new_task(&opts, owner) {
+                    if !matches!(e, negotium_actions::ActionError::Cancelled) {
+                        let msg = format!("Could not run task: {e}");
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_toast(msg.into());
+                            }
+                        });
+                    }
+                }
+            });
         });
     }
     {

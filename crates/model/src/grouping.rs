@@ -146,7 +146,7 @@ mod tests {
         ProcessSample {
             pid, parent_pid: parent, create_time: create, name: name.into(), session_id: session,
             cpu_time_100ns: 0, private_working_set: 0, disk_io_bytes: 0, threads: 1, handles: 0,
-            image_path: None, package_family: None, description: None,
+            image_path: None, package_family: None, description: None, publisher: None,
         }
     }
     fn win(pid: u32) -> WindowSample {

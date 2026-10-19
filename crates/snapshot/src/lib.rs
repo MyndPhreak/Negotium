@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcessSample {
     pub pid: u32,
     pub parent_pid: u32,
@@ -23,6 +23,9 @@ pub struct ProcessSample {
     /// FileDescription from the executable's version resource (e.g. "Google Chrome").
     #[serde(default)]
     pub description: Option<String>,
+    /// CompanyName from the executable's version resource (e.g. "Google LLC").
+    #[serde(default)]
+    pub publisher: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -147,6 +150,8 @@ pub struct SystemTotals {
     #[serde(default)]
     pub cpu_mhz: Option<f32>,
     #[serde(default)]
+    pub cpu_temp_c: Option<f32>,
+    #[serde(default)]
     pub uptime_s: u64,
     /// Local wall-clock time when the tick was taken, milliseconds since midnight.
     #[serde(default)]
@@ -200,6 +205,7 @@ mod tests {
                 pid: 42, parent_pid: 4, create_time: 7, name: "a.exe".into(), session_id: 1,
                 cpu_time_100ns: 10, private_working_set: 20, disk_io_bytes: 30, threads: 2,
                 handles: 3, image_path: Some(r"C:\a.exe".into()), package_family: None, description: None,
+                publisher: None,
             }],
             windows: vec![WindowSample { pid: 42, hung: false, title: "A".into() }],
             totals: SystemTotals { logical_cpus: 8, cpu_pct: Some(12.5), ..Default::default() },

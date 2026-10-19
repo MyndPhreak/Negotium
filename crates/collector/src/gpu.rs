@@ -5,8 +5,9 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Wdk::Graphics::Direct3D::{
-    D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO,
-    D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, KMTQAITYPE_ADAPTERPERFDATA,
+    D3DKMT_ADAPTER_PERFDATA, D3DKMT_ADAPTERADDRESS, D3DKMT_ADAPTERTYPE, D3DKMT_CLOSEADAPTER,
+    D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid,
+    D3DKMTQueryAdapterInfo, KMTQAITYPE_ADAPTERADDRESS, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERTYPE,
 };
 use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Dxgi::{
@@ -22,13 +23,68 @@ pub struct GpuInfo {
     pub name: String,
     pub dedicated_total: u64,
     pub shared_total: u64,
+    /// PCI bus/device/function ("PCI bus 1, device 0, function 0") when reported by the kernel.
+    pub location: Option<String>,
+    /// Driver version string ("32.0.16.1714") when available.
+    pub driver_version: Option<String>,
+    /// Driver date string ("2026-...") when available.
+    pub driver_date: Option<String>,
 }
 
 pub fn adapter_key(high: i32, low: u32) -> String {
     format!("luid_0x{:08x}_0x{low:08x}_phys_0", high as u32)
 }
 
-/// Hardware adapters in DXGI order, one per LUID (the software rasterizer is skipped).
+/// Queries D3DKMT for whether an adapter LUID is a real hardware render adapter (not software or
+/// an Indirect Display Driver like a virtual display adapter) and its PCI bus/device/function.
+fn query_kmt_adapter(luid: (i32, u32)) -> (bool, Option<String>) {
+    let mut open = D3DKMT_OPENADAPTERFROMLUID {
+        AdapterLuid: LUID { LowPart: luid.1, HighPart: luid.0 },
+        hAdapter: 0,
+    };
+    // SAFETY: `open` is a valid in/out struct; handle is closed before returning.
+    if unsafe { D3DKMTOpenAdapterFromLuid(&mut open) }.is_err() {
+        return (true, None);
+    }
+    let h = open.hAdapter;
+    let mut kind = D3DKMT_ADAPTERTYPE::default();
+    let mut q_type = D3DKMT_QUERYADAPTERINFO {
+        hAdapter: h,
+        Type: KMTQAITYPE_ADAPTERTYPE,
+        pPrivateDriverData: &mut kind as *mut _ as *mut c_void,
+        PrivateDriverDataSize: size_of::<D3DKMT_ADAPTERTYPE>() as u32,
+    };
+    // SAFETY: valid adapter handle and output buffer for KMTQAITYPE_ADAPTERTYPE.
+    let hardware = if unsafe { D3DKMTQueryAdapterInfo(&mut q_type) }.is_ok() {
+        let bits = unsafe { kind.Anonymous.Value };
+        // Bit 0: RenderSupported, Bit 2: SoftwareDevice, Bit 6: IndirectDisplayDevice.
+        let render = bits & 0x01 != 0;
+        let software = bits & 0x04 != 0;
+        let indirect = bits & 0x40 != 0;
+        render && !software && !indirect
+    } else {
+        true
+    };
+    let mut addr = D3DKMT_ADAPTERADDRESS::default();
+    let mut q_addr = D3DKMT_QUERYADAPTERINFO {
+        hAdapter: h,
+        Type: KMTQAITYPE_ADAPTERADDRESS,
+        pPrivateDriverData: &mut addr as *mut _ as *mut c_void,
+        PrivateDriverDataSize: size_of::<D3DKMT_ADAPTERADDRESS>() as u32,
+    };
+    // SAFETY: valid adapter handle and output buffer for KMTQAITYPE_ADAPTERADDRESS.
+    let location = unsafe { D3DKMTQueryAdapterInfo(&mut q_addr) }.is_ok().then(|| {
+        format!("PCI bus {}, device {}, function {}", addr.BusNumber, addr.DeviceNumber, addr.FunctionNumber)
+    });
+    let close = D3DKMT_CLOSEADAPTER { hAdapter: h };
+    // SAFETY: closes the handle opened above.
+    unsafe {
+        let _ = D3DKMTCloseAdapter(&close);
+    }
+    (hardware, location)
+}
+
+/// Hardware adapters in DXGI order, one per LUID (software and indirect display adapters are skipped).
 pub fn list_gpus() -> Vec<GpuInfo> {
     enumerate_gpus().0
 }
@@ -38,6 +94,7 @@ pub fn list_gpus() -> Vec<GpuInfo> {
 pub fn enumerate_gpus() -> (Vec<GpuInfo>, Vec<String>) {
     let mut out: Vec<GpuInfo> = Vec::new();
     let mut errors = Vec::new();
+    let reg_drivers = crate::sysinfo::gpu_driver_info();
     // SAFETY: plain factory creation; COM initialisation is not required for DXGI.
     let factory = match unsafe { CreateDXGIFactory1::<IDXGIFactory1>() } {
         Ok(f) => f,
@@ -68,17 +125,35 @@ pub fn enumerate_gpus() -> (Vec<GpuInfo>, Vec<String>) {
         if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
             continue;
         }
-        let key = adapter_key(desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart);
+        let luid = (desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart);
+        let (hardware, location) = query_kmt_adapter(luid);
+        if !hardware {
+            continue;
+        }
+        let key = adapter_key(luid.0, luid.1);
         if out.iter().any(|g| g.key == key) {
             continue;
         }
         let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+        let name = String::from_utf16_lossy(&desc.Description[..end]).trim().to_string();
+        // If an Indirect Display Driver or linked clone reports the exact same PCI location &
+        // hardware IDs as an already-listed GPU, skip the duplicate.
+        if location.is_some() && out.iter().any(|g| g.name == name && g.location == location) {
+            continue;
+        }
+        let (driver_version, driver_date) = reg_drivers
+            .get(&name.to_lowercase())
+            .cloned()
+            .unwrap_or((None, None));
         out.push(GpuInfo {
             key,
-            luid: (desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart),
-            name: String::from_utf16_lossy(&desc.Description[..end]).trim().to_string(),
+            luid,
+            name,
             dedicated_total: desc.DedicatedVideoMemory as u64,
             shared_total: desc.SharedSystemMemory as u64,
+            location,
+            driver_version,
+            driver_date,
         });
     }
     (out, errors)

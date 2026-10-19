@@ -70,6 +70,28 @@ pub struct RowView {
     pub last_in_card: bool,
     /// A process row's PID, shown muted after its name; empty on cards and headings.
     pub pid: String,
+    /// Optional table columns (shown when enabled in Settings).
+    pub col_pid: String,
+    pub col_proc_name: String,
+    pub col_status: String,
+    pub col_threads: String,
+    pub col_handles: String,
+    pub col_publisher: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AppHistoryView {
+    pub name: String,
+    pub icon: String,
+    pub running: bool,
+    pub cpu_time: String,
+    pub cpu_frac: f32,
+    pub net_data: String,
+    pub net_frac: f32,
+    pub disk_data: String,
+    pub disk_frac: f32,
+    pub peak_mem: String,
+    pub mem_frac: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -98,6 +120,8 @@ pub struct Frame {
     pub perf: Option<crate::perf::PerfFrame>,
     /// The newest history sample: where the Overview sparklines' right edge rests (crate::smooth).
     pub graph_end_ms: u64,
+    pub history_rows: Vec<AppHistoryView>,
+    pub history_elapsed_s: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -194,7 +218,7 @@ fn meters(snap: &Snapshot, history: &History) -> Vec<MeterView> {
         MeterView {
             label: "CPU",
             value: t.cpu_pct.map(format::pct).unwrap_or_default(),
-            sub: String::new(),
+            sub: t.cpu_temp_c.map(format::temp_c).unwrap_or_default(),
             spark: spark(Series::Cpu, 100.0),
             available: t.cpu_pct.is_some(),
         },
@@ -296,6 +320,11 @@ pub fn build_frame(
     let (metric, elevated) = (opts.metric, opts.elevated);
     let mut seen = HashSet::new();
     let hung_pids: HashSet<u32> = snap.windows.iter().filter(|w| w.hung).map(|w| w.pid).collect();
+    let sample_of: HashMap<(u32, i64), &negotium_snapshot::ProcessSample> = snap
+        .processes
+        .iter()
+        .map(|p| ((p.pid, p.create_time), p))
+        .collect();
     let image_of: HashMap<(u32, i64), &str> = snap
         .processes
         .iter()
@@ -362,7 +391,8 @@ pub fn build_frame(
         };
         let procs: Vec<(u32, i64)> = r.processes.iter().map(|p| (p.pid, p.create_time)).collect();
         let hung_pid = r.processes.iter().find(|p| hung_pids.contains(&p.pid)).map(|p| (p.pid, p.create_time));
-        let image_path = root.or(procs.first().copied()).and_then(|k| image_of.get(&k).map(|s| s.to_string()));
+        let primary_key = root.or(procs.first().copied());
+        let image_path = primary_key.and_then(|k| image_of.get(&k).map(|s| s.to_string()));
         targets.insert(id, Target {
             name: r.name.clone(),
             root,
@@ -372,8 +402,37 @@ pub fn build_frame(
             critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
             group: r.key == AppKey::Windows,
         });
+        let primary_proc = primary_key
+            .and_then(|k| r.processes.iter().find(|p| (p.pid, p.create_time) == k))
+            .or_else(|| r.processes.first());
+        let col_pid = if r.key == AppKey::Windows {
+            "—".into()
+        } else {
+            primary_proc.map(|p| p.pid.to_string()).unwrap_or_else(|| "—".into())
+        };
+        let col_proc_name = if r.key == AppKey::Windows {
+            "—".into()
+        } else {
+            primary_proc.map(|p| p.name.clone()).unwrap_or_else(|| "—".into())
+        };
+        let col_status = if r.hung_for_ms.is_some() { "Not responding".into() } else { "Running".into() };
+        let total_threads: u64 = procs.iter().filter_map(|k| sample_of.get(k)).map(|s| s.threads as u64).sum();
+        let total_handles: u64 = procs.iter().filter_map(|k| sample_of.get(k)).map(|s| s.handles as u64).sum();
+        let col_threads = if total_threads > 0 { total_threads.to_string() } else { "—".into() };
+        let col_handles = if total_handles > 0 { total_handles.to_string() } else { "—".into() };
+        let col_publisher = if r.key == AppKey::Windows {
+            "Microsoft Corporation".into()
+        } else {
+            primary_key
+                .and_then(|k| sample_of.get(&k))
+                .and_then(|s| s.publisher.clone())
+                .or_else(|| procs.iter().filter_map(|k| sample_of.get(k).and_then(|s| s.publisher.clone())).next())
+                .unwrap_or_else(|| "—".into())
+        };
         let search_text = std::iter::once(r.name.to_lowercase())
             .chain(r.processes.iter().map(|p| p.name.to_lowercase()))
+            .chain(r.processes.iter().map(|p| p.pid.to_string()))
+            .chain(procs.iter().filter_map(|k| sample_of.get(k).and_then(|s| s.publisher.as_ref())).map(|pub_s| pub_s.to_lowercase()))
             .collect::<Vec<_>>()
             .join(" ");
         let hung = r.hung_for_ms.map(format::hung).unwrap_or_default();
@@ -393,6 +452,7 @@ pub fn build_frame(
             exited: false,
             kind: RowKind::App, sub, bars: bars(r), icon: image_path.unwrap_or_default(),
             windows: r.key == AppKey::Windows, last_in_card: false, pid: String::new(),
+            col_pid, col_proc_name, col_status, col_threads, col_handles, col_publisher,
         });
         // Child rows only where the UI can show them: expanded apps, everything while searching, and
         // a Windows group with a hung member (the group row itself is never actionable, so the hung
@@ -414,8 +474,15 @@ pub fn build_frame(
                     critical: negotium_actions::is_critical(&p.name),
                     group: false,
                 });
+                let sample = sample_of.get(&pid_key).copied();
+                let proc_pub = sample.and_then(|s| s.publisher.clone());
+                let mut proc_search = format!("{} {}", p.name.to_lowercase(), p.pid);
+                if let Some(ref pub_s) = proc_pub {
+                    proc_search.push(' ');
+                    proc_search.push_str(&pub_s.to_lowercase());
+                }
                 out_rows.push(RowView {
-                    id: cid, parent: id, depth: 1, name: p.name.clone(), search_text: p.name.to_lowercase(), count: String::new(),
+                    id: cid, parent: id, depth: 1, name: p.name.clone(), search_text: proc_search, count: String::new(),
                     cpu: format::pct1(p.cpu_pct), mem: format::bytes(p.private_bytes as f64), disk: format::byte_rate(p.disk_bps),
                     gpu: p.gpu_pct.map(format::pct1).unwrap_or_else(|| "—".into()),
                     net: p.net.map(|n| format::bit_rate(n.total())).unwrap_or_else(|| "—".into()),
@@ -425,6 +492,12 @@ pub fn build_frame(
                     exited: false, kind: RowKind::Proc, sub: String::new(), bars: [0.0; 5],
                     icon: image_of.get(&pid_key).map(|s| s.to_string()).unwrap_or_default(), windows: false,
                     last_in_card: n == last, pid: p.pid.to_string(),
+                    col_pid: p.pid.to_string(),
+                    col_proc_name: p.name.clone(),
+                    col_status: if p.hung_for_ms.is_some() { "Not responding".into() } else { "Running".into() },
+                    col_threads: sample.filter(|s| s.threads > 0).map(|s| s.threads.to_string()).unwrap_or_else(|| "—".into()),
+                    col_handles: sample.filter(|s| s.handles > 0).map(|s| s.handles.to_string()).unwrap_or_else(|| "—".into()),
+                    col_publisher: proc_pub.unwrap_or_else(|| "—".into()),
                 });
             }
         }
@@ -455,6 +528,62 @@ pub fn build_frame(
         page: crate::controls::Page::Overview,
         perf: None,
         graph_end_ms: graph::end_of(history, snap.taken_at_ms),
+        history_rows: Vec::new(),
+        history_elapsed_s: 0,
+    }
+}
+
+pub fn build_history_frame(usage: &negotium_model::UsageTracker, sort_col: i32, sort_desc: bool) -> Frame {
+    let mut entries = usage.entries();
+    entries.sort_by(|a, b| {
+        let ord = match sort_col {
+            0 => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            2 => a.net_bytes.cmp(&b.net_bytes),
+            3 => a.disk_bytes.cmp(&b.disk_bytes),
+            4 => a.peak_mem_bytes.cmp(&b.peak_mem_bytes),
+            _ => a.cpu_100ns.cmp(&b.cpu_100ns),
+        };
+        let ord = if sort_desc { ord.reverse() } else { ord };
+        ord.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    let max_cpu = entries.iter().map(|e| e.cpu_100ns).max().unwrap_or(0).max(1) as f64;
+    let max_net = entries.iter().map(|e| e.net_bytes).max().unwrap_or(0).max(1) as f64;
+    let max_disk = entries.iter().map(|e| e.disk_bytes).max().unwrap_or(0).max(1) as f64;
+    let max_mem = entries.iter().map(|e| e.peak_mem_bytes).max().unwrap_or(0).max(1) as f64;
+    let history_rows = entries
+        .into_iter()
+        .map(|e| {
+            let cpu_secs = e.cpu_100ns / 10_000_000;
+            let cpu_ms = (e.cpu_100ns / 10_000) % 1000;
+            let cpu_time = if cpu_secs >= 3600 {
+                format!("{}:{:02}:{:02}", cpu_secs / 3600, (cpu_secs / 60) % 60, cpu_secs % 60)
+            } else if cpu_secs >= 60 {
+                format!("{}:{:02}", cpu_secs / 60, cpu_secs % 60)
+            } else if cpu_secs > 0 || cpu_ms >= 100 {
+                format!("{}.{} s", cpu_secs, cpu_ms / 100)
+            } else {
+                "0 s".into()
+            };
+            AppHistoryView {
+                name: e.name,
+                icon: e.icon_path.unwrap_or_default(),
+                running: e.running,
+                cpu_time,
+                cpu_frac: (e.cpu_100ns as f64 / max_cpu).clamp(0.0, 1.0) as f32,
+                net_data: format::bytes(e.net_bytes as f64),
+                net_frac: (e.net_bytes as f64 / max_net).clamp(0.0, 1.0) as f32,
+                disk_data: format::bytes(e.disk_bytes as f64),
+                disk_frac: (e.disk_bytes as f64 / max_disk).clamp(0.0, 1.0) as f32,
+                peak_mem: format::bytes(e.peak_mem_bytes as f64),
+                mem_frac: (e.peak_mem_bytes as f64 / max_mem).clamp(0.0, 1.0) as f32,
+            }
+        })
+        .collect();
+    Frame {
+        page: crate::controls::Page::AppHistory,
+        history_rows,
+        history_elapsed_s: usage.elapsed_s_now(),
+        ..Default::default()
     }
 }
 
@@ -811,7 +940,7 @@ mod tests {
         negotium_snapshot::ProcessSample {
             pid, parent_pid: 0, create_time: pid as i64, name: String::new(), session_id: 1, cpu_time_100ns: 0,
             private_working_set: 0, disk_io_bytes: 0, threads: 1, handles: 1, image_path: Some(image.into()),
-            package_family: None, description: None,
+            package_family: None, description: None, publisher: None,
         }
     }
     fn names(rows: &[RowView]) -> Vec<(RowKind, &str)> {

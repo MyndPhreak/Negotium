@@ -61,6 +61,13 @@ pub struct Settings {
     /// Negotium starts when the user signs in. Whether the Run value or logon task exists is read
     /// from the machine; this is the choice the user made.
     pub start_with_windows: bool,
+    /// Optional table columns on the Overview page.
+    pub col_pid: bool,
+    pub col_proc_name: bool,
+    pub col_status: bool,
+    pub col_threads: bool,
+    pub col_handles: bool,
+    pub col_publisher: bool,
 }
 
 impl Default for Settings {
@@ -78,6 +85,12 @@ impl Default for Settings {
             group_by_type: true,
             check_updates: true,
             start_with_windows: false,
+            col_pid: false,
+            col_proc_name: false,
+            col_status: false,
+            col_threads: false,
+            col_handles: false,
+            col_publisher: false,
         }
     }
 }
@@ -223,6 +236,12 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(group_by_type);
     field!(check_updates);
     field!(start_with_windows);
+    field!(col_pid);
+    field!(col_proc_name);
+    field!(col_status);
+    field!(col_threads);
+    field!(col_handles);
+    field!(col_publisher);
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)
@@ -551,6 +570,7 @@ mod tests {
             group_by_type: false,
             check_updates: false,
             start_with_windows: true,
+            ..Settings::default()
         };
         save_with(&Writes::Plain, &p, &s).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("\"theme\": \"dark\""));

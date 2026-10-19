@@ -704,7 +704,7 @@ mod tests {
         ProcessSample {
             pid, parent_pid: 0, create_time: 1, name: "p".into(), session_id: 1, cpu_time_100ns: 0,
             private_working_set: 0, disk_io_bytes: 0, threads: 1, handles: 0, image_path: None,
-            package_family: None, description: None,
+            package_family: None, description: None, publisher: None,
         }
     }
 

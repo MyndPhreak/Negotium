@@ -61,7 +61,7 @@ mod tests {
         ProcessSample {
             pid, parent_pid: 0, create_time: create, name: format!("p{pid}.exe"), session_id: 1,
             cpu_time_100ns: cpu_100ns, private_working_set: 0, disk_io_bytes: io, threads: 1,
-            handles: 0, image_path: None, package_family: None, description: None,
+            handles: 0, image_path: None, package_family: None, description: None, publisher: None,
         }
     }
 

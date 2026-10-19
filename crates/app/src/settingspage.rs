@@ -37,6 +37,12 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_start_with_windows(s.start_with_windows);
     ui.set_sort_column(sort_column_index(s.sort().column));
     ui.set_sort_descending(s.sort().descending);
+    ui.set_col_pid(s.col_pid);
+    ui.set_col_proc_name(s.col_proc_name);
+    ui.set_col_status(s.col_status);
+    ui.set_col_threads(s.col_threads);
+    ui.set_col_handles(s.col_handles);
+    ui.set_col_publisher(s.col_publisher);
     // Off: GraphClock rests the view on the newest sample at once (PF3).
     ui.global::<crate::GraphClock>().set_smooth(s.smooth_graphs);
 }
@@ -624,6 +630,20 @@ impl SettingsWiring {
             ui.on_group_by_type_toggled(move |on| {
                 change.apply(|s| s.group_by_type = on);
                 controls.set_grouped(on);
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_toggle_column(move |col| {
+                change.apply(|s| match col {
+                    0 => s.col_pid = !s.col_pid,
+                    1 => s.col_proc_name = !s.col_proc_name,
+                    2 => s.col_status = !s.col_status,
+                    3 => s.col_threads = !s.col_threads,
+                    4 => s.col_handles = !s.col_handles,
+                    5 => s.col_publisher = !s.col_publisher,
+                    _ => {}
+                });
             });
         }
         // The meters and the column headers are one choice (spec "Meters and headers stay in

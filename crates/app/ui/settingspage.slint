@@ -199,6 +199,7 @@ export component SettingsPage inherits VerticalLayout {
     // The manual check's outcome (crate::update::Updater), shown under its row.
     in property <string> update-status;
     in property <string> version-text;
+    in property <bool> pawnio-installed: false;
     in property <bool> interactive: true;
     // Room kept free below the last row (the floating toast), so it can be scrolled clear.
     in property <length> bottom-inset;
@@ -425,12 +426,18 @@ export component SettingsPage inherits VerticalLayout {
                 }
             }
             Text { text: root.version-text; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
-            Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
+            if !root.pawnio-installed : Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
             temp-row := SettingRow {
                 title: "CPU temperature add-on";
                 description: "Show the CPU temperature (installs the PawnIO driver from its publisher).";
-                available: false;
-                Toggle { label: temp-row.title; description: "Coming in a later version"; checked: false; interactive: false; }
+                note: root.pawnio-installed ? "PawnIO driver detected and active" : "";
+                available: root.pawnio-installed;
+                Toggle {
+                    label: temp-row.title;
+                    description: root.pawnio-installed ? temp-row.description : "Coming in a later version";
+                    checked: root.pawnio-installed;
+                    interactive: false;
+                }
             }
         }
     }

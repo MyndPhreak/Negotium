@@ -3,14 +3,16 @@ import { Theme } from "theme.slint";
 import { MetersRow, MeterData } from "meters.slint";
 import { TopStrip, TileData } from "topstrip.slint";
 import { AppList, RowData } from "applist.slint";
-import { Banner, Toast, Modal } from "overlays.slint";
+import { Banner, Toast, Modal, RunTaskModal } from "overlays.slint";
 import { Rail } from "rail.slint";
 import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
 import { SettingsPage } from "settingspage.slint";
 import { StartupPage, StartupData } from "startuppage.slint";
+import { AppHistoryPage, AppHistoryData } from "apphistorypage.slint";
+import { ServicesPage, ServiceData } from "servicespage.slint";
 import { GraphData, ScrubRow, GraphClock } from "graph.slint";
 export { NegotiumTray } from "tray.slint";
-export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, GraphClock }
+export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, GraphClock }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -22,7 +24,7 @@ export component MainWindow inherits Window {
     default-font-family: "Segoe UI Variable Text";
     background: Theme.window-bg;
 
-    // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings (crate::controls::Page).
+    // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings, 4 AppHistory, 5 Services (crate::controls::Page).
     in-out property <int> page: 0;
     in property <[MeterData]> meters;
     in property <int> selected-metric;
@@ -36,6 +38,7 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm-visible;
     in-out property <string> details-text;
     in-out property <bool> details-visible;
+    in-out property <bool> run-task-visible;
     in property <[DeviceData]> perf-devices;
     in-out property <string> perf-selected: "cpu";
     in property <string> perf-title;
@@ -88,7 +91,7 @@ export component MainWindow inherits Window {
         GraphClock.lead-ms = lead-ms;
         GraphClock.speed = speed;
     }
-    out property <bool> modal-open: confirm-visible || details-visible;
+    out property <bool> modal-open: confirm-visible || details-visible || run-task-visible;
     // The room the floating toast takes at the bottom of a page (its height and its gap), so the
     // end of every page (the Overview and Startup lists, the Performance and Settings scroll
     // content) can still be scrolled clear of it.
@@ -110,6 +113,15 @@ export component MainWindow inherits Window {
     in-out property <int> sort-column: 0;
     in-out property <bool> sort-descending: true;
     callback sort-clicked(int);
+    // Optional table columns on the Overview page.
+    in-out property <bool> col-pid: false;
+    in-out property <bool> col-proc-name: false;
+    in-out property <bool> col-status: false;
+    in-out property <bool> col-threads: false;
+    in-out property <bool> col-handles: false;
+    in-out property <bool> col-publisher: false;
+    callback toggle-column(int);
+    callback run-new-task(string, string, int, int, bool);
     callback open-tile(int);
     callback toggle-row(int);
     callback row-action(string, int);
@@ -137,8 +149,30 @@ export component MainWindow inherits Window {
     in property <bool> startup-admin-banner;
     // Some list, folder or key couldn't be read (crate::startup::JobOutcome::read_error).
     in property <bool> startup-read-note;
+    in-out property <int> startup-sort-column: 0;
+    in-out property <bool> startup-sort-descending: false;
+    callback sort-startup(int);
     callback toggle-startup(int, bool);
     callback refresh-startup();
+
+    // App History (crate::view::AppHistoryView):
+    in property <[AppHistoryData]> history-rows;
+    in property <string> history-duration: "0 s";
+    in-out property <int> history-sort-column: 1;
+    in-out property <bool> history-sort-descending: true;
+    callback sort-history(int);
+    callback reset-history();
+
+    // Services (crate::services):
+    in property <[ServiceData]> service-rows;
+    in-out property <bool> services-loading;
+    in-out property <string> services-search-text;
+    in-out property <int> services-sort-column: 0;
+    in-out property <bool> services-sort-descending: false;
+    callback search-services(string);
+    callback sort-services(int);
+    callback refresh-services();
+    callback service-action(string, int);
 
     // Settings (crate::settings::Settings, shown by crate::settingspage): refresh index (0.5 / 1 /
     // 2 / 5 s), theme index (System / Light / Dark), the switches. `on-top` is both the window's
@@ -157,6 +191,7 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-gpu-fallback;
     in property <bool> settings-gpu-running: true;
     in property <bool> settings-gpu-env-override;
+    in-out property <bool> settings-pawnio-installed: false;
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback always-on-top-toggled(bool);
@@ -225,6 +260,10 @@ export component MainWindow inherits Window {
         root.details-text = text;
         root.details-visible = true;
     }
+    public function show-run-task() {
+        parking.focus();
+        root.run-task-visible = true;
+    }
     // Leaving the Overview: the hidden list or row control gives up keyboard focus at once (Slint
     // drops focus from a hidden item only on a later event-loop turn).
     public function park-focus() {
@@ -243,6 +282,10 @@ export component MainWindow inherits Window {
         key-pressed(e) => {
             if ((e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) && root.page == 0 && !root.modal-open) {
                 list.focus-list();
+                return accept;
+            }
+            if (e.text == "f" && e.modifiers.control && root.page == 0 && !root.modal-open) {
+                list.focus-search();
                 return accept;
             }
             return reject;
@@ -313,6 +356,14 @@ export component MainWindow inherits Window {
                             sort-column: root.sort-column;
                             sort-descending: root.sort-descending;
                             sort-clicked(c) => { root.sort-clicked(c); }
+                            col-pid: root.col-pid;
+                            col-proc-name: root.col-proc-name;
+                            col-status: root.col-status;
+                            col-threads: root.col-threads;
+                            col-handles: root.col-handles;
+                            col-publisher: root.col-publisher;
+                            toggle-column(c) => { root.toggle-column(c); }
+                            open-run-task => { root.show-run-task(); }
                             search-text <=> root.search-text;
                             interactive: !root.modal-open;
                             toggle(id) => { root.toggle-row(id); }
@@ -373,8 +424,11 @@ export component MainWindow inherits Window {
                         loading: root.startup-loading;
                         admin-banner: root.startup-admin-banner;
                         read-note: root.startup-read-note;
+                        sort-column: root.startup-sort-column;
+                        sort-descending: root.startup-sort-descending;
                         bottom-inset: root.toast-inset;
                         interactive: !root.modal-open;
+                        sort-clicked(c) => { root.sort-startup(c); }
                         toggle(id, on) => { root.toggle-startup(id, on); }
                         refresh => { root.refresh-startup(); }
                         restart-admin => { root.restart-admin(); }
@@ -398,6 +452,7 @@ export component MainWindow inherits Window {
                         gpu-fallback: root.settings-gpu-fallback;
                         gpu-running: root.settings-gpu-running;
                         gpu-env-override: root.settings-gpu-env-override;
+                        pawnio-installed: root.settings-pawnio-installed;
                         installed: root.settings-installed;
                         admin-mode-state: root.settings-admin-mode-state;
                         hotkey: root.settings-hotkey;
@@ -421,6 +476,43 @@ export component MainWindow inherits Window {
                         check-updates-toggled(on) => { root.check-updates-toggled(on); }
                         check-updates-now() => { root.check-updates-now(); }
                         open-windows-task-manager() => { root.open-windows-task-manager(); }
+                    }
+                }
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 4;
+                    AppHistoryPage {
+                        rows: root.history-rows;
+                        duration-text: root.history-duration;
+                        sort-column: root.history-sort-column;
+                        sort-descending: root.history-sort-descending;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        sort-clicked(c) => { root.sort-history(c); }
+                        reset => { root.reset-history(); }
+                    }
+                }
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 5;
+                    ServicesPage {
+                        rows: root.service-rows;
+                        loading: root.services-loading;
+                        search-text <=> root.services-search-text;
+                        sort-column: root.services-sort-column;
+                        sort-descending: root.services-sort-descending;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        search(text) => { root.search-services(text); }
+                        sort-clicked(c) => { root.sort-services(c); }
+                        refresh => { root.refresh-services(); }
+                        service-action(act, id) => { root.service-action(act, id); }
                     }
                 }
                 // Over every page: a result (a failed startup toggle, an action's message) shows
@@ -452,5 +544,14 @@ export component MainWindow inherits Window {
         confirm-label: "Close";
         show-cancel: false;
         done(ok) => { root.close-details(); }
+    }
+    if root.run-task-visible : RunTaskModal {
+        run(cmd, dir, priv-mode, compat, eco) => {
+            root.run-task-visible = false;
+            root.run-new-task(cmd, dir, priv-mode, compat, eco);
+        }
+        cancel => {
+            root.run-task-visible = false;
+        }
     }
 }

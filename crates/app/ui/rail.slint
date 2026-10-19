@@ -73,6 +73,20 @@ export component Rail inherits VerticalLayout {
         activated => { root.select(2); }
     }
     RailButton {
+        label: "App history";
+        icon: "M 10 3 A 7 7 0 1 0 17 10 A 7 7 0 0 0 10 3 M 10 6 L 10 10 L 13 12";
+        selected: root.page == 4;
+        interactive: root.interactive;
+        activated => { root.select(4); }
+    }
+    RailButton {
+        label: "Services";
+        icon: "M 4 4 L 16 4 L 16 8 L 4 8 Z M 4 12 L 16 12 L 16 16 L 4 16 Z M 7 6 L 7.5 6 M 7 14 L 7.5 14";
+        selected: root.page == 5;
+        interactive: root.interactive;
+        activated => { root.select(5); }
+    }
+    RailButton {
         label: "Settings";
         icon: "M 3 5 L 17 5 M 3 10 L 17 10 M 3 15 L 17 15 M 7 3 L 7 7 M 13 8 L 13 12 M 9 13 L 9 17";
         selected: root.page == 3;

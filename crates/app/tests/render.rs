@@ -404,7 +404,7 @@ fn performance_page_resize_frames_fit_in_16_ms() {
         ui.set_perf_cells(ModelRc::new(VecModel::from(cells)));
         let devices: Vec<DeviceData> = (0..6)
             .map(|i| DeviceData {
-                id: format!("d{i}").into(), title: "CPU".into(), value: "12%".into(),
+                id: format!("d{i}").into(), title: "CPU".into(), subtitle: "".into(), value: "12%".into(),
                 spark: negotium::graph::line(samples(60, i, load), 59_000, 60_000, 100.0, 60).into(),
             })
             .collect();
@@ -466,8 +466,8 @@ fn scroll_step_cost_under_the_software_renderer() {
         .into_iter()
         .map(|l| negotium::MeterData { label: l.into(), value: "12%".into(), sub: "".into(), spark: spark.clone().into(), available: true })
         .collect();
-    ui.set_meters(ModelRc::new(VecModel::from(meters)));
     ui.set_perf_graphs(ModelRc::new(VecModel::from(vec![busy_graph("% Utilization", 300, 1, Load::Smooth)])));
+    ui.set_meters(ModelRc::new(VecModel::from(meters)));
     let cells: Vec<GraphData> = (0..32).map(|i| busy_graph(&format!("CPU {i}"), 60, i + 7, Load::Smooth)).collect();
     ui.set_perf_cells(ModelRc::new(VecModel::from(cells)));
     for (page, name) in [(0, "Overview"), (1, "Performance, 32 cells")] {
@@ -598,7 +598,7 @@ fn a_performance_frame_draws_once() {
     ui.global::<negotium::GraphClock>().set_smooth(false);
     ui.set_page(1);
     let devices = |v: &str| -> Vec<DeviceData> {
-        (0..20).map(|i| DeviceData { id: format!("d{i}").into(), title: format!("Disk {i}").into(), value: v.into(), spark: "M 0 50 L 1000 40".into() }).collect()
+        (0..20).map(|i| DeviceData { id: format!("d{i}").into(), title: format!("Disk {i}").into(), subtitle: "".into(), value: v.into(), spark: "M 0 50 L 1000 40".into() }).collect()
     };
     let stats = |v: &str| -> Vec<StatData> { (0..12).map(|_| StatData { label: "Speed".into(), value: v.into() }).collect() };
     let cells = |seed: u32| -> Vec<GraphData> { (0..64).map(|i| busy_graph(&format!("CPU {i}"), 60, i + seed, Load::Smooth)).collect() };

@@ -53,8 +53,22 @@ pub fn startup_rows(entries: &[StartupEntry], elevated: bool) -> Vec<StartupRow>
             }
         })
         .collect();
-    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+    sort_startup_rows(&mut rows, 0, false);
     rows
+}
+
+/// Sorts startup rows by column (0 = Name, 1 = Publisher, 2 = Status, 3 = Location) and direction.
+pub fn sort_startup_rows(rows: &mut [StartupRow], col: i32, desc: bool) {
+    rows.sort_by(|a, b| {
+        let ord = match col {
+            1 => a.publisher.to_lowercase().cmp(&b.publisher.to_lowercase()),
+            2 => a.status.to_lowercase().cmp(&b.status.to_lowercase()),
+            3 => a.location.to_lowercase().cmp(&b.location.to_lowercase()),
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        };
+        let ord = if desc { ord.reverse() } else { ord };
+        ord.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())).then(a.id.cmp(&b.id))
+    });
 }
 
 /// The inline "Restart as admin" banner: some entry could change, but only with admin rights.
@@ -308,5 +322,38 @@ mod tests {
         assert!(text.contains("startup list: HKLM Run: access denied"), "{text}");
         assert!(text.contains("startup job panicked: test panic: startup job"), "{text}");
         assert!(!text.contains("Skipped"), "{text}");
+    }
+
+    #[test]
+    fn startup_rows_sort_by_column_and_direction() {
+        let entries = vec![
+            StartupEntry {
+                source: StartupSource::UserRun,
+                key: "a".into(),
+                name: "Alpha".into(),
+                publisher: Some("Zeta Corp".into()),
+                enabled: false,
+                changeable: true,
+                command: "a.exe".into(),
+                location: "Registry (you)".into(),
+            },
+            StartupEntry {
+                source: StartupSource::MachineRun,
+                key: "b".into(),
+                name: "Beta".into(),
+                publisher: Some("Acme Inc".into()),
+                enabled: true,
+                changeable: true,
+                command: "b.exe".into(),
+                location: "Registry (all users)".into(),
+            },
+        ];
+        let mut rows = startup_rows(&entries, true);
+        sort_startup_rows(&mut rows, 1, false); // Publisher ascending
+        assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Beta", "Alpha"]);
+        sort_startup_rows(&mut rows, 2, false); // Status ascending ("Disabled" < "Enabled")
+        assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Alpha", "Beta"]);
+        sort_startup_rows(&mut rows, 0, true); // Name descending
+        assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Beta", "Alpha"]);
     }
 }

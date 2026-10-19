@@ -16,6 +16,7 @@ pub struct Collector {
     info: SystemInfo,
     net: crate::net::NetTable,
     gpu_temps: crate::gpu::GpuTemps,
+    cpu_temp: crate::cputemp::CpuTemp,
     /// Per-process network: the kernel network trace, only when asked for (`with_net_feed`) and
     /// elevated.
     net_by_pid: crate::netetw::PerPidNet<crate::netetw::NetFeed>,
@@ -43,6 +44,7 @@ impl Collector {
             started,
             logical_cpus: logical_cpus(),
             gpu_temps: crate::gpu::GpuTemps::open(&info.gpus),
+            cpu_temp: crate::cputemp::CpuTemp::open(),
             info,
             net: crate::net::NetTable::new(),
             net_by_pid: crate::netetw::PerPidNet::off(Instant::now()),
@@ -111,12 +113,14 @@ impl Collector {
                     image_path: id.image_path,
                     package_family: id.package_family,
                     description: id.description,
+                    publisher: id.publisher,
                 }
             })
             .collect();
 
         let mut totals = SystemTotals {
             logical_cpus: self.logical_cpus,
+            cpu_temp_c: self.cpu_temp.read(),
             memory: memory_totals(),
             uptime_s: uptime_s(),
             local_time_ms: local_time_ms(),
@@ -182,18 +186,26 @@ impl Collector {
     }
 }
 
-/// One sample per adapter that PDH or DXGI knows. PDH samples (which have engines) come first; every
-/// DXGI adapter without one is seeded with unknown utilization (NaN, shown as "-"), so temperatures
-/// and adapter memory never depend on the engine counter. `None` only when nothing is known.
+/// One sample per hardware adapter. When DXGI enumerated adapters (`info` is non-empty), only
+/// those adapters are kept (dropping software adapters like Microsoft Basic Render Driver that PDH
+/// still reports), in DXGI order; any DXGI adapter without engine samples is seeded with unknown
+/// utilization (NaN, shown as "—"). When `info` is empty, PDH samples are kept as-is.
 pub(crate) fn merge_gpus(
     pdh: Option<Vec<GpuSample>>, info: &[crate::gpu::GpuInfo], dedicated: Option<&BTreeMap<String, u64>>,
     shared: Option<&BTreeMap<String, u64>>, temps: &[(&str, f32)],
 ) -> Option<Vec<GpuSample>> {
     let mut gpus = pdh.unwrap_or_default();
+    if !info.is_empty() {
+        gpus.retain(|s| info.iter().any(|g| g.key == s.key));
+    }
     for g in info {
         if !gpus.iter().any(|s| s.key == g.key) {
             gpus.push(GpuSample { key: g.key.clone(), util_pct: f32::NAN, ..Default::default() });
         }
+    }
+    if !info.is_empty() {
+        let pos = |k: &str| info.iter().position(|g| g.key == k).unwrap_or(usize::MAX);
+        gpus.sort_by_key(|s| pos(&s.key));
     }
     for g in &mut gpus {
         g.dedicated_used = dedicated.and_then(|m| m.get(&g.key).copied());
@@ -216,7 +228,7 @@ mod tests {
         ProcessSample {
             pid: 1, parent_pid: 0, create_time: 1, name: name.into(), session_id: 0, cpu_time_100ns: 0,
             private_working_set: ws, disk_io_bytes: 0, threads: 1, handles: 0, image_path: None,
-            package_family: None, description: None,
+            package_family: None, description: None, publisher: None,
         }
     }
 
@@ -237,8 +249,12 @@ mod tests {
 
     #[test]
     fn a_temperature_for_an_adapter_without_engine_samples_is_attached() {
-        let pdh = vec![GpuSample { key: "a".into(), util_pct: 40.0, ..Default::default() }];
+        let pdh = vec![
+            GpuSample { key: "a".into(), util_pct: 40.0, ..Default::default() },
+            GpuSample { key: "software_basic_render".into(), util_pct: 0.0, ..Default::default() },
+        ];
         let g = merge_gpus(Some(pdh), &[info("a"), info("b")], None, None, &[("a", 50.0), ("b", 60.0)]).unwrap();
+        assert_eq!(g.len(), 2, "software PDH adapter not in DXGI hardware list is dropped");
         assert_eq!((g[0].util_pct, g[0].temp_c), (40.0, Some(50.0)));
         assert!(g[1].util_pct.is_nan());
         assert_eq!(g[1].temp_c, Some(60.0));

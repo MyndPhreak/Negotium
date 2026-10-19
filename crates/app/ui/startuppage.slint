@@ -3,6 +3,7 @@ import { Theme } from "theme.slint";
 import { Toggle } from "settingspage.slint";
 import { Banner } from "overlays.slint";
 import { RevealScrollView } from "revealscroll.slint";
+import { SortHeader } from "applist.slint";
 
 // One startup entry as the page shows it (crate::startup::StartupRow).
 export struct StartupData {
@@ -17,11 +18,6 @@ export struct StartupData {
     note: string,
 }
 
-component HeaderText inherits Text {
-    color: Theme.muted;
-    font-size: 11px;
-}
-
 // The startup apps (spec 5.3): name, publisher, status and location, each with a switch. Only the
 // list takes spare height. Every change goes through Rust (`toggle`), which re-reads the list,
 // so the switches always show the real state.
@@ -34,13 +30,16 @@ export component StartupPage inherits VerticalLayout {
     // Room kept free at the bottom (the floating toast), so the last row can be scrolled clear.
     in property <length> bottom-inset;
     in property <bool> interactive: true;
+    in property <int> sort-column: 0;
+    in property <bool> sort-descending: false;
+    callback sort-clicked(int);
     callback toggle(int, bool);
     callback refresh();
     callback restart-admin();
     // Column widths, shared by the header and the rows. The last holds the note and the switch:
     // "Set by policy" (about 60 px), 6 px and the 40 px switch.
     property <length> publisher-w: 150px;
-    property <length> status-w: 64px;
+    property <length> status-w: 76px;
     property <length> location-w: 160px;
     property <length> switch-w: 130px;
     // The list's scrollbar gutter (as on the Settings page), kept clear in the header too.
@@ -84,11 +83,107 @@ export component StartupPage inherits VerticalLayout {
         padding-left: 8px;
         padding-right: 8px + root.gutter;
         spacing: 8px;
-        HeaderText { text: "Name"; horizontal-stretch: 1; }
-        HeaderText { text: "Publisher"; width: root.publisher-w; }
-        HeaderText { text: "Status"; width: root.status-w; }
-        HeaderText { text: "Location"; width: root.location-w; }
-        Rectangle { width: root.switch-w; }
+        Rectangle {
+            horizontal-stretch: 1;
+            height: name-hdr.preferred-height;
+            HorizontalLayout {
+                spacing: 4px;
+                name-hdr := Text {
+                    text: "Name";
+                    color: root.sort-column == 0 ? Theme.text : Theme.muted;
+                    font-size: 11px;
+                    font-weight: root.sort-column == 0 ? 600 : 400;
+                }
+                if root.sort-column == 0 : Text {
+                    text: root.sort-descending ? "▼" : "▲";
+                    color: Theme.text;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+            TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { root.sort-clicked(0); }
+            }
+        }
+        Rectangle {
+            width: root.publisher-w;
+            height: pub-hdr.preferred-height;
+            HorizontalLayout {
+                spacing: 4px;
+                pub-hdr := Text {
+                    text: "Publisher";
+                    color: root.sort-column == 1 ? Theme.text : Theme.muted;
+                    font-size: 11px;
+                    font-weight: root.sort-column == 1 ? 600 : 400;
+                }
+                if root.sort-column == 1 : Text {
+                    text: root.sort-descending ? "▼" : "▲";
+                    color: Theme.text;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+            TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { root.sort-clicked(1); }
+            }
+        }
+        Rectangle {
+            width: root.status-w;
+            height: stat-hdr.preferred-height;
+            HorizontalLayout {
+                spacing: 4px;
+                stat-hdr := Text {
+                    text: "Status";
+                    color: root.sort-column == 2 ? Theme.text : Theme.muted;
+                    font-size: 11px;
+                    font-weight: root.sort-column == 2 ? 600 : 400;
+                }
+                if root.sort-column == 2 : Text {
+                    text: root.sort-descending ? "▼" : "▲";
+                    color: Theme.text;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+            TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { root.sort-clicked(2); }
+            }
+        }
+        Rectangle {
+            width: root.location-w;
+            height: loc-hdr.preferred-height;
+            HorizontalLayout {
+                spacing: 4px;
+                loc-hdr := Text {
+                    text: "Location";
+                    color: root.sort-column == 3 ? Theme.text : Theme.muted;
+                    font-size: 11px;
+                    font-weight: root.sort-column == 3 ? 600 : 400;
+                }
+                if root.sort-column == 3 : Text {
+                    text: root.sort-descending ? "▼" : "▲";
+                    color: Theme.text;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+            TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { root.sort-clicked(3); }
+            }
+        }
+        Rectangle { width: root.switch-w; height: 1px; }
     }
     if root.read-note : Text {
         text: "Some startup apps couldn't be read; details are in the log.";

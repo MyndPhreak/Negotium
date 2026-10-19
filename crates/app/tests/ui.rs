@@ -645,7 +645,7 @@ fn the_rail_switches_pages() {
 }
 
 fn device(id: &str, title: &str) -> DeviceData {
-    DeviceData { id: id.into(), title: title.into(), value: "1%".into(), spark: "M 0 100".into() }
+    DeviceData { id: id.into(), title: title.into(), subtitle: "".into(), value: "1%".into(), spark: "M 0 100".into() }
 }
 
 #[test]
