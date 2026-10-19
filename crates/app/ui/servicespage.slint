@@ -62,43 +62,13 @@ export component ServicesPage inherits VerticalLayout {
         }
         Button { text: "Refresh"; enabled: root.interactive; clicked => { root.refresh(); } }
     }
-    Rectangle {
+    svc-search := LineEdit {
         vertical-stretch: 0;
-        height: svc-search.preferred-height;
-        svc-search := LineEdit {
-            width: parent.width;
-            text <=> root.search-text;
-            placeholder-text: "Search services by name, description, PID, or group";
-            accessible-label: "Search services";
-            enabled: root.interactive;
-            edited(text) => { root.search(text); }
-        }
-        if root.search-text != "" : FocusButton {
-            x: parent.width - 28px;
-            y: (parent.height - 22px) / 2;
-            width: 22px;
-            height: 22px;
-            border-radius: 4px;
-            interactive: root.interactive;
-            accessible-label: "Clear service search";
-            background: self.hovered ? Theme.card-hover : transparent;
-            activated => {
-                root.search-text = "";
-                root.search("");
-            }
-            Path {
-                width: 8px;
-                height: 8px;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                viewbox-width: 8;
-                viewbox-height: 8;
-                commands: "M 1 1 L 7 7 M 7 1 L 1 7";
-                stroke: Theme.muted;
-                stroke-width: 1.4px;
-                fill: transparent;
-            }
-        }
+        text <=> root.search-text;
+        placeholder-text: "Search services by name, description, PID, or group";
+        accessible-label: "Search services";
+        enabled: root.interactive;
+        edited(text) => { root.search(text); }
     }
     HorizontalLayout {
         vertical-stretch: 0;
