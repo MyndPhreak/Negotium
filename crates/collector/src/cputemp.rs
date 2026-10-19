@@ -207,10 +207,7 @@ impl PawnSession {
                 };
                 if hr.is_ok() && ret_size >= 1 {
                     let raw = out[0] as u32;
-                    let cur_temp = ((raw >> 21) & 0x7FF) as f32 * 0.125f32;
-                    if (5.0..=125.0).contains(&cur_temp) {
-                        return Some(cur_temp);
-                    }
+                    return parse_amd_smn_temp(raw);
                 }
                 None
             }
@@ -292,6 +289,27 @@ impl Drop for PawnSession {
                 let _ = FreeLibrary(self.dll);
             }
         }
+    }
+}
+
+/// Parses the CPU package temperature in degrees Celsius from AMD SMN
+/// register `THM_TCON_CUR_TMP` (`0x00059800`).
+///
+/// Current temp is encoded in bits [31:21] with a step of 0.125 °C.
+/// Modern Zen processors signal a 49 °C range adjustment through `RANGE_SEL`
+/// (bit 19, `0x0008_0000`) or `TJ_SEL` (bits 17:16, `0x0003_0000`). When either
+/// is set, the hardware reports a value shifted by +49 °C, which must be subtracted.
+pub fn parse_amd_smn_temp(raw: u32) -> Option<f32> {
+    let mut temp = ((raw >> 21) & 0x7FF) as f32 * 0.125f32;
+    const RANGE_SEL_MASK: u32 = 1 << 19; // 0x0008_0000
+    const TJ_SEL_MASK: u32 = 3 << 16;    // 0x0003_0000
+    if (raw & RANGE_SEL_MASK) != 0 || (raw & TJ_SEL_MASK) == TJ_SEL_MASK {
+        temp -= 49.0f32;
+    }
+    if (5.0..=125.0).contains(&temp) {
+        Some(temp)
+    } else {
+        None
     }
 }
 
@@ -435,5 +453,29 @@ mod tests {
         let mut temp = CpuTemp::open();
         let reading = temp.read();
         println!("pawnio_installed: {installed}, has_pawnio: {}, reading: {reading:?}", temp.has_pawnio());
+    }
+
+    #[test]
+    fn parses_amd_smn_temperature_with_and_without_range_adjustment() {
+        // 58.0 °C with RANGE_SEL (bit 19) set:
+        // Raw unadjusted = 58.0 + 49.0 = 107.0 °C
+        // 107.0 / 0.125 = 856 (0x358)
+        let raw_with_range_sel = (856 << 21) | (1 << 19);
+        let temp = parse_amd_smn_temp(raw_with_range_sel).expect("valid reading");
+        assert!((temp - 58.0).abs() < 0.05, "expected 58.0, got {temp}");
+
+        // 58.0 °C with TJ_SEL (bits 17:16) set:
+        let raw_with_tj_sel = (856 << 21) | (3 << 16);
+        let temp_tj = parse_amd_smn_temp(raw_with_tj_sel).expect("valid reading");
+        assert!((temp_tj - 58.0).abs() < 0.05, "expected 58.0, got {temp_tj}");
+
+        // 58.0 °C without range flags:
+        let raw_no_offset = (58.0f32 / 0.125f32) as u32;
+        let raw_direct = raw_no_offset << 21;
+        let temp_direct = parse_amd_smn_temp(raw_direct).expect("valid reading");
+        assert!((temp_direct - 58.0).abs() < 0.05, "expected 58.0, got {temp_direct}");
+
+        // Below 5 °C or above 125 °C returns None:
+        assert_eq!(parse_amd_smn_temp(0), None);
     }
 }
