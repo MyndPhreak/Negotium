@@ -1,0 +1,105 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  WIX_VERSION_TAG: wix3141rtm
+  WIX_ZIP_SHA256: 6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created || steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-msi:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' || needs.release-please.outputs.release_created == true }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the tag matches the workspace version
+        shell: pwsh
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $pkg = $meta.packages | Where-Object { $_.name -eq 'negotium' }
+          if (-not $pkg) { throw "package 'negotium' not found in cargo metadata" }
+          $expected = "v$($pkg.version)"
+          if ($env:TAG -ne $expected) {
+            throw "Tag '$env:TAG' does not match the workspace version (expected '$expected')."
+          }
+          Write-Host "Tag $env:TAG matches version $($pkg.version)"
+          "VERSION=$($pkg.version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Test
+        run: cargo test --workspace --no-fail-fast -- --skip busy_child_reports_one_core_of_cpu
+
+      - name: Build release
+        run: cargo build --release -p negotium
+
+      - name: Check the release exe imports no Visual C++ runtime
+        shell: pwsh
+        run: ./.github/scripts/check-imports.ps1 target/release/negotium.exe
+
+      - name: Install WiX Toolset v3.14
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'wix314'
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/$env:WIX_VERSION_TAG/wix314-binaries.zip" -OutFile $zip
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+          if ($actual -ne $env:WIX_ZIP_SHA256) {
+            throw "WiX archive SHA-256 mismatch: expected $env:WIX_ZIP_SHA256, got $actual"
+          }
+          Expand-Archive -Path $zip -DestinationPath $dir
+          foreach ($exe in 'candle.exe', 'light.exe') {
+            if (-not (Test-Path (Join-Path $dir $exe))) { throw "$exe missing from the WiX archive" }
+          }
+          "WIX_BIN=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --version 0.3.9 --locked
+
+      - name: Build the MSI
+        run: cargo wix -p negotium --bin-path "$env:WIX_BIN" --no-build --nocapture
+
+      - name: Locate the MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem target/wix -Filter '*.msi'
+          if ($msi.Count -ne 1) { throw "expected exactly one MSI in target/wix, found $($msi.Count)" }
+          $expected = "negotium-$env:VERSION-x86_64.msi"
+          if ($msi[0].Name -ne $expected) { throw "unexpected MSI name $($msi[0].Name), expected $expected" }
+          "MSI_PATH=$($msi[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload MSI to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          gh release upload $env:TAG $env:MSI_PATH --repo $env:GITHUB_REPOSITORY --clobber
+          Write-Host "Uploaded $env:MSI_PATH to release $env:TAG"
