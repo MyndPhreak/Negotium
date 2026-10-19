@@ -39,6 +39,8 @@ export component MainWindow inherits Window {
     in-out property <string> details-text;
     in-out property <bool> details-visible;
     in-out property <bool> run-task-visible;
+    in-out property <string> run-task-command;
+    in-out property <string> run-task-working-dir;
     in property <[DeviceData]> perf-devices;
     in-out property <string> perf-selected: "cpu";
     in property <string> perf-title;
@@ -122,6 +124,7 @@ export component MainWindow inherits Window {
     in-out property <bool> col-publisher: false;
     callback toggle-column(int);
     callback run-new-task(string, string, int, int, bool);
+    callback browse-executable();
     callback open-tile(int);
     callback toggle-row(int);
     callback row-action(string, int);
@@ -262,6 +265,8 @@ export component MainWindow inherits Window {
     }
     public function show-run-task() {
         parking.focus();
+        root.run-task-command = "";
+        root.run-task-working-dir = "";
         root.run-task-visible = true;
     }
     // Leaving the Overview: the hidden list or row control gives up keyboard focus at once (Slint
@@ -546,6 +551,9 @@ export component MainWindow inherits Window {
         done(ok) => { root.close-details(); }
     }
     if root.run-task-visible : RunTaskModal {
+        command <=> root.run-task-command;
+        working-dir <=> root.run-task-working-dir;
+        browse => { root.browse-executable(); }
         run(cmd, dir, priv-mode, compat, eco) => {
             root.run-task-visible = false;
             root.run-new-task(cmd, dir, priv-mode, compat, eco);

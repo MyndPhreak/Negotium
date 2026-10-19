@@ -94,6 +94,7 @@ export component RunTaskModal inherits Rectangle {
     in-out property <bool> efficiency-mode: false;
     callback run(string, string, int, int, bool);
     callback cancel();
+    callback browse();
     background: #00000066;
     TouchArea { }
     FocusScope {
@@ -124,15 +125,23 @@ export component RunTaskModal inherits Rectangle {
             VerticalLayout {
                 spacing: 4px;
                 Text { text: "Open"; color: Theme.text; font-size: 12px; font-weight: 600; }
-                cmd-input := LineEdit {
-                    text <=> root.command;
-                    placeholder-text: "e.g. cmd.exe, powershell, notepad C:\\notes.txt";
-                    accessible-label: "Command or path to run";
-                    init => { self.focus(); }
-                    accepted => {
-                        if (root.command != "") {
-                            root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
+                HorizontalLayout {
+                    spacing: 8px;
+                    cmd-input := LineEdit {
+                        horizontal-stretch: 1;
+                        text <=> root.command;
+                        placeholder-text: "e.g. cmd.exe, powershell, notepad C:\\notes.txt";
+                        accessible-label: "Command or path to run";
+                        init => { self.focus(); }
+                        accepted => {
+                            if (root.command != "") {
+                                root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
+                            }
                         }
+                    }
+                    Button {
+                        text: "Browse...";
+                        clicked => { root.browse(); }
                     }
                 }
             }

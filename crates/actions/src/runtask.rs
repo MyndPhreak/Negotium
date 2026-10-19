@@ -327,6 +327,51 @@ fn launch_low_integrity(
     Ok(())
 }
 
+/// Opens a standard Windows File Open Dialog modal to `owner` to browse for an executable.
+/// Returns the chosen path, or `None` if cancelled or on failure.
+pub fn pick_executable(owner: isize) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, IFileOpenDialog, SIGDN_FILESYSPATH,
+    };
+
+    // SAFETY: Initializes COM STA on this thread; balanced by CoUninitialize.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let dialog: IFileOpenDialog = unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) }.ok()?;
+
+    let filters = [
+        COMDLG_FILTERSPEC {
+            pszName: w!("Programs (*.exe;*.pif;*.com;*.bat;*.cmd)"),
+            pszSpec: w!("*.exe;*.pif;*.com;*.bat;*.cmd"),
+        },
+        COMDLG_FILTERSPEC {
+            pszName: w!("All Files (*.*)"),
+            pszSpec: w!("*.*"),
+        },
+    ];
+
+    // SAFETY: Configures and displays the modal File Open Dialog.
+    unsafe {
+        let _ = dialog.SetFileTypes(&filters);
+        let _ = dialog.SetOptions(FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST);
+        let _ = dialog.SetTitle(w!("Browse"));
+        let hwnd = HWND(owner as *mut c_void);
+        if dialog.Show(Some(hwnd)).is_err() {
+            CoUninitialize();
+            return None;
+        }
+        let item = dialog.GetResult().ok()?;
+        let display_name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = std::path::PathBuf::from(display_name.to_string().ok()?);
+        CoTaskMemFree(Some(display_name.as_ptr() as *const c_void));
+        CoUninitialize();
+        Some(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

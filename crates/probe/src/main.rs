@@ -73,10 +73,12 @@ fn main() -> Result<()> {
         let order = ranker.order(&rows, Sort::by(SortColumn::Metric(args.metric)), snap.taken_at_ms, false);
 
         let t = &snap.totals;
+        let temp_str = t.cpu_temp_c.map(|c| format!(" ({c:.1} °C)")).unwrap_or_default();
         println!(
-            "\n[{:>7} ms] CPU {:>5.1}%  Mem {}/{}  Disk {:>5.1}%  GPU {:>5.1}%  Net {}/s  ({} procs, {} apps)",
+            "\n[{:>7} ms] CPU {:>5.1}%{}  Mem {}/{}  Disk {:>5.1}%  GPU {:>5.1}%  Net {}/s  ({} procs, {} apps)",
             snap.taken_at_ms,
             t.cpu_pct.unwrap_or(f32::NAN),
+            temp_str,
             fmt_bytes(t.memory.as_ref().map_or(0, |m| m.in_use()) as f64),
             fmt_bytes(t.memory.as_ref().map_or(0, |m| m.total) as f64),
             t.busiest_disk_pct().unwrap_or(f32::NAN),

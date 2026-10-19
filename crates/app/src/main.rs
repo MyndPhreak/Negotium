@@ -695,6 +695,38 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
+        let weak = weak.clone();
+        ui.on_browse_executable(move || {
+            let owner = weak
+                .upgrade()
+                .and_then(|ui| platform::main_hwnd(&ui))
+                .map_or(0, |h| h.0 as isize);
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                if let Some(path) = negotium_actions::runtask::pick_executable(owner) {
+                    let path_str = path.to_string_lossy();
+                    let quoted_cmd = if path_str.contains(' ') {
+                        format!("\"{path_str}\"")
+                    } else {
+                        path_str.into_owned()
+                    };
+                    let dir_str = path
+                        .parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_run_task_command(quoted_cmd.into());
+                            if ui.get_run_task_working_dir().trim().is_empty() {
+                                ui.set_run_task_working_dir(dir_str.into());
+                            }
+                        }
+                    });
+                }
+            });
+        });
+    }
+    {
         let (controls, weak) = (controls.clone(), weak.clone());
         ui.on_select_device(move |id| {
             controls.select_device(&id);
