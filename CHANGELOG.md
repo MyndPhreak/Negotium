@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/MyndPhreak/Negotium/compare/v0.3.2...v0.4.0) (2026-10-20)
+
+
+### Features
+
+* **actions:** add Windows Sandbox support to task launcher ([#4](https://github.com/MyndPhreak/Negotium/issues/4)) ([3099292](https://github.com/MyndPhreak/Negotium/commit/30992927f5842b4b7092e05d9b013c9559c725b3))
+* **moderator:** implement native Moderator engine with Aequilibrium dynamic CPU restraint and persistent rules ([#3](https://github.com/MyndPhreak/Negotium/issues/3)) ([cfdb9d6](https://github.com/MyndPhreak/Negotium/commit/cfdb9d6a4ca4f47087b6f9e53bc6619a8ac89852))
+
+
+### Bug Fixes
+
+* **ui:** add 14px scrollbar gutter to Performance device list and Overview app list ([#2](https://github.com/MyndPhreak/Negotium/issues/2)) ([fd81d69](https://github.com/MyndPhreak/Negotium/commit/fd81d69b42462636c2906d8bd412f3d16ffc21f5))
+
 ## [0.3.2](https://github.com/MyndPhreak/Negotium/compare/v0.3.1...v0.3.2) (2026-10-19)
 
 
