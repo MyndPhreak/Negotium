@@ -109,11 +109,14 @@ export component PerformancePage inherits HorizontalLayout {
 
     device-list := ListView {
         width: 220px;
-        for d in root.devices : DeviceButton {
-            data: d;
-            selected: d.id == root.selected;
-            interactive: root.interactive;
-            activated => { root.select-device(d.id); }
+        for d in root.devices : HorizontalLayout {
+            padding-right: 14px;
+            DeviceButton {
+                data: d;
+                selected: d.id == root.selected;
+                interactive: root.interactive;
+                activated => { root.select-device(d.id); }
+            }
         }
     }
     // The detail area fills the height: spare height goes to the main graphs only (everything

@@ -362,6 +362,8 @@ export component AppList inherits VerticalLayout {
     private property <length> proc-height: 30px;
     // An app card itself; the rest of its row is the gap below it.
     private property <length> card-height: 46px;
+    // The list's scrollbar gutter (as on the Performance, Startup, and Settings pages).
+    property <length> gutter: 14px;
     // The row a context menu was opened on. Captured when it opens; every menu item acts on it,
     // never on whatever row data sits at that index by the time an item is chosen.
     out property <int> menu-target: -1;
@@ -509,7 +511,7 @@ export component AppList inherits VerticalLayout {
     }
     HorizontalLayout {
         padding-left: Columns.left;
-        padding-right: Columns.right;
+        padding-right: Columns.right + root.gutter;
         spacing: Columns.gap;
         height: 24px;
         SortHeader {
@@ -572,14 +574,14 @@ export component AppList inherits VerticalLayout {
                 lv := ScrollView {
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
-                    content-width: self.visible-width;
+                    content-width: max(0px, self.visible-width - root.gutter);
                     content-height: column.preferred-height;
                     // Rows that went (a collapse, a search) never leave the view scrolled past the end.
                     changed content-height => {
                         self.content-y = max(self.content-y, min(0px, self.visible-height - self.content-height));
                     }
                     column := VerticalLayout {
-                        width: lv.visible-width;
+                        width: lv.content-width;
                         height: self.preferred-height;
                         for r[i] in root.rows : slot := Rectangle {
                             // Set while this card's End task holds focus (it outlives the hover then).
