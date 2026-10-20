@@ -1,4 +1,4 @@
-import { Button, LineEdit } from "std-widgets.slint";
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Choice, Toggle } from "settingspage.slint";
 
@@ -243,6 +243,350 @@ export component RunTaskModal inherits Rectangle {
                     enabled: root.command != "" || root.privilege-mode == 3;
                     clicked => {
                         root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
+                    }
+                }
+            }
+        }
+    }
+}
+
+export struct CoreItem {
+    id: int,
+    name: string,
+    checked: bool,
+}
+
+export component CpuAffinityModal inherits Rectangle {
+    in property <string> title: "Set CPU Affinity";
+    in property <string> process-name: "";
+    in-out property <[CoreItem]> cores: [];
+    in-out property <bool> all-cores: true;
+    in-out property <bool> remember: false;
+    callback toggle-core(int);
+    callback toggle-all(bool);
+    callback apply(bool);
+    callback cancel();
+
+    in property <bool> can-apply: true;
+
+    background: #00000066;
+    TouchArea { }
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return && root.can-apply) {
+                root.apply(root.remember);
+                return accept;
+            }
+            return reject;
+        }
+    }
+    Rectangle {
+        width: min(parent.width - 48px, 480px);
+        height: layout.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.dark ? #2b2b2b : #ffffff;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        layout := VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            Text {
+                text: "Select the CPU cores that the process is allowed to run on.";
+                color: Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            // All Processors row
+            Rectangle {
+                height: 38px;
+                border-radius: 4px;
+                background: Theme.card;
+                border-width: 1px;
+                border-color: Theme.card-border;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    Text {
+                        text: "<All Processors>";
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Toggle {
+                        checked: root.all-cores;
+                        toggled(on) => {
+                            root.toggle-all(on);
+                        }
+                    }
+                }
+            }
+
+            // Cores list
+            Rectangle {
+                border-radius: 4px;
+                background: Theme.card;
+                border-width: 1px;
+                border-color: Theme.card-border;
+                ScrollView {
+                    max-height: 200px;
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 2px;
+                        for core[i] in root.cores : Rectangle {
+                            height: 30px;
+                            border-radius: 4px;
+                            background: core-touch.has-hover ? Theme.text.with-alpha(0.06) : transparent;
+                            core-touch := TouchArea {
+                                clicked => {
+                                    root.toggle-core(core.id);
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                Text {
+                                    text: core.checked ? "☑" : "☐";
+                                    color: core.checked ? Theme.accent : Theme.muted;
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: core.name;
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    font-weight: core.checked ? 600 : 400;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Remember checkbox row
+            if root.process-name != "" : Rectangle {
+                height: 36px;
+                border-radius: 4px;
+                background: Theme.card;
+                border-width: 1px;
+                border-color: Theme.card-border;
+                rem-touch := TouchArea {
+                    clicked => {
+                        root.remember = !root.remember;
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    Text {
+                        text: root.remember ? "☑" : "☐";
+                        color: root.remember ? Theme.accent : Theme.muted;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "Remember for " + root.process-name + " (persist as rule)";
+                        color: Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            // Action buttons
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                Button {
+                    text: "Apply";
+                    primary: true;
+                    enabled: root.can-apply;
+                    clicked => {
+                        root.apply(root.remember);
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component CpuPriorityModal inherits Rectangle {
+    in property <string> title: "Set CPU Priority";
+    in property <string> process-name: "";
+    in-out property <int> selected: 3; // 0=Realtime, 1=High, 2=AboveNormal, 3=Normal, 4=BelowNormal, 5=Idle
+    in-out property <bool> remember: false;
+    callback apply(int, bool);
+    callback cancel();
+
+    private property <[string]> options: [
+        "Realtime (Highest)",
+        "High",
+        "Above normal",
+        "Normal",
+        "Below normal",
+        "Low / Idle (Lowest)"
+    ];
+
+    background: #00000066;
+    TouchArea { }
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.apply(root.selected, root.remember);
+                return accept;
+            }
+            return reject;
+        }
+    }
+    Rectangle {
+        width: min(parent.width - 48px, 460px);
+        height: layout.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.dark ? #2b2b2b : #ffffff;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        layout := VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            Text {
+                text: "Specify the priority class for the process threads.";
+                color: Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            // Realtime warning banner
+            if root.selected == 0 : Rectangle {
+                border-radius: 4px;
+                background: Theme.accent.with-alpha(0.12);
+                border-width: 1px;
+                border-color: Theme.accent.with-alpha(0.3);
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    Text {
+                        text: "⚠ Warning: Realtime priority can starve vital operating system threads and cause system instability.";
+                        color: Theme.text;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            // Priority options list
+            VerticalLayout {
+                spacing: 4px;
+                for opt[i] in root.options : Rectangle {
+                    height: 32px;
+                    border-radius: 4px;
+                    background: i == root.selected ? Theme.accent.with-alpha(0.15) : (opt-touch.has-hover ? Theme.text.with-alpha(0.06) : transparent);
+                    border-width: 1px;
+                    border-color: i == root.selected ? Theme.accent : transparent;
+                    opt-touch := TouchArea {
+                        clicked => {
+                            root.selected = i;
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text {
+                            text: i == root.selected ? "●" : "○";
+                            color: i == root.selected ? Theme.accent : Theme.muted;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: opt;
+                            color: Theme.text;
+                            font-size: 12px;
+                            font-weight: i == root.selected ? 600 : 400;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+
+            // Remember checkbox
+            if root.process-name != "" : Rectangle {
+                height: 36px;
+                border-radius: 4px;
+                background: Theme.card;
+                border-width: 1px;
+                border-color: Theme.card-border;
+                rem-touch := TouchArea {
+                    clicked => {
+                        root.remember = !root.remember;
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    Text {
+                        text: root.remember ? "☑" : "☐";
+                        color: root.remember ? Theme.accent : Theme.muted;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "Remember for " + root.process-name + " (persist as rule)";
+                        color: Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            // Action buttons
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                Button {
+                    text: "Apply";
+                    primary: true;
+                    clicked => {
+                        root.apply(root.selected, root.remember);
                     }
                 }
             }

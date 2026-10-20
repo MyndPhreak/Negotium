@@ -320,6 +320,9 @@ component RowMenu inherits Rectangle {
             MenuItem { title: "End process tree"; enabled: root.actionable; activated => { root.action("end-tree"); } }
             MenuItem { title: "Efficiency mode"; enabled: root.actionable; activated => { root.action("efficiency"); } }
             MenuSeparator { }
+            MenuItem { title: "Set CPU affinity..."; enabled: root.actionable; activated => { root.action("set-affinity"); } }
+            MenuItem { title: "Set CPU priority..."; enabled: root.actionable; activated => { root.action("set-priority"); } }
+            MenuSeparator { }
             MenuItem { title: "Exclude from Aequilibrium"; enabled: root.actionable; activated => { root.action("toggle-aequilibrium-exclusion"); } }
             MenuSeparator { }
             MenuItem { title: "Open file location"; enabled: root.actionable; activated => { root.action("open-location"); } }
