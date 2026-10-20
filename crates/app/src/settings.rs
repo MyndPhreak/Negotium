@@ -69,6 +69,9 @@ pub struct Settings {
     pub col_handles: bool,
     pub col_publisher: bool,
     pub moderator: negotium_moderator::ModeratorConfig,
+    /// Window position, size, and maximized state to restore across sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_geometry: Option<WindowGeometry>,
 }
 
 impl Default for Settings {
@@ -93,12 +96,24 @@ impl Default for Settings {
             col_handles: false,
             col_publisher: false,
             moderator: negotium_moderator::ModeratorConfig::default(),
+            window_geometry: None,
         }
     }
 }
 
 /// The names `Settings::sort_column` holds, in the window's column order (name first).
 const SORT_NAMES: [&str; 6] = ["name", "cpu", "memory", "disk", "gpu", "network"];
+
+/// The window's saved position, size, and maximized state across sessions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub maximized: bool,
+}
 
 impl Settings {
     /// The saved sort; an unknown column name is the default column.
@@ -118,6 +133,10 @@ impl Settings {
 
     pub fn normalized(mut self) -> Settings {
         self.refresh_ms = nearest_refresh(self.refresh_ms);
+        if let Some(ref mut geo) = self.window_geometry {
+            geo.width = geo.width.max(760);
+            geo.height = geo.height.max(440);
+        }
         self
     }
 
@@ -245,6 +264,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(col_handles);
     field!(col_publisher);
     field!(moderator);
+    field!(window_geometry);
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)
@@ -807,5 +827,30 @@ mod tests {
         assert_eq!(close_action(true, false), CloseAction::HideToTray);
         assert_eq!(close_action(false, false), CloseAction::Exit);
         assert_eq!(close_action(true, true), CloseAction::Exit, "--exit-on-close (benchmark) always exits");
+    }
+
+    #[test]
+    fn window_geometry_roundtrips_and_normalizes_minimum_bounds() {
+        let dir = TempDir::new("geometry");
+        let p = dir.file();
+        let s = Settings {
+            window_geometry: Some(WindowGeometry {
+                x: -1920,
+                y: 100,
+                width: 500,
+                height: 300,
+                maximized: false,
+            }),
+            ..Settings::default()
+        };
+        save_with(&Writes::Plain, &p, &s).unwrap();
+        let (loaded, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::File);
+        let geo = loaded.window_geometry.expect("geometry loaded");
+        assert_eq!(geo.x, -1920);
+        assert_eq!(geo.y, 100);
+        assert_eq!(geo.width, 760, "width clamped to minimum 760");
+        assert_eq!(geo.height, 440, "height clamped to minimum 440");
+        assert!(!geo.maximized);
     }
 }
