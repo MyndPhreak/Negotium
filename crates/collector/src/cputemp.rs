@@ -6,7 +6,9 @@ use windows::Win32::Foundation::{CloseHandle, FreeLibrary, GENERIC_READ, HANDLE,
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 use windows::Win32::System::Performance::{
     PDH_CSTATUS_NEW_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
@@ -15,6 +17,9 @@ use windows::core::{HRESULT, PCSTR, PCWSTR, s, w};
 
 static AMD_FAMILY17_BIN: &[u8] = include_bytes!("blobs/AMDFamily17.bin");
 static INTEL_MSR_BIN: &[u8] = include_bytes!("blobs/IntelMSR.bin");
+/// The only place PawnIOLib.dll is loaded from: never by bare name, which would search the
+/// application and current directories (a planted DLL there would run in an elevated collector).
+const PAWNIO_DLL: PCWSTR = w!(r"C:\Program Files\PawnIO\PawnIOLib.dll");
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CpuVendor {
@@ -118,6 +123,8 @@ struct PawnSession {
     pawnio_execute: unsafe extern "system" fn(HANDLE, PCSTR, *const u64, usize, *mut u64, usize, *mut usize) -> HRESULT,
     pawnio_close: unsafe extern "system" fn(HANDLE) -> HRESULT,
     vendor: CpuVendor,
+    /// Subtracted from AMD readings: THM_TCON_CUR_TMP is Tctl, offset from Tdie on some models.
+    tctl_offset: f32,
 }
 
 // SAFETY: PawnIO handles and DLL pointers are only called by `&mut self` on the collector thread.
@@ -129,9 +136,9 @@ impl PawnSession {
             return None;
         }
 
-        // Try standard PATH / local directory, then standard installation location.
-        let dll = unsafe { LoadLibraryW(w!("PawnIOLib.dll")) }
-            .or_else(|_| unsafe { LoadLibraryW(w!(r"C:\Program Files\PawnIO\PawnIOLib.dll")) })
+        // Absolute path only; its own dependencies resolve from its folder and System32.
+        // SAFETY: loads a DLL by absolute path; freed in Drop or on the failure paths below.
+        let dll = unsafe { LoadLibraryExW(PAWNIO_DLL, None, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32) }
             .ok()
             .filter(|h| !h.is_invalid())?;
 
@@ -183,6 +190,7 @@ impl PawnSession {
             pawnio_execute,
             pawnio_close,
             vendor,
+            tctl_offset: crate::sysinfo::cpu_name().map_or(0.0, |n| amd_tctl_offset(&n)),
         })
     }
 
@@ -207,7 +215,7 @@ impl PawnSession {
                 };
                 if hr.is_ok() && ret_size >= 1 {
                     let raw = out[0] as u32;
-                    return parse_amd_smn_temp(raw);
+                    return parse_amd_smn_temp(raw, self.tctl_offset);
                 }
                 None
             }
@@ -248,7 +256,10 @@ impl PawnSession {
                         &mut ret_size,
                     )
                 };
+                // IA32_THERM_STATUS has a Reading Valid bit (31); the package MSR reserves that bit.
+                let mut needs_valid_bit = false;
                 if hr.is_err() {
+                    needs_valid_bit = true;
                     hr = unsafe {
                         (self.pawnio_execute)(
                             self.handle,
@@ -261,7 +272,7 @@ impl PawnSession {
                         )
                     };
                 }
-                if hr.is_ok() && ret_size >= 1 {
+                if hr.is_ok() && ret_size >= 1 && (!needs_valid_bit || out[0] & (1 << 31) != 0) {
                     let delta = ((out[0] >> 16) & 0x7F) as f32;
                     let temp = tj_max - delta;
                     if (5.0..=125.0).contains(&temp) {
@@ -299,8 +310,9 @@ impl Drop for PawnSession {
 /// Modern Zen processors signal a 49 °C range adjustment through `RANGE_SEL`
 /// (bit 19, `0x0008_0000`) or `TJ_SEL` (bits 17:16, `0x0003_0000`). When either
 /// is set, the hardware reports a value shifted by +49 °C, which must be subtracted.
-pub fn parse_amd_smn_temp(raw: u32) -> Option<f32> {
-    let mut temp = ((raw >> 21) & 0x7FF) as f32 * 0.125f32;
+/// The value is Tctl; `tctl_offset` (see `amd_tctl_offset`) converts it to the die temperature.
+pub fn parse_amd_smn_temp(raw: u32, tctl_offset: f32) -> Option<f32> {
+    let mut temp = ((raw >> 21) & 0x7FF) as f32 * 0.125f32 - tctl_offset;
     const RANGE_SEL_MASK: u32 = 1 << 19; // 0x0008_0000
     const TJ_SEL_MASK: u32 = 3 << 16;    // 0x0003_0000
     if (raw & RANGE_SEL_MASK) != 0 || (raw & TJ_SEL_MASK) == TJ_SEL_MASK {
@@ -311,6 +323,20 @@ pub fn parse_amd_smn_temp(raw: u32) -> Option<f32> {
     } else {
         None
     }
+}
+
+/// Tctl − Tdie in °C for the AMD models that report Tctl with an offset (the table
+/// LibreHardwareMonitor uses), matched on the CPU brand string; 0 for every other CPU.
+pub fn amd_tctl_offset(brand: &str) -> f32 {
+    const OFFSETS: [(&str, f32); 6] = [
+        ("Ryzen 5 1600X", 20.0),
+        ("Ryzen 7 1700X", 20.0),
+        ("Ryzen 7 1800X", 20.0),
+        ("Ryzen 7 2700X", 10.0),
+        ("Ryzen Threadripper 19", 27.0),
+        ("Ryzen Threadripper 29", 27.0),
+    ];
+    OFFSETS.iter().find(|(model, _)| brand.contains(model)).map_or(0.0, |(_, offset)| *offset)
 }
 
 pub struct CpuTemp {
@@ -461,21 +487,38 @@ mod tests {
         // Raw unadjusted = 58.0 + 49.0 = 107.0 °C
         // 107.0 / 0.125 = 856 (0x358)
         let raw_with_range_sel = (856 << 21) | (1 << 19);
-        let temp = parse_amd_smn_temp(raw_with_range_sel).expect("valid reading");
+        let temp = parse_amd_smn_temp(raw_with_range_sel, 0.0).expect("valid reading");
         assert!((temp - 58.0).abs() < 0.05, "expected 58.0, got {temp}");
 
         // 58.0 °C with TJ_SEL (bits 17:16) set:
         let raw_with_tj_sel = (856 << 21) | (3 << 16);
-        let temp_tj = parse_amd_smn_temp(raw_with_tj_sel).expect("valid reading");
+        let temp_tj = parse_amd_smn_temp(raw_with_tj_sel, 0.0).expect("valid reading");
         assert!((temp_tj - 58.0).abs() < 0.05, "expected 58.0, got {temp_tj}");
 
         // 58.0 °C without range flags:
         let raw_no_offset = (58.0f32 / 0.125f32) as u32;
         let raw_direct = raw_no_offset << 21;
-        let temp_direct = parse_amd_smn_temp(raw_direct).expect("valid reading");
+        let temp_direct = parse_amd_smn_temp(raw_direct, 0.0).expect("valid reading");
         assert!((temp_direct - 58.0).abs() < 0.05, "expected 58.0, got {temp_direct}");
 
         // Below 5 °C or above 125 °C returns None:
-        assert_eq!(parse_amd_smn_temp(0), None);
+        assert_eq!(parse_amd_smn_temp(0, 0.0), None);
+
+        // Tctl offset is subtracted before the bounds check: 58 °C Tctl on a 1800X is 38 °C.
+        let temp_offset = parse_amd_smn_temp(raw_direct, 20.0).expect("valid reading");
+        assert!((temp_offset - 38.0).abs() < 0.05, "expected 38.0, got {temp_offset}");
+        assert_eq!(parse_amd_smn_temp(raw_direct, 55.0), None);
+    }
+
+    #[test]
+    fn tctl_offsets_match_librehardwaremonitor() {
+        assert_eq!(amd_tctl_offset("AMD Ryzen 7 1800X Eight-Core Processor"), 20.0);
+        assert_eq!(amd_tctl_offset("AMD Ryzen 5 1600X Six-Core Processor"), 20.0);
+        assert_eq!(amd_tctl_offset("AMD Ryzen 7 2700X Eight-Core Processor"), 10.0);
+        assert_eq!(amd_tctl_offset("AMD Ryzen Threadripper 2950X 16-Core Processor"), 27.0);
+        assert_eq!(amd_tctl_offset("AMD Ryzen Threadripper 1920X 12-Core Processor"), 27.0);
+        assert_eq!(amd_tctl_offset("AMD Ryzen 7 1700 Eight-Core Processor"), 0.0, "non-X has no offset");
+        assert_eq!(amd_tctl_offset("AMD Ryzen 9 5950X 16-Core Processor"), 0.0);
+        assert_eq!(amd_tctl_offset("AMD Ryzen Threadripper 3970X 32-Core Processor"), 0.0);
     }
 }

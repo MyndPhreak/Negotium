@@ -287,36 +287,27 @@ fn set_aside(writes: &Writes, path: &Path, reason: &str) -> Loaded {
     }
 }
 
-/// Copies the file's bytes to settings.json.bad (replacing an older one) through `writes`, read
-/// through it too (elevated: a linked file is never read, so never copied into the user's folder).
+/// Copies the file's bytes to settings.json.bad (replacing an older one, atomically) through
+/// `writes`, read through it too (elevated: a linked file is never read, so never copied into the
+/// user's folder).
 fn copy_aside(writes: &Writes, path: &Path) -> std::io::Result<()> {
     let bytes = writes.read(path)?;
-    writes.write_all(&path.with_extension("json.bad"), &bytes)
+    writes.replace(&path.with_extension("json.bad"), &bytes)
 }
 
-/// Writes atomically: a temporary file next to the target, flushed, then a rename over it. The
-/// fixed `.tmp` name relies on Negotium being a single-instance app. Elevated, written in place
-/// through the guarded write instead (no rename: crate::appdata).
+/// Writes atomically, elevated or not ([`Writes::replace`]): a temporary file next to the target,
+/// named for this process (a second instance may run beside a hung one), flushed, then renamed
+/// over it, so a crash mid-save never leaves a half-written settings.json. Elevated, the
+/// temporary file goes through the guarded checks and is renamed through its handle
+/// (crate::appdata).
 pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     save_with(&crate::appdata::writes(), path, s)
 }
 
 /// [`save`] through `writes`.
 pub fn save_with(writes: &Writes, path: &Path, s: &Settings) -> std::io::Result<()> {
-    use std::io::Write;
     let json = serde_json::to_vec_pretty(s).map_err(std::io::Error::other)?;
-    if !writes.may_move() {
-        return writes.write_all(path, &json);
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&json)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)
+    writes.replace(path, &json)
 }
 
 /// Saves off the UI thread. Overlapping saves write in order and the newest settings win. Every
@@ -427,8 +418,8 @@ mod tests {
         assert_eq!(path_from(None), std::env::temp_dir().join("Negotium").join("settings.json"));
     }
 
-    /// Elevated: a bad file is copied aside (never renamed), and saves overwrite the file in place
-    /// (no temporary file renamed over it), through the guarded write.
+    /// Elevated: a bad file is copied aside (never renamed), and saves replace the file through a
+    /// guarded temporary file renamed over it through its handle (none left behind).
     #[test]
     fn elevated_nothing_is_renamed() {
         let dir = TempDir::new("elevated");
@@ -444,10 +435,10 @@ mod tests {
         let (_, loaded) = load_with(&guarded, &dir.file());
         assert_eq!(loaded, Loaded::Partial(vec!["refresh_ms".into()]));
         assert_eq!(std::fs::read(dir.file().with_extension("json.bad")).unwrap(), br#"{"refresh_ms":"fast"}"#);
-        // Saved in place, read back.
+        // Saved (replaced atomically), read back.
         let changed = Settings { always_on_top: true, ..Settings::default() };
         save_with(&guarded, &dir.file(), &changed).unwrap();
-        assert!(!dir.file().with_extension("json.tmp").exists(), "no temporary file");
+        assert!(no_temp_file(&dir.0), "no temporary file");
         assert_eq!(load_with(&guarded, &dir.file()), (changed.normalized(), Loaded::File));
     }
 
@@ -492,6 +483,11 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// No `*.tmp` left in `dir`.
+    fn no_temp_file(dir: &Path) -> bool {
+        std::fs::read_dir(dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
     }
 
     #[test]
@@ -598,7 +594,7 @@ mod tests {
         save_with(&Writes::Plain, &p, &s).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("\"theme\": \"dark\""));
         assert_eq!(load_with(&Writes::Plain, &p), (s, Loaded::File));
-        assert!(!p.with_extension("json.tmp").exists(), "the temporary file is renamed into place");
+        assert!(no_temp_file(&dir.0), "the temporary file is renamed into place");
     }
 
     #[test]

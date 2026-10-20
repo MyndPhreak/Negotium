@@ -28,6 +28,11 @@ pub struct UsageTracker {
     started_at_ms: Option<u64>,
     last_at_ms: Option<u64>,
     prev_procs: HashMap<(u32, i64), (u64, u64)>,
+    /// The newest create_time (FILETIME, 100 ns) in the first snapshot with processes: a process
+    /// first seen later and created after it was born since tracking started, so all its CPU time
+    /// and disk I/O count (one that lived under a tick would otherwise count nothing). Older ones
+    /// only count what they use from their first sighting on.
+    baseline_create_time: Option<i64>,
     apps: HashMap<String, AppUsage>,
 }
 
@@ -41,6 +46,7 @@ impl UsageTracker {
         self.started_at_ms = None;
         self.last_at_ms = None;
         self.prev_procs.clear();
+        self.baseline_create_time = None;
         self.apps.clear();
     }
 
@@ -69,6 +75,8 @@ impl UsageTracker {
                 let d_cpu = p.cpu_time_100ns.saturating_sub(prev_cpu);
                 let d_disk = p.disk_io_bytes.saturating_sub(prev_disk);
                 proc_deltas.insert(key, (d_cpu, d_disk));
+            } else if self.baseline_create_time.is_some_and(|b| p.create_time > b) {
+                proc_deltas.insert(key, (p.cpu_time_100ns, p.disk_io_bytes));
             }
             next_procs.insert(key, (p.cpu_time_100ns, p.disk_io_bytes));
             if let Some(img) = p.image_path.as_deref() {
@@ -76,6 +84,9 @@ impl UsageTracker {
             }
         }
         self.prev_procs = next_procs;
+        if self.baseline_create_time.is_none() {
+            self.baseline_create_time = snap.processes.iter().map(|p| p.create_time).max();
+        }
 
         for app in self.apps.values_mut() {
             app.running = false;
@@ -224,5 +235,23 @@ mod tests {
 
         tracker.reset();
         assert!(tracker.entries().is_empty());
+    }
+
+    #[test]
+    fn processes_born_after_tracking_started_count_from_creation() {
+        let mut tracker = UsageTracker::new();
+        let s1 = Snapshot { taken_at_ms: 1_000, processes: vec![sample(10, 50_000_000, 1_000_000)], ..Default::default() };
+        tracker.update(&s1, &[app_row(10, "Chrome", 1, None)]);
+        // pid 20 was created after the first snapshot; pid 5 is older, merely first seen now.
+        let s2 = Snapshot {
+            taken_at_ms: 2_000,
+            processes: vec![sample(10, 50_000_000, 1_000_000), sample(20, 30_000_000, 7_000), sample(5, 90_000_000, 9_000)],
+            ..Default::default()
+        };
+        tracker.update(&s2, &[app_row(10, "Chrome", 1, None), app_row(20, "Short", 1, None), app_row(5, "Old", 1, None)]);
+        let by_name = |n: &str| tracker.entries().into_iter().find(|e| e.name == n).unwrap();
+        assert_eq!((by_name("Chrome").cpu_ms(), by_name("Chrome").disk_bytes), (0, 0), "running at start: baseline");
+        assert_eq!((by_name("Short").cpu_ms(), by_name("Short").disk_bytes), (3_000, 7_000), "born since: all of it");
+        assert_eq!((by_name("Old").cpu_ms(), by_name("Old").disk_bytes), (0, 0), "older: baseline");
     }
 }

@@ -1,6 +1,6 @@
 use crate::actions::{ModeratorAction, ModeratorEvent, RestoreReason};
-use crate::config::ModeratorConfig;
-use crate::exclusions::{is_safety_excluded, is_user_excluded};
+use crate::config::{ModeratorConfig, PersistentRule};
+use crate::exclusions::{is_safety_excluded, is_user_excluded, same_image};
 use negotium_actions::PriorityClass;
 use negotium_snapshot::Snapshot;
 use std::collections::{HashMap, HashSet};
@@ -20,8 +20,11 @@ pub struct Moderator {
     restraints: HashMap<(u32, i64), RestrainedProcess>,
     /// Candidates over quota: (pid, create_time) -> first_time_over_quota_ms
     high_cpu_since: HashMap<(u32, i64), u64>,
-    /// Tracks which persistent rule was applied to which process instance
-    applied_rules: HashSet<(u32, i64)>,
+    /// The persistent rule last applied to each process instance. A rule added or edited while
+    /// its process runs differs from the one recorded here, so it is applied to that instance too.
+    applied_rules: HashMap<(u32, i64), PersistentRule>,
+    /// The latest tick's snapshot time, for restraint durations reported outside a tick.
+    now_ms: u64,
 }
 
 impl Moderator {
@@ -42,6 +45,7 @@ impl Moderator {
         let mut actions = Vec::new();
         let mut events = Vec::new();
         let now_ms = snap.taken_at_ms;
+        self.now_ms = now_ms;
 
         // 1. Build live process lookup and foreground tree
         let live_keys: HashSet<(u32, i64)> = snap.processes.iter().map(|p| (p.pid, p.create_time)).collect();
@@ -49,7 +53,7 @@ impl Moderator {
 
         // 2. Clean up exited processes
         self.high_cpu_since.retain(|k, _| live_keys.contains(k));
-        self.applied_rules.retain(|k| live_keys.contains(k));
+        self.applied_rules.retain(|k, _| live_keys.contains(k));
 
         let mut exited_restraints = Vec::new();
         self.restraints.retain(|k, v| {
@@ -71,65 +75,52 @@ impl Moderator {
             });
         }
 
-        // 3. Evaluate persistent rules for any unconfigured process
+        // 3. Apply persistent rules to processes that don't yet have their current rule
         for p in &snap.processes {
             let key = (p.pid, p.create_time);
-            if !self.applied_rules.contains(&key) {
-                if let Some(rule) = config.rules.iter().find(|r| Self::matches_rule(&p.name, &r.name)) {
-                    let mut summary_parts = Vec::new();
-                    if let Some(prio) = rule.priority {
-                        summary_parts.push(format!("Priority: {}", prio.display_name()));
-                    }
-                    if let Some(mask) = rule.affinity_mask {
-                        summary_parts.push(format!("Affinity: {mask:#x}"));
-                    }
-                    if let Some(sets) = &rule.cpu_sets {
-                        summary_parts.push(format!("CpuSets: {sets:?}"));
-                    }
-                    if let Some(eff) = rule.efficiency_mode {
-                        summary_parts.push(format!("Efficiency: {eff}"));
-                    }
-
-                    actions.push(ModeratorAction::ApplyRule {
-                        pid: p.pid,
-                        create_time: p.create_time,
-                        name: p.name.clone(),
-                        priority: rule.priority,
-                        affinity_mask: rule.affinity_mask,
-                        cpu_sets: rule.cpu_sets.clone(),
-                        efficiency_mode: rule.efficiency_mode,
-                    });
-
-                    events.push(ModeratorEvent::RuleApplied {
-                        pid: p.pid,
-                        name: p.name.clone(),
-                        summary: summary_parts.join(", "),
-                    });
+            let Some(rule) = config.rules.iter().find(|r| same_image(&p.name, &r.name)) else {
+                self.applied_rules.remove(&key);
+                continue;
+            };
+            if self.applied_rules.get(&key) != Some(rule) {
+                let mut summary_parts = Vec::new();
+                if let Some(prio) = rule.priority {
+                    summary_parts.push(format!("Priority: {}", prio.display_name()));
                 }
-                self.applied_rules.insert(key);
+                if let Some(mask) = rule.affinity_mask {
+                    summary_parts.push(format!("Affinity: {mask:#x}"));
+                }
+                if let Some(sets) = &rule.cpu_sets {
+                    summary_parts.push(format!("CpuSets: {sets:?}"));
+                }
+                if let Some(eff) = rule.efficiency_mode {
+                    summary_parts.push(format!("Efficiency: {eff}"));
+                }
+
+                actions.push(ModeratorAction::ApplyRule {
+                    pid: p.pid,
+                    create_time: p.create_time,
+                    name: p.name.clone(),
+                    priority: rule.priority,
+                    affinity_mask: rule.affinity_mask,
+                    cpu_sets: rule.cpu_sets.clone(),
+                    efficiency_mode: rule.efficiency_mode,
+                });
+
+                events.push(ModeratorEvent::RuleApplied {
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    summary: summary_parts.join(", "),
+                });
+                self.applied_rules.insert(key, rule.clone());
             }
         }
 
         // 4. If Aequilibrium is disabled, restore any actively restrained processes and return
         if !config.aequilibrium_enabled {
-            for ((pid, create_time), r) in self.restraints.drain() {
-                let duration_ms = now_ms.saturating_sub(r.restrained_at_ms);
-                actions.push(ModeratorAction::Restore {
-                    pid,
-                    create_time,
-                    name: r.name.clone(),
-                    reason: RestoreReason::CpuDropped,
-                    original_priority: r.original_priority,
-                    original_efficiency: r.original_efficiency,
-                });
-                events.push(ModeratorEvent::RestraintRestored {
-                    pid,
-                    name: r.name,
-                    reason: RestoreReason::CpuDropped,
-                    duration_ms,
-                });
-            }
-            self.high_cpu_since.clear();
+            let (restores, restored) = self.restore_all(RestoreReason::CpuDropped);
+            actions.extend(restores);
+            events.extend(restored);
             return (actions, events);
         }
 
@@ -231,18 +222,41 @@ impl Moderator {
         (actions, events)
     }
 
+    /// Ends every active restraint, returning the Restore actions to carry out. Used when
+    /// Aequilibrium is turned off and when the worker shuts down or restarts, since a restraint
+    /// left behind then would outlive Negotium.
+    pub fn restore_all(&mut self, reason: RestoreReason) -> (Vec<ModeratorAction>, Vec<ModeratorEvent>) {
+        let mut actions = Vec::new();
+        let mut events = Vec::new();
+        for ((pid, create_time), r) in self.restraints.drain() {
+            let duration_ms = self.now_ms.saturating_sub(r.restrained_at_ms);
+            actions.push(ModeratorAction::Restore {
+                pid,
+                create_time,
+                name: r.name.clone(),
+                reason,
+                original_priority: r.original_priority,
+                original_efficiency: r.original_efficiency,
+            });
+            events.push(ModeratorEvent::RestraintRestored { pid, name: r.name, reason, duration_ms });
+        }
+        self.high_cpu_since.clear();
+        (actions, events)
+    }
+
     /// Records the original priority and efficiency state read before applying restraint,
-    /// so restoration can reliably restore the exact prior state.
+    /// so restoration can reliably restore the exact prior state. Either is `None` when it
+    /// could not be read; the caller then leaves that setting alone.
     pub fn record_original_state(
         &mut self,
         pid: u32,
         create_time: i64,
-        priority: PriorityClass,
-        efficiency: bool,
+        priority: Option<PriorityClass>,
+        efficiency: Option<bool>,
     ) {
         if let Some(r) = self.restraints.get_mut(&(pid, create_time)) {
-            r.original_priority = Some(priority);
-            r.original_efficiency = Some(efficiency);
+            r.original_priority = priority;
+            r.original_efficiency = efficiency;
         }
     }
 
@@ -255,16 +269,15 @@ impl Moderator {
         self.restraints.len()
     }
 
-    fn matches_rule(actual: &str, rule: &str) -> bool {
-        let actual_stem = actual.strip_suffix(".exe").or_else(|| actual.strip_suffix(".EXE")).unwrap_or(actual);
-        let rule_stem = rule.strip_suffix(".exe").or_else(|| rule.strip_suffix(".EXE")).unwrap_or(rule);
-        actual_stem.eq_ignore_ascii_case(rule_stem)
-    }
-
     fn find_foreground_tree(snap: &Snapshot, foreground_pid: Option<u32>) -> HashSet<u32> {
         let mut set = HashSet::new();
         let Some(fg_pid) = foreground_pid else { return set };
         set.insert(fg_pid);
+        // A shell host (explorer.exe with the desktop or taskbar focused) is the parent of nearly
+        // every app launched from Start or the taskbar; its descendants are not the user's focus.
+        if snap.processes.iter().any(|p| p.pid == fg_pid && is_safety_excluded(&p.name)) {
+            return set;
+        }
 
         // Include all child descendants of the foreground process
         let mut added = true;

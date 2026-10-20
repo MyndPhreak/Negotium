@@ -194,8 +194,9 @@ pub fn cpu_topology() -> CpuTopology {
     if let Some(buf) = raw_proc_info(RelationCache) {
         let mut offset = 0usize;
         while offset + size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>() <= buf.len() {
-            // SAFETY: `buf[offset..]` holds a valid `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX` header.
-            let info = unsafe { &*(buf.as_ptr().add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) };
+            // SAFETY: `buf[offset..]` holds a valid `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX` header (the
+            // loop bound keeps the whole struct in `buf`); a byte buffer is only 1-aligned, so it is copied out.
+            let info = unsafe { (buf.as_ptr().add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX).read_unaligned() };
             let size = info.Size as usize;
             if size < 8 || offset + size > buf.len() {
                 break;

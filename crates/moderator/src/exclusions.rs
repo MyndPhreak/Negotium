@@ -19,15 +19,23 @@ pub const CRITICAL_SYSTEM_PROCESSES: &[&str] = &[
     "winlogon",         // Windows Logon Process
 ];
 
+/// The image name without a trailing `.exe` in any letter case ("Game.Exe" -> "Game").
+pub fn image_stem(name: &str) -> &str {
+    match name.len().checked_sub(4) {
+        Some(at) if name.is_char_boundary(at) && name[at..].eq_ignore_ascii_case(".exe") => &name[..at],
+        _ => name,
+    }
+}
+
+/// Whether two image names name the same program: case-insensitive, `.exe` optional on either.
+pub fn same_image(a: &str, b: &str) -> bool {
+    image_stem(a).eq_ignore_ascii_case(image_stem(b))
+}
+
 pub fn is_safety_excluded(name: &str) -> bool {
-    let stem = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
-    CRITICAL_SYSTEM_PROCESSES.iter().any(|&c| c.eq_ignore_ascii_case(stem))
+    CRITICAL_SYSTEM_PROCESSES.iter().any(|&c| same_image(c, name))
 }
 
 pub fn is_user_excluded(name: &str, user_exclusions: &[String]) -> bool {
-    let stem = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
-    user_exclusions.iter().any(|ex| {
-        let ex_stem = ex.strip_suffix(".exe").or_else(|| ex.strip_suffix(".EXE")).unwrap_or(ex);
-        ex_stem.eq_ignore_ascii_case(stem)
-    })
+    user_exclusions.iter().any(|ex| same_image(ex, name))
 }

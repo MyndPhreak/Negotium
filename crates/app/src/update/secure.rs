@@ -304,8 +304,6 @@ pub fn open_held(msi: &Path) -> Result<File, UpdateError> {
 /// Deletes `path` itself, through a handle that doesn't follow a link (a link is left alone and
 /// refused): an elevated Negotium never deletes where a planted junction points.
 pub fn delete_no_follow(path: &Path) -> Result<(), UpdateError> {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle};
     let file = std::fs::OpenOptions::new()
         .access_mode(DELETE | FILE_READ_ATTRIBUTES)
         .share_mode(FILE_SHARE_ALL)
@@ -316,9 +314,16 @@ pub fn delete_no_follow(path: &Path) -> Result<(), UpdateError> {
     if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !meta.is_file() {
         return Err(UpdateError::Io(format!("{} is not a plain file; not deleted", path.display())));
     }
+    delete_handle(&file).map_err(|e| UpdateError::Io(e.message()))
+}
+
+/// Marks the file `file` is open on (with DELETE access) for deletion: it goes when the last
+/// handle closes, wherever it is, whatever its path now names.
+pub fn delete_handle(file: &File) -> windows::core::Result<()> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle};
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
-    // SAFETY: `file` is a live handle opened with DELETE access; `info` is a valid
-    // FILE_DISPOSITION_INFO of the size passed. The file goes when the handle closes.
+    // SAFETY: `file` is a live handle; `info` is a valid FILE_DISPOSITION_INFO of the size passed.
     unsafe {
         SetFileInformationByHandle(
             HANDLE(file.as_raw_handle()),
@@ -327,7 +332,6 @@ pub fn delete_no_follow(path: &Path) -> Result<(), UpdateError> {
             std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
     }
-    .map_err(|e| UpdateError::Io(e.message()))
 }
 
 #[cfg(test)]

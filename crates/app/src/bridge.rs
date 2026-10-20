@@ -359,6 +359,9 @@ pub struct Bridge {
     /// Sections opened automatically for their current hang (see `reopen_hung_sections`).
     reopened: HashSet<i32>,
     search: String,
+    /// The pid "Go to process" searched for: while the search is still exactly it, only rows of
+    /// that process show (the search alone would also match every pid containing its digits).
+    search_pid: Option<u32>,
     last: Frame,
     layout: RowLayout,
     hover: bool,
@@ -429,6 +432,7 @@ impl Bridge {
             collapsed: HashSet::new(),
             reopened: HashSet::new(),
             search: String::new(),
+            search_pid: None,
             last: Frame::default(),
             layout: RowLayout::default(),
             hover: false,
@@ -738,6 +742,7 @@ impl Bridge {
         let query = pid.to_string();
         self.set_page(ui, Page::Overview);
         ui.set_search_text(query.as_str().into());
+        self.search_pid = Some(pid);
         self.set_search(&query);
     }
 
@@ -834,7 +839,14 @@ impl Bridge {
     }
 
     fn fresh(&self) -> Vec<RowView> {
-        visible_rows(&self.last.rows, &self.expanded, &self.collapsed, &self.search)
+        match self.search_pid.filter(|p| p.to_string() == self.search.trim()) {
+            Some(pid) => {
+                let has_pid = |r: &RowView| self.last.targets.get(&r.id).is_some_and(|t| t.procs.iter().any(|&(p, _)| p == pid));
+                let rows: Vec<RowView> = self.last.rows.iter().filter(|r| r.kind == RowKind::Section || has_pid(r)).cloned().collect();
+                visible_rows(&rows, &self.expanded, &self.collapsed, &self.search)
+            }
+            None => visible_rows(&self.last.rows, &self.expanded, &self.collapsed, &self.search),
+        }
     }
 
     /// Where rows' icons come from (crate::icons::IconLoader in the app).
@@ -901,6 +913,9 @@ impl Bridge {
     }
 
     pub fn set_search(&mut self, text: &str) {
+        if self.search_pid.is_some_and(|p| p.to_string() != text.trim()) {
+            self.search_pid = None; // the user edited it: a plain search again
+        }
         self.search = text.to_string();
         self.publish_child_rows();
         let fresh = self.fresh();

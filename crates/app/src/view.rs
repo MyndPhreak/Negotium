@@ -98,6 +98,9 @@ pub struct AppHistoryView {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Target {
     pub name: String,
+    /// The primary process's image name (e.g. `chrome.exe`): what moderator rules and exclusions
+    /// match, unlike `name`, which on an app card is the friendly file description.
+    pub process_name: String,
     pub root: Option<(u32, i64)>,
     pub procs: Vec<(u32, i64)>,
     pub hung_pid: Option<(u32, i64)>,
@@ -395,8 +398,12 @@ pub fn build_frame(
         let hung_pid = r.processes.iter().find(|p| hung_pids.contains(&p.pid)).map(|p| (p.pid, p.create_time));
         let primary_key = root.or(procs.first().copied());
         let image_path = primary_key.and_then(|k| image_of.get(&k).map(|s| s.to_string()));
+        let primary_proc = primary_key
+            .and_then(|k| r.processes.iter().find(|p| (p.pid, p.create_time) == k))
+            .or_else(|| r.processes.first());
         targets.insert(id, Target {
             name: r.name.clone(),
+            process_name: primary_proc.map_or_else(|| r.name.clone(), |p| p.name.clone()),
             root,
             procs: procs.clone(),
             hung_pid,
@@ -404,9 +411,6 @@ pub fn build_frame(
             critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
             group: r.key == AppKey::Windows,
         });
-        let primary_proc = primary_key
-            .and_then(|k| r.processes.iter().find(|p| (p.pid, p.create_time) == k))
-            .or_else(|| r.processes.first());
         let col_pid = if r.key == AppKey::Windows {
             "—".into()
         } else {
@@ -478,7 +482,7 @@ pub fn build_frame(
                 let pid_key = (p.pid, p.create_time);
                 let cid = ids.id(RowKey::Proc(p.pid, p.create_time), &mut seen);
                 targets.insert(cid, Target {
-                    name: p.name.clone(), root: Some(pid_key), procs: vec![pid_key],
+                    name: p.name.clone(), process_name: p.name.clone(), root: Some(pid_key), procs: vec![pid_key],
                     hung_pid: hung_pids.contains(&p.pid).then_some(pid_key),
                     image_path: image_of.get(&pid_key).map(|s| s.to_string()),
                     critical: negotium_actions::is_critical(&p.name),

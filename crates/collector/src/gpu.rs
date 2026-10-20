@@ -4,6 +4,7 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::time::{Duration, Instant};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMT_ADAPTER_PERFDATA, D3DKMT_ADAPTERADDRESS, D3DKMT_ADAPTERTYPE, D3DKMT_CLOSEADAPTER,
     D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid,
@@ -164,10 +165,27 @@ pub fn deci_celsius(raw: u32) -> Option<f32> {
     (raw > 0 && raw < 2000).then(|| raw as f32 / 10.0)
 }
 
+/// How long a failing temperature query is left alone before it is tried again.
+pub const QUERY_RETRY: Duration = Duration::from_secs(30);
+
+/// How often, at most, DXGI adapters are enumerated again when PDH reports an adapter they don't
+/// list (a driver update or a re-enabled adapter gets a new LUID).
+pub const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether to enumerate adapters again: PDH reports a key that neither `known` lists nor the last
+/// enumeration already failed to match (`unmatched`, e.g. the Basic Render Driver), and the last
+/// enumeration was at least RESCAN_INTERVAL ago.
+pub(crate) fn needs_rescan<'a>(
+    pdh_keys: impl IntoIterator<Item = &'a str>, known: &[GpuInfo], unmatched: &[String], last: Instant, now: Instant,
+) -> bool {
+    now.saturating_duration_since(last) >= RESCAN_INTERVAL
+        && pdh_keys.into_iter().any(|k| !known.iter().any(|g| g.key == k) && !unmatched.iter().any(|u| u == k))
+}
+
 /// Kernel adapter handles opened once; queried every tick; closed on drop.
 pub struct GpuTemps {
-    /// (key, kernel handle, a query already failed and was reported).
-    handles: Vec<(String, u32, Cell<bool>)>,
+    /// (key, kernel handle, when a failing query may be tried again — `None` while it works).
+    handles: Vec<(String, u32, Cell<Option<Instant>>)>,
     /// Adapters that could not be opened, reported on every read.
     open_errors: Vec<String>,
 }
@@ -184,7 +202,7 @@ impl GpuTemps {
             // SAFETY: `open` is a valid in/out struct; the handle is closed in Drop.
             let status = unsafe { D3DKMTOpenAdapterFromLuid(&mut open) };
             if status.is_ok() {
-                handles.push((g.key.clone(), open.hAdapter, Cell::new(false)));
+                handles.push((g.key.clone(), open.hAdapter, Cell::new(None)));
             } else {
                 open_errors.push(format!("gpu temperature: D3DKMTOpenAdapterFromLuid failed {:#010x} for {}", status.0, g.name));
             }
@@ -198,13 +216,18 @@ impl GpuTemps {
         self.read_checked().0
     }
 
-    /// `read` plus a message for every failed open, and for a failed query the first time it fails
-    /// (that adapter is not queried again). A query that succeeds with no sensor is not a failure.
+    /// `read` plus a message for every failed open, and for a failed query when it starts failing
+    /// (that adapter is then queried again only every QUERY_RETRY, and not reported again until it
+    /// has worked). A query that succeeds with no sensor is not a failure.
     pub fn read_checked(&self) -> (Vec<(&str, f32)>, Vec<String>) {
+        self.read_checked_at(Instant::now())
+    }
+
+    fn read_checked_at(&self, now: Instant) -> (Vec<(&str, f32)>, Vec<String>) {
         let mut errors = self.open_errors.clone();
         let mut temps = Vec::new();
-        for (key, h, failed) in &self.handles {
-            if failed.get() {
+        for (key, h, retry_at) in &self.handles {
+            if retry_at.get().is_some_and(|at| now < at) {
                 continue;
             }
             let mut perf = D3DKMT_ADAPTER_PERFDATA { PhysicalAdapterIndex: 0, ..Default::default() };
@@ -218,11 +241,16 @@ impl GpuTemps {
             // and outlives the call.
             let status = unsafe { D3DKMTQueryAdapterInfo(&mut query) };
             if status.is_err() {
-                // Reported once, then skipped: an adapter without support (iGPU, virtual) would fail every tick.
-                failed.set(true);
-                errors.push(format!("gpu temperature: D3DKMTQueryAdapterInfo failed {:#010x} for {key}", status.0));
-            } else if let Some(c) = deci_celsius(perf.Temperature) {
-                temps.push((key.as_str(), c));
+                // Reported once, then backed off: an adapter without support (iGPU, virtual) would
+                // fail every tick, but a transient failure must not disable it for good.
+                if retry_at.replace(Some(now + QUERY_RETRY)).is_none() {
+                    errors.push(format!("gpu temperature: D3DKMTQueryAdapterInfo failed {:#010x} for {key}", status.0));
+                }
+            } else {
+                retry_at.set(None);
+                if let Some(c) = deci_celsius(perf.Temperature) {
+                    temps.push((key.as_str(), c));
+                }
             }
         }
         (temps, errors)
@@ -259,14 +287,30 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_temperature_query_is_reported_once_then_skipped() {
+    fn a_failing_temperature_query_is_reported_once_then_retried_after_a_back_off() {
         // The handle is made up: never let Drop pass it to D3DKMTCloseAdapter (even on a failed assert).
-        let temps = std::mem::ManuallyDrop::new(GpuTemps { handles: vec![("k".into(), 0xdead_beef, Cell::new(false))], open_errors: vec![] });
-        let (read, first) = temps.read_checked();
+        let temps = std::mem::ManuallyDrop::new(GpuTemps { handles: vec![("k".into(), 0xdead_beef, Cell::new(None))], open_errors: vec![] });
+        let t0 = Instant::now();
+        let (read, first) = temps.read_checked_at(t0);
         assert!(read.is_empty());
         assert_eq!(first.len(), 1, "{first:?}");
         assert!(first[0].starts_with("gpu temperature: D3DKMTQueryAdapterInfo failed"), "{first:?}");
-        assert!(temps.read_checked().1.is_empty(), "not re-queried or re-reported");
+        assert!(temps.read_checked_at(t0 + Duration::from_secs(1)).1.is_empty(), "not re-queried or re-reported");
+        assert_eq!(temps.handles[0].2.get(), Some(t0 + QUERY_RETRY), "skipped during the back-off");
+        let later = t0 + QUERY_RETRY;
+        assert!(temps.read_checked_at(later).1.is_empty(), "retried but not re-reported");
+        assert_eq!(temps.handles[0].2.get(), Some(later + QUERY_RETRY), "queried again, failed again");
+    }
+
+    #[test]
+    fn adapters_are_enumerated_again_only_for_a_new_pdh_key_and_at_most_every_interval() {
+        let known = [GpuInfo { key: "a".into(), ..Default::default() }];
+        let unmatched = ["basic".to_string()];
+        let t0 = Instant::now();
+        let later = t0 + RESCAN_INTERVAL;
+        assert!(!needs_rescan(["a", "basic"], &known, &unmatched, t0, later), "all known or known to be unmatched");
+        assert!(needs_rescan(["a", "new"], &known, &unmatched, t0, later), "new LUID after a driver update");
+        assert!(!needs_rescan(["new"], &known, &unmatched, t0, t0 + Duration::from_secs(29)), "rate-limited");
     }
 
     #[test]

@@ -5,6 +5,8 @@
       "release-type": "simple",
       "package-name": "negotium",
       "include-component-in-tag": false,
+      "draft": true,
+      "force-tag-creation": true,
       "bump-minor-pre-major": true,
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
