@@ -191,7 +191,7 @@ fn caption(metric: Metric) -> &'static str {
 
 /// The busiest GPU; the first one (DXGI order) on a tie, so the label does not flip at idle. An
 /// unknown (NaN) utilization never wins over a known one.
-fn busiest_gpu(gpus: &[negotium_snapshot::GpuSample]) -> Option<&negotium_snapshot::GpuSample> {
+pub(crate) fn busiest_gpu(gpus: &[negotium_snapshot::GpuSample]) -> Option<&negotium_snapshot::GpuSample> {
     let mut best: Option<&negotium_snapshot::GpuSample> = None;
     for g in gpus {
         let beats = match best {
