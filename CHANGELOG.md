@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.0](https://github.com/MyndPhreak/Negotium/compare/v0.6.0...v0.7.0) (2026-10-20)
+
+
+### Features
+
+* **app:** persist window size, position, and maximized state across sessions ([#12](https://github.com/MyndPhreak/Negotium/issues/12)) ([420b441](https://github.com/MyndPhreak/Negotium/commit/420b441de4f30827b4b23ff1b85c3996f282a97c))
+
+
+### Bug Fixes
+
+* code-review findings across moderator, actions, collector, updater and release CI ([#13](https://github.com/MyndPhreak/Negotium/issues/13)) ([16b598e](https://github.com/MyndPhreak/Negotium/commit/16b598ee140f71c592aaf55930224f5a95e78e36))
+
+
+### Build System
+
+* **deps:** bump actions/checkout from 4 to 7 ([#16](https://github.com/MyndPhreak/Negotium/issues/16)) ([2960d92](https://github.com/MyndPhreak/Negotium/commit/2960d92868b925e04520957efe90ff2fed4476c0))
+* **deps:** bump actions/download-artifact from 4 to 8 ([#17](https://github.com/MyndPhreak/Negotium/issues/17)) ([0ca740d](https://github.com/MyndPhreak/Negotium/commit/0ca740de49cab051cab7692240e3fb57d6d51453))
+* **deps:** bump actions/upload-artifact from 4 to 7 ([#15](https://github.com/MyndPhreak/Negotium/issues/15)) ([5d65bc0](https://github.com/MyndPhreak/Negotium/commit/5d65bc0038a00a3421ae15948c4146f1897259da))
+* **deps:** bump googleapis/release-please-action from 4 to 5 ([#18](https://github.com/MyndPhreak/Negotium/issues/18)) ([0511735](https://github.com/MyndPhreak/Negotium/commit/05117352462ab26f6cfa1af3554fd58d741e30fd))
+
 ## [0.6.0](https://github.com/MyndPhreak/Negotium/compare/v0.5.0...v0.6.0) (2026-10-20)
 
 
