@@ -33,6 +33,16 @@ impl Log {
         crate::appdata::negotium_dir().join("logs").join("negotium.log")
     }
 
+    pub fn info(&mut self, msg: &str) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let line: String = msg.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        if let Ok(mut f) = self.writes.open(&self.path, Open::Append) {
+            let _ = writeln!(f, "{secs} INFO {line}");
+        }
+    }
     pub fn warn(&mut self, msg: &str) {
         if !self.seen.insert(msg.to_string()) {
             return;

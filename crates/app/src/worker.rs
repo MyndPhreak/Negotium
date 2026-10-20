@@ -125,6 +125,7 @@ pub struct LiveSource {
     elevated: bool,
     log: crate::log::Log,
     tray: Option<TraySink>,
+    governor: negotium_governor::Governor,
 }
 
 impl LiveSource {
@@ -151,6 +152,7 @@ impl LiveSource {
             elevated: negotium_actions::is_elevated(),
             log: crate::log::Log::new(crate::log::Log::default_path()),
             tray: None,
+            governor: negotium_governor::Governor::new(),
         }
     }
 
@@ -185,6 +187,82 @@ impl Source for LiveSource {
             self.usage.reset();
         }
         self.usage.update(&snap, &rows);
+
+        // Evaluate Process Governor
+        let mut proc_rates = std::collections::HashMap::with_capacity(snap.processes.len());
+        for app in &rows {
+            for p in &app.processes {
+                proc_rates.insert((p.pid, p.create_time), p.cpu_pct);
+            }
+        }
+        let foreground_pid = negotium_collector::foreground_process_id();
+        let gov_config = controls.governor_config();
+        let (gov_actions, gov_events) = self.governor.tick(&snap, &proc_rates, foreground_pid, &gov_config);
+
+        for action in gov_actions {
+            match action {
+                negotium_governor::GovernorAction::Restrain { pid, create_time, name: _, mode } => {
+                    let original_priority = negotium_actions::get_priority_class(pid, create_time).ok();
+                    let original_efficiency = negotium_actions::is_efficiency_mode(pid, create_time).ok();
+                    if let (Some(prio), Some(eff)) = (original_priority, original_efficiency) {
+                        self.governor.record_original_state(pid, create_time, prio, eff);
+                    }
+                    match mode {
+                        negotium_governor::RestraintMode::Both => {
+                            let _ = negotium_actions::set_power_throttling(pid, create_time, true);
+                            let _ = negotium_actions::set_priority_class(pid, create_time, negotium_actions::PriorityClass::BelowNormal);
+                        }
+                        negotium_governor::RestraintMode::EcoQosOnly => {
+                            let _ = negotium_actions::set_power_throttling(pid, create_time, true);
+                        }
+                        negotium_governor::RestraintMode::BelowNormalOnly => {
+                            let _ = negotium_actions::set_priority_class(pid, create_time, negotium_actions::PriorityClass::BelowNormal);
+                        }
+                        negotium_governor::RestraintMode::Idle => {
+                            let _ = negotium_actions::set_efficiency_mode(pid, create_time, true);
+                        }
+                    }
+                }
+                negotium_governor::GovernorAction::Restore { pid, create_time, name: _, reason: _, original_priority, original_efficiency } => {
+                    if let Some(prio) = original_priority {
+                        let _ = negotium_actions::set_priority_class(pid, create_time, prio);
+                    }
+                    if let Some(eff) = original_efficiency {
+                        let _ = negotium_actions::set_power_throttling(pid, create_time, eff);
+                    } else {
+                        let _ = negotium_actions::set_power_throttling(pid, create_time, false);
+                    }
+                }
+                negotium_governor::GovernorAction::ApplyRule { pid, create_time, name: _, priority, affinity_mask, cpu_sets, efficiency_mode } => {
+                    if let Some(prio) = priority {
+                        let _ = negotium_actions::set_priority_class(pid, create_time, prio);
+                    }
+                    if let Some(mask) = affinity_mask {
+                        let _ = negotium_actions::set_process_affinity(pid, create_time, mask);
+                    }
+                    if let Some(sets) = &cpu_sets {
+                        let _ = negotium_actions::set_process_cpu_sets(pid, create_time, sets);
+                    }
+                    if let Some(eff) = efficiency_mode {
+                        let _ = negotium_actions::set_efficiency_mode(pid, create_time, eff);
+                    }
+                }
+            }
+        }
+
+        for event in gov_events {
+            match event {
+                negotium_governor::GovernorEvent::RestraintStarted { pid, name, cpu_pct, mode: _ } => {
+                    self.log.info(&format!("Governor: Restrained {name} (PID {pid}) using {cpu_pct:.1}% CPU"));
+                }
+                negotium_governor::GovernorEvent::RestraintRestored { pid, name, reason, duration_ms } => {
+                    self.log.info(&format!("Governor: Restored {name} (PID {pid}) after {duration_ms}ms (reason: {reason:?})"));
+                }
+                negotium_governor::GovernorEvent::RuleApplied { pid, name, summary } => {
+                    self.log.info(&format!("Governor: Applied rule to {name} (PID {pid}): {summary}"));
+                }
+            }
+        }
         let tray_sample = keep_sample(&self.history, &snap, &rows, controls.tray_cpu() && self.tray.is_some());
         // Every tick, visible or hidden, so the tray never waits on a stale answer (crate::tray, PF2).
         controls.set_shell_hung(crate::platform::shell_tray_hung());
@@ -203,7 +281,11 @@ impl Source for LiveSource {
                 let top = self.top.pick(&rows, metric, snap.taken_at_ms, TOP_TILES);
                 let (expanded, all_children) = controls.child_rows();
                 let resorted = self.ranker.resorted();
-                let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped(), resorted };
+                let restrained: std::collections::HashSet<(u32, i64)> = snap.processes.iter()
+                    .filter(|p| self.governor.is_restrained(p.pid, p.create_time))
+                    .map(|p| (p.pid, p.create_time))
+                    .collect();
+                let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped(), resorted, restrained };
                 let ids = &mut self.ids;
                 Some(read_history(&self.history, |h| build_frame(ids, &snap, &rows, &order, &top, h, &opts)))
             }

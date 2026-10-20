@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde.workspace = true
 windows = { workspace = true, features = [
     "Wdk_System_Threading",
     "Win32_Foundation",
@@ -22,6 +23,8 @@ windows = { workspace = true, features = [
     "Win32_System_Services",
     "Win32_System_Variant",
     "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Management_Deployment",
     "ApplicationModel",
     "Foundation",

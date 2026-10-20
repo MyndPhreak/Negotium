@@ -68,6 +68,7 @@ pub struct Settings {
     pub col_threads: bool,
     pub col_handles: bool,
     pub col_publisher: bool,
+    pub governor: negotium_governor::GovernorConfig,
 }
 
 impl Default for Settings {
@@ -91,6 +92,7 @@ impl Default for Settings {
             col_threads: false,
             col_handles: false,
             col_publisher: false,
+            governor: negotium_governor::GovernorConfig::default(),
         }
     }
 }

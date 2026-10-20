@@ -2732,6 +2732,7 @@ dependencies = [
  "i-slint-backend-testing",
  "negotium-actions",
  "negotium-collector",
+ "negotium-governor",
  "negotium-history",
  "negotium-model",
  "negotium-snapshot",
@@ -2749,6 +2750,7 @@ name = "negotium-actions"
 version = "0.3.1"
 dependencies = [
  "negotium-collector",
+ "serde",
  "windows",
 ]
 
@@ -2770,6 +2772,16 @@ dependencies = [
  "negotium-model",
  "negotium-snapshot",
  "windows",
+]
+
+[[package]]
+name = "negotium-governor"
+version = "0.3.1"
+dependencies = [
+ "negotium-actions",
+ "negotium-snapshot",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

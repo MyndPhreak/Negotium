@@ -366,6 +366,7 @@ fn main() -> Result<(), slint::PlatformError> {
     negotium::settingspage::apply_settings(&ui, &initial);
     let controls = Arc::new(Controls::default());
     controls.set_refresh_ms(initial.refresh_ms);
+    controls.set_governor_config(initial.governor.clone());
     // The saved sort and grouping; a metric sort starts with its meter selected, like a click would.
     controls.set_sort(initial.sort());
     controls.set_grouped(initial.group_by_type);
