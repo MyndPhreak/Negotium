@@ -1,24 +1,28 @@
 //! Process actions. Every call verifies identity by (pid, create_time) before acting,
 //! so a PID reused since the last tick is never touched. Call off the UI thread.
+mod affinity;
 mod close;
 mod details;
 mod efficiency;
 mod elevation;
 pub mod integration;
 mod location;
+mod priority;
 pub mod runtask;
 pub mod services;
 pub mod startup;
 mod terminate;
 
+pub use affinity::{get_process_affinity, set_process_affinity, set_process_cpu_sets};
 pub use close::{FORCE_CLOSE_GRACE, force_close};
 pub use details::{Details, process_details};
-pub use efficiency::toggle_efficiency_mode;
+pub use efficiency::{is_efficiency_mode, set_efficiency_mode, set_power_throttling, toggle_efficiency_mode};
 pub use elevation::{
     ELEVATED_WAIT, enable_debug_privilege, is_elevated, restart_as_admin, run_elevated, run_elevated_detached, run_elevated_exe,
     shell_open,
 };
 pub use location::open_file_location;
+pub use priority::{PriorityClass, get_priority_class, set_priority_class};
 pub use terminate::{end_many, end_process};
 
 use std::ffi::c_void;

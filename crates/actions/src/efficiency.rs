@@ -14,7 +14,7 @@ pub fn toggle_efficiency_mode(targets: &[(u32, i64)]) -> Result<bool, ActionErro
     let mut current = None;
     let mut first_err = None;
     for &(pid, ct) in targets {
-        match is_on(pid, ct) {
+        match is_efficiency_mode(pid, ct) {
             Ok(on) => {
                 current = Some(on);
                 break;
@@ -33,7 +33,7 @@ pub fn toggle_efficiency_mode(targets: &[(u32, i64)]) -> Result<bool, ActionErro
     let enable = !current;
     let mut first_err = None;
     for &(pid, ct) in targets {
-        match set(pid, ct, enable) {
+        match set_efficiency_mode(pid, ct, enable) {
             Ok(()) | Err(ActionError::AlreadyExited) => {}
             Err(e) => {
                 first_err.get_or_insert(e);
@@ -43,7 +43,7 @@ pub fn toggle_efficiency_mode(targets: &[(u32, i64)]) -> Result<bool, ActionErro
     first_err.map_or(Ok(enable), Err)
 }
 
-fn is_on(pid: u32, ct: i64) -> Result<bool, ActionError> {
+pub fn is_efficiency_mode(pid: u32, ct: i64) -> Result<bool, ActionError> {
     let handle = open_verified(pid, ct, Default::default())?;
     let mut state = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ..Default::default() };
     // SAFETY: `state` is a writable PROCESS_POWER_THROTTLING_STATE of the size passed.
@@ -55,7 +55,8 @@ fn is_on(pid: u32, ct: i64) -> Result<bool, ActionError> {
         && state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED != 0)
 }
 
-fn set(pid: u32, ct: i64, enable: bool) -> Result<(), ActionError> {
+/// Applies only the EcoQoS power throttling execution speed constraint without modifying priority class.
+pub fn set_power_throttling(pid: u32, ct: i64, enable: bool) -> Result<(), ActionError> {
     let handle = open_verified(pid, ct, PROCESS_SET_INFORMATION)?;
     let state = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -67,7 +68,12 @@ fn set(pid: u32, ct: i64, enable: bool) -> Result<(), ActionError> {
     unsafe {
         SetProcessInformation(handle.0, ProcessPowerThrottling, &state as *const _ as *const c_void, size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32)
     }
-    .map_err(|e| ActionError::from_win(&e))?;
+    .map_err(|e| ActionError::from_win(&e))
+}
+
+pub fn set_efficiency_mode(pid: u32, ct: i64, enable: bool) -> Result<(), ActionError> {
+    set_power_throttling(pid, ct, enable)?;
+    let handle = open_verified(pid, ct, PROCESS_SET_INFORMATION)?;
     let class = if enable { IDLE_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS };
     // SAFETY: verified handle opened with PROCESS_SET_INFORMATION.
     unsafe { SetPriorityClass(handle.0, class) }.map_err(|e| ActionError::from_win(&e))

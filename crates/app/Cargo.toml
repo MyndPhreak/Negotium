@@ -11,6 +11,7 @@ negotium-collector.workspace = true
 negotium-model.workspace = true
 negotium-history.workspace = true
 negotium-actions.workspace = true
+negotium-moderator.workspace = true
 slint.workspace = true
 raw-window-handle.workspace = true
 serde.workspace = true

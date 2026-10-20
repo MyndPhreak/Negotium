@@ -2734,6 +2734,7 @@ dependencies = [
  "negotium-collector",
  "negotium-history",
  "negotium-model",
+ "negotium-moderator",
  "negotium-snapshot",
  "raw-window-handle",
  "roxmltree",
@@ -2749,6 +2750,7 @@ name = "negotium-actions"
 version = "0.3.1"
 dependencies = [
  "negotium-collector",
+ "serde",
  "windows",
 ]
 
@@ -2786,6 +2788,16 @@ version = "0.3.1"
 dependencies = [
  "negotium-snapshot",
  "serde",
+]
+
+[[package]]
+name = "negotium-moderator"
+version = "0.3.1"
+dependencies = [
+ "negotium-actions",
+ "negotium-snapshot",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

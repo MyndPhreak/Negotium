@@ -136,3 +136,62 @@ fn debug_privilege_is_enabled_exactly_when_elevated() {
     // An unelevated token never holds SeDebugPrivilege, so this only succeeds elevated.
     assert_eq!(negotium_actions::enable_debug_privilege().is_ok(), is_elevated());
 }
+
+
+use negotium_actions::{
+    PriorityClass, get_priority_class, get_process_affinity, is_efficiency_mode, set_efficiency_mode,
+    set_power_throttling, set_priority_class, set_process_affinity,
+};
+
+#[test]
+fn priority_class_get_and_set() {
+    let (mut child, ct) = spawn_ping();
+    let initial = get_priority_class(child.id(), ct).unwrap();
+    set_priority_class(child.id(), ct, PriorityClass::BelowNormal).unwrap();
+    assert_eq!(get_priority_class(child.id(), ct).unwrap(), PriorityClass::BelowNormal);
+    set_priority_class(child.id(), ct, PriorityClass::Idle).unwrap();
+    assert_eq!(get_priority_class(child.id(), ct).unwrap(), PriorityClass::Idle);
+    set_priority_class(child.id(), ct, initial).unwrap();
+    assert_eq!(get_priority_class(child.id(), ct).unwrap(), initial);
+    child.kill().ok();
+    child.wait().ok();
+}
+
+#[test]
+fn affinity_get_and_set() {
+    let (mut child, ct) = spawn_ping();
+    let (proc_mask, sys_mask) = get_process_affinity(child.id(), ct).unwrap();
+    assert!(proc_mask > 0);
+    assert!(sys_mask > 0);
+    set_process_affinity(child.id(), ct, 1).unwrap();
+    let (new_proc_mask, _) = get_process_affinity(child.id(), ct).unwrap();
+    assert_eq!(new_proc_mask, 1);
+    set_process_affinity(child.id(), ct, proc_mask).unwrap();
+    let (restored_mask, _) = get_process_affinity(child.id(), ct).unwrap();
+    assert_eq!(restored_mask, proc_mask);
+    child.kill().ok();
+    child.wait().ok();
+}
+
+#[test]
+fn direct_efficiency_and_power_throttling() {
+    let (mut child, ct) = spawn_ping();
+    let initial_priority = get_priority_class(child.id(), ct).unwrap();
+    assert!(!is_efficiency_mode(child.id(), ct).unwrap());
+    
+    // Test pure power throttling (leaves priority intact)
+    set_power_throttling(child.id(), ct, true).unwrap();
+    assert!(is_efficiency_mode(child.id(), ct).unwrap());
+    assert_eq!(get_priority_class(child.id(), ct).unwrap(), initial_priority);
+    set_power_throttling(child.id(), ct, false).unwrap();
+    assert!(!is_efficiency_mode(child.id(), ct).unwrap());
+
+    // Test full efficiency mode (changes priority to Idle)
+    set_efficiency_mode(child.id(), ct, true).unwrap();
+    assert!(is_efficiency_mode(child.id(), ct).unwrap());
+    set_efficiency_mode(child.id(), ct, false).unwrap();
+    assert!(!is_efficiency_mode(child.id(), ct).unwrap());
+    
+    child.kill().ok();
+    child.wait().ok();
+}

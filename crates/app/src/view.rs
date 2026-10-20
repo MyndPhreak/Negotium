@@ -274,6 +274,7 @@ pub struct FrameOptions {
     /// The apps were re-sorted for this frame (`Ranker::resorted`): processes inside expanded
     /// cards re-sort with them, and otherwise hold their order (`ProcOrder`).
     pub resorted: bool,
+    pub restrained: HashSet<(u32, i64)>,
 }
 
 /// The order of the processes inside each expanded card, kept across frames under the Ranker's
@@ -415,7 +416,14 @@ pub fn build_frame(
         } else {
             primary_proc.map(|p| p.name.clone()).unwrap_or_else(|| "—".into())
         };
-        let col_status = if r.hung_for_ms.is_some() { "Not responding".into() } else { "Running".into() };
+        let has_restrained = procs.iter().any(|k| opts.restrained.contains(k));
+        let col_status = if r.hung_for_ms.is_some() {
+            "Not responding".into()
+        } else if has_restrained {
+            "Restrained (Aequilibrium)".into()
+        } else {
+            "Running".into()
+        };
         let total_threads: u64 = procs.iter().filter_map(|k| sample_of.get(k)).map(|s| s.threads as u64).sum();
         let total_handles: u64 = procs.iter().filter_map(|k| sample_of.get(k)).map(|s| s.handles as u64).sum();
         let col_threads = if total_threads > 0 { total_threads.to_string() } else { "—".into() };
@@ -494,7 +502,13 @@ pub fn build_frame(
                     last_in_card: n == last, pid: p.pid.to_string(),
                     col_pid: p.pid.to_string(),
                     col_proc_name: p.name.clone(),
-                    col_status: if p.hung_for_ms.is_some() { "Not responding".into() } else { "Running".into() },
+                    col_status: if p.hung_for_ms.is_some() {
+                        "Not responding".into()
+                    } else if opts.restrained.contains(&pid_key) {
+                        "Restrained (Aequilibrium)".into()
+                    } else {
+                        "Running".into()
+                    },
                     col_threads: sample.filter(|s| s.threads > 0).map(|s| s.threads.to_string()).unwrap_or_else(|| "—".into()),
                     col_handles: sample.filter(|s| s.handles > 0).map(|s| s.handles.to_string()).unwrap_or_else(|| "—".into()),
                     col_publisher: proc_pub.unwrap_or_else(|| "—".into()),
@@ -666,7 +680,7 @@ mod tests {
     }
     /// Every app's child rows built (as while searching), so tests see the whole tree.
     fn opts(metric: Metric, elevated: bool) -> FrameOptions {
-        FrameOptions { metric, elevated, expanded: HashSet::new(), all_children: true, sort: Sort::default(), grouped: true, resorted: true }
+        FrameOptions { metric, elevated, expanded: HashSet::new(), all_children: true, sort: Sort::default(), grouped: true, resorted: true, restrained: HashSet::new() }
     }
     fn snap(cpu: Option<f32>) -> Snapshot {
         Snapshot {
@@ -840,7 +854,7 @@ mod tests {
             app(3, "Code", 5.0, vec![proc(3, 0, 5.0, "code.exe"), proc(4, 3, 0.0, "helper.exe")], None),
         ];
         let mut ids = IdMap::new();
-        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true, resorted: true };
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true, resorted: true, restrained: HashSet::new() };
         let f = test_frame(&mut ids, &snap(Some(1.0)), &rows, &[0, 1], &History::new(), &collapsed);
         assert!(f.rows.iter().all(|r| r.depth == 0), "no child rows for collapsed apps");
         assert_eq!(f.targets.len(), 2, "and no child targets");
@@ -862,7 +876,7 @@ mod tests {
         let mut win = app(4, "Windows", 1.0, vec![proc(5, 4, 1.0, "StartMenuExperienceHost.exe"), hung_child], Some(9_000));
         win.key = AppKey::Windows;
         win.kind = AppKind::Windows;
-        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true, resorted: true };
+        let collapsed = FrameOptions { metric: Metric::Cpu, elevated: true, expanded: HashSet::new(), all_children: false, sort: Sort::default(), grouped: true, resorted: true, restrained: HashSet::new() };
         let mut ids = IdMap::new();
         let f = test_frame(&mut ids, &snap(Some(1.0)), &[win], &[0], &History::new(), &collapsed);
         let child = f.rows.iter().find(|r| r.name == "SearchHost.exe").expect("built so it can be shown and force-closed");

@@ -137,6 +137,7 @@ pub struct Controls {
     /// Latched wake flag: a poke that lands while the worker is busy (not waiting) is
     /// remembered, so the next `wait` returns immediately instead of losing the wakeup.
     woken: Mutex<bool>,
+    moderator: Mutex<negotium_moderator::ModeratorConfig>,
     cv: Condvar,
 }
 
@@ -153,6 +154,7 @@ impl Default for Controls {
             sort: AtomicU8::new(pack_sort(Sort::default())),
             history_sort: AtomicU8::new(1 | DESCENDING_BIT),
             reset_history: AtomicBool::new(false),
+            moderator: Mutex::new(negotium_moderator::ModeratorConfig::default()),
             grouped: AtomicBool::new(true),
             page: AtomicU8::new(Page::Overview as u8),
             perf: Mutex::new(("cpu".to_string(), Range::Minute)),
@@ -254,6 +256,12 @@ impl Controls {
     pub fn interval(&self) -> Duration {
         let refresh = self.refresh_ms.load(Ordering::Relaxed).max(100) as u64;
         Duration::from_millis(if self.visible() { refresh } else { refresh.max(2000) })
+    }
+    pub fn moderator_config(&self) -> negotium_moderator::ModeratorConfig {
+        self.moderator.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    pub fn set_moderator_config(&self, config: negotium_moderator::ModeratorConfig) {
+        *self.moderator.lock().unwrap_or_else(|e| e.into_inner()) = config;
     }
     pub fn set_tray_cpu(&self, on: bool) {
         self.tray_cpu.store(on, Ordering::Relaxed);
