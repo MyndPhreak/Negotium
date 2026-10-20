@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/MyndPhreak/Negotium/compare/v0.4.0...v0.5.0) (2026-10-20)
+
+
+### Features
+
+* **app:** add Aequilibrium UI controls, system tray toggle, context menu exclusion, and restraint icon ([#7](https://github.com/MyndPhreak/Negotium/issues/7)) ([886c66d](https://github.com/MyndPhreak/Negotium/commit/886c66d4f3464e65814e6a6e5f83e28d921b799c))
+* **app:** add multi-line hardware telemetry to tray tooltip and 1s cadence ([#9](https://github.com/MyndPhreak/Negotium/issues/9)) ([c8db9ac](https://github.com/MyndPhreak/Negotium/commit/c8db9ac11d662213ee89eac807c678d5abf34303))
+
+
+### Continuous Integration
+
+* streamline release build and remove redundant test step ([#6](https://github.com/MyndPhreak/Negotium/issues/6)) ([d1f3698](https://github.com/MyndPhreak/Negotium/commit/d1f3698552976a7f0b74ce229141eef6e127fc64))
+
 ## [0.4.0](https://github.com/MyndPhreak/Negotium/compare/v0.3.2...v0.4.0) (2026-10-20)
 
 
