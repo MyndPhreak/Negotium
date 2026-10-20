@@ -125,7 +125,7 @@ pub struct LiveSource {
     elevated: bool,
     log: crate::log::Log,
     tray: Option<TraySink>,
-    governor: negotium_governor::Governor,
+    moderator: negotium_moderator::Moderator,
 }
 
 impl LiveSource {
@@ -152,7 +152,7 @@ impl LiveSource {
             elevated: negotium_actions::is_elevated(),
             log: crate::log::Log::new(crate::log::Log::default_path()),
             tray: None,
-            governor: negotium_governor::Governor::new(),
+            moderator: negotium_moderator::Moderator::new(),
         }
     }
 
@@ -188,7 +188,7 @@ impl Source for LiveSource {
         }
         self.usage.update(&snap, &rows);
 
-        // Evaluate Process Governor
+        // Evaluate Moderator (Aequilibrium & rules)
         let mut proc_rates = std::collections::HashMap::with_capacity(snap.processes.len());
         for app in &rows {
             for p in &app.processes {
@@ -196,34 +196,34 @@ impl Source for LiveSource {
             }
         }
         let foreground_pid = negotium_collector::foreground_process_id();
-        let gov_config = controls.governor_config();
-        let (gov_actions, gov_events) = self.governor.tick(&snap, &proc_rates, foreground_pid, &gov_config);
+        let mod_config = controls.moderator_config();
+        let (mod_actions, mod_events) = self.moderator.tick(&snap, &proc_rates, foreground_pid, &mod_config);
 
-        for action in gov_actions {
+        for action in mod_actions {
             match action {
-                negotium_governor::GovernorAction::Restrain { pid, create_time, name: _, mode } => {
+                negotium_moderator::ModeratorAction::Restrain { pid, create_time, name: _, mode } => {
                     let original_priority = negotium_actions::get_priority_class(pid, create_time).ok();
                     let original_efficiency = negotium_actions::is_efficiency_mode(pid, create_time).ok();
                     if let (Some(prio), Some(eff)) = (original_priority, original_efficiency) {
-                        self.governor.record_original_state(pid, create_time, prio, eff);
+                        self.moderator.record_original_state(pid, create_time, prio, eff);
                     }
                     match mode {
-                        negotium_governor::RestraintMode::Both => {
+                        negotium_moderator::RestraintMode::Both => {
                             let _ = negotium_actions::set_power_throttling(pid, create_time, true);
                             let _ = negotium_actions::set_priority_class(pid, create_time, negotium_actions::PriorityClass::BelowNormal);
                         }
-                        negotium_governor::RestraintMode::EcoQosOnly => {
+                        negotium_moderator::RestraintMode::EcoQosOnly => {
                             let _ = negotium_actions::set_power_throttling(pid, create_time, true);
                         }
-                        negotium_governor::RestraintMode::BelowNormalOnly => {
+                        negotium_moderator::RestraintMode::BelowNormalOnly => {
                             let _ = negotium_actions::set_priority_class(pid, create_time, negotium_actions::PriorityClass::BelowNormal);
                         }
-                        negotium_governor::RestraintMode::Idle => {
+                        negotium_moderator::RestraintMode::Idle => {
                             let _ = negotium_actions::set_efficiency_mode(pid, create_time, true);
                         }
                     }
                 }
-                negotium_governor::GovernorAction::Restore { pid, create_time, name: _, reason: _, original_priority, original_efficiency } => {
+                negotium_moderator::ModeratorAction::Restore { pid, create_time, name: _, reason: _, original_priority, original_efficiency } => {
                     if let Some(prio) = original_priority {
                         let _ = negotium_actions::set_priority_class(pid, create_time, prio);
                     }
@@ -233,7 +233,7 @@ impl Source for LiveSource {
                         let _ = negotium_actions::set_power_throttling(pid, create_time, false);
                     }
                 }
-                negotium_governor::GovernorAction::ApplyRule { pid, create_time, name: _, priority, affinity_mask, cpu_sets, efficiency_mode } => {
+                negotium_moderator::ModeratorAction::ApplyRule { pid, create_time, name: _, priority, affinity_mask, cpu_sets, efficiency_mode } => {
                     if let Some(prio) = priority {
                         let _ = negotium_actions::set_priority_class(pid, create_time, prio);
                     }
@@ -250,16 +250,16 @@ impl Source for LiveSource {
             }
         }
 
-        for event in gov_events {
+        for event in mod_events {
             match event {
-                negotium_governor::GovernorEvent::RestraintStarted { pid, name, cpu_pct, mode: _ } => {
-                    self.log.info(&format!("Governor: Restrained {name} (PID {pid}) using {cpu_pct:.1}% CPU"));
+                negotium_moderator::ModeratorEvent::RestraintStarted { pid, name, cpu_pct, mode: _ } => {
+                    self.log.info(&format!("Moderator: Restrained {name} (PID {pid}) using {cpu_pct:.1}% CPU"));
                 }
-                negotium_governor::GovernorEvent::RestraintRestored { pid, name, reason, duration_ms } => {
-                    self.log.info(&format!("Governor: Restored {name} (PID {pid}) after {duration_ms}ms (reason: {reason:?})"));
+                negotium_moderator::ModeratorEvent::RestraintRestored { pid, name, reason, duration_ms } => {
+                    self.log.info(&format!("Moderator: Restored {name} (PID {pid}) after {duration_ms}ms (reason: {reason:?})"));
                 }
-                negotium_governor::GovernorEvent::RuleApplied { pid, name, summary } => {
-                    self.log.info(&format!("Governor: Applied rule to {name} (PID {pid}): {summary}"));
+                negotium_moderator::ModeratorEvent::RuleApplied { pid, name, summary } => {
+                    self.log.info(&format!("Moderator: Applied rule to {name} (PID {pid}): {summary}"));
                 }
             }
         }
@@ -282,7 +282,7 @@ impl Source for LiveSource {
                 let (expanded, all_children) = controls.child_rows();
                 let resorted = self.ranker.resorted();
                 let restrained: std::collections::HashSet<(u32, i64)> = snap.processes.iter()
-                    .filter(|p| self.governor.is_restrained(p.pid, p.create_time))
+                    .filter(|p| self.moderator.is_restrained(p.pid, p.create_time))
                     .map(|p| (p.pid, p.create_time))
                     .collect();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped(), resorted, restrained };

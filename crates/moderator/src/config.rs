@@ -31,10 +31,10 @@ pub struct PersistentRule {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GovernorConfig {
-    /// Whether automatic runaway CPU restraint (ProBalance) is active.
-    pub probalance_enabled: bool,
-    /// Minimum total system CPU % before ProBalance engages restraint (default: 70%).
+pub struct ModeratorConfig {
+    /// Whether automatic runaway CPU restraint (Aequilibrium) is active.
+    pub aequilibrium_enabled: bool,
+    /// Minimum total system CPU % before Aequilibrium engages restraint (default: 70%).
     pub system_cpu_threshold_pct: f32,
     /// Minimum individual process CPU % to qualify for restraint (default: 20%).
     pub process_cpu_threshold_pct: f32,
@@ -46,16 +46,16 @@ pub struct GovernorConfig {
     pub min_restraint_duration_ms: u64,
     /// Restraint technique applied to restrained processes.
     pub restraint_mode: RestraintMode,
-    /// User-defined process exclusions from ProBalance (e.g. "obs64.exe").
+    /// User-defined process exclusions from Aequilibrium (e.g. "obs64.exe").
     pub exclusions: Vec<String>,
     /// Persistent process configuration rules (priority, affinity, cpu sets, efficiency mode).
     pub rules: Vec<PersistentRule>,
 }
 
-impl Default for GovernorConfig {
+impl Default for ModeratorConfig {
     fn default() -> Self {
         Self {
-            probalance_enabled: true,
+            aequilibrium_enabled: true,
             system_cpu_threshold_pct: 70.0,
             process_cpu_threshold_pct: 20.0,
             restore_cpu_threshold_pct: 10.0,

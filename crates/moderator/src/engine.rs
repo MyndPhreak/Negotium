@@ -1,5 +1,5 @@
-use crate::actions::{GovernorAction, GovernorEvent, RestoreReason};
-use crate::config::GovernorConfig;
+use crate::actions::{ModeratorAction, ModeratorEvent, RestoreReason};
+use crate::config::ModeratorConfig;
 use crate::exclusions::{is_safety_excluded, is_user_excluded};
 use negotium_actions::PriorityClass;
 use negotium_snapshot::Snapshot;
@@ -15,7 +15,7 @@ pub struct RestrainedProcess {
 }
 
 #[derive(Default)]
-pub struct Governor {
+pub struct Moderator {
     /// Active restraints: (pid, create_time) -> RestrainedProcess
     restraints: HashMap<(u32, i64), RestrainedProcess>,
     /// Candidates over quota: (pid, create_time) -> first_time_over_quota_ms
@@ -24,12 +24,12 @@ pub struct Governor {
     applied_rules: HashSet<(u32, i64)>,
 }
 
-impl Governor {
+impl Moderator {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Evaluates the current system state against governor configuration and returns actions and events.
+    /// Evaluates the current system state against moderator configuration and returns actions and events.
     /// `rates`: per-process CPU usage percentage indexed by (pid, create_time).
     /// `foreground_pid`: PID of the current foreground window (or None).
     pub fn tick(
@@ -37,8 +37,8 @@ impl Governor {
         snap: &Snapshot,
         rates: &HashMap<(u32, i64), f32>,
         foreground_pid: Option<u32>,
-        config: &GovernorConfig,
-    ) -> (Vec<GovernorAction>, Vec<GovernorEvent>) {
+        config: &ModeratorConfig,
+    ) -> (Vec<ModeratorAction>, Vec<ModeratorEvent>) {
         let mut actions = Vec::new();
         let mut events = Vec::new();
         let now_ms = snap.taken_at_ms;
@@ -63,7 +63,7 @@ impl Governor {
 
         for ((pid, _create_time), r) in exited_restraints {
             let duration_ms = now_ms.saturating_sub(r.restrained_at_ms);
-            events.push(GovernorEvent::RestraintRestored {
+            events.push(ModeratorEvent::RestraintRestored {
                 pid,
                 name: r.name,
                 reason: RestoreReason::ProcessExited,
@@ -90,7 +90,7 @@ impl Governor {
                         summary_parts.push(format!("Efficiency: {eff}"));
                     }
 
-                    actions.push(GovernorAction::ApplyRule {
+                    actions.push(ModeratorAction::ApplyRule {
                         pid: p.pid,
                         create_time: p.create_time,
                         name: p.name.clone(),
@@ -100,7 +100,7 @@ impl Governor {
                         efficiency_mode: rule.efficiency_mode,
                     });
 
-                    events.push(GovernorEvent::RuleApplied {
+                    events.push(ModeratorEvent::RuleApplied {
                         pid: p.pid,
                         name: p.name.clone(),
                         summary: summary_parts.join(", "),
@@ -110,11 +110,11 @@ impl Governor {
             }
         }
 
-        // 4. If ProBalance is disabled, restore any actively restrained processes and return
-        if !config.probalance_enabled {
+        // 4. If Aequilibrium is disabled, restore any actively restrained processes and return
+        if !config.aequilibrium_enabled {
             for ((pid, create_time), r) in self.restraints.drain() {
                 let duration_ms = now_ms.saturating_sub(r.restrained_at_ms);
-                actions.push(GovernorAction::Restore {
+                actions.push(ModeratorAction::Restore {
                     pid,
                     create_time,
                     name: r.name.clone(),
@@ -122,7 +122,7 @@ impl Governor {
                     original_priority: r.original_priority,
                     original_efficiency: r.original_efficiency,
                 });
-                events.push(GovernorEvent::RestraintRestored {
+                events.push(ModeratorEvent::RestraintRestored {
                     pid,
                     name: r.name,
                     reason: RestoreReason::CpuDropped,
@@ -159,7 +159,7 @@ impl Governor {
         for (key, reason) in to_restore {
             if let Some(r) = self.restraints.remove(&key) {
                 let duration_ms = now_ms.saturating_sub(r.restrained_at_ms);
-                actions.push(GovernorAction::Restore {
+                actions.push(ModeratorAction::Restore {
                     pid: key.0,
                     create_time: key.1,
                     name: r.name.clone(),
@@ -167,7 +167,7 @@ impl Governor {
                     original_priority: r.original_priority,
                     original_efficiency: r.original_efficiency,
                 });
-                events.push(GovernorEvent::RestraintRestored {
+                events.push(ModeratorEvent::RestraintRestored {
                     pid: key.0,
                     name: r.name,
                     reason,
@@ -199,13 +199,13 @@ impl Governor {
                 let first_seen = *self.high_cpu_since.entry(key).or_insert(now_ms);
                 if now_ms.saturating_sub(first_seen) >= config.time_over_quota_ms {
                     // Ready to restrain!
-                    actions.push(GovernorAction::Restrain {
+                    actions.push(ModeratorAction::Restrain {
                         pid: p.pid,
                         create_time: p.create_time,
                         name: p.name.clone(),
                         mode: config.restraint_mode,
                     });
-                    events.push(GovernorEvent::RestraintStarted {
+                    events.push(ModeratorEvent::RestraintStarted {
                         pid: p.pid,
                         name: p.name.clone(),
                         cpu_pct: cpu,
@@ -246,7 +246,7 @@ impl Governor {
         }
     }
 
-    /// Returns whether a process is currently under active governor restraint.
+    /// Returns whether a process is currently under active moderator restraint.
     pub fn is_restrained(&self, pid: u32, create_time: i64) -> bool {
         self.restraints.contains_key(&(pid, create_time))
     }

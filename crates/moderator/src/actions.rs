@@ -9,7 +9,7 @@ pub enum RestoreReason {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum GovernorAction {
+pub enum ModeratorAction {
     Restrain {
         pid: u32,
         create_time: i64,
@@ -36,7 +36,7 @@ pub enum GovernorAction {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum GovernorEvent {
+pub enum ModeratorEvent {
     RestraintStarted {
         pid: u32,
         name: String,

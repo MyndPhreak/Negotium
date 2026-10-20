@@ -420,7 +420,7 @@ pub fn build_frame(
         let col_status = if r.hung_for_ms.is_some() {
             "Not responding".into()
         } else if has_restrained {
-            "Restrained (ProBalance)".into()
+            "Restrained (Aequilibrium)".into()
         } else {
             "Running".into()
         };
@@ -505,7 +505,7 @@ pub fn build_frame(
                     col_status: if p.hung_for_ms.is_some() {
                         "Not responding".into()
                     } else if opts.restrained.contains(&pid_key) {
-                        "Restrained (ProBalance)".into()
+                        "Restrained (Aequilibrium)".into()
                     } else {
                         "Running".into()
                     },

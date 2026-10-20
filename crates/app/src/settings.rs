@@ -68,7 +68,7 @@ pub struct Settings {
     pub col_threads: bool,
     pub col_handles: bool,
     pub col_publisher: bool,
-    pub governor: negotium_governor::GovernorConfig,
+    pub moderator: negotium_moderator::ModeratorConfig,
 }
 
 impl Default for Settings {
@@ -92,7 +92,7 @@ impl Default for Settings {
             col_threads: false,
             col_handles: false,
             col_publisher: false,
-            governor: negotium_governor::GovernorConfig::default(),
+            moderator: negotium_moderator::ModeratorConfig::default(),
         }
     }
 }
@@ -244,6 +244,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(col_threads);
     field!(col_handles);
     field!(col_publisher);
+    field!(moderator);
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)

@@ -1,5 +1,5 @@
 [package]
-name = "negotium-governor"
+name = "negotium-moderator"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
