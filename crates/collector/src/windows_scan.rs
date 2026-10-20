@@ -101,6 +101,19 @@ unsafe fn window_title(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..copied.max(0) as usize])
 }
 
+/// Returns the PID of the process owning the active foreground window, if any.
+pub fn foreground_process_id() -> Option<u32> {
+    // SAFETY: GetForegroundWindow returns the foreground HWND or NULL.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return None;
+    }
+    let mut pid = 0u32;
+    // SAFETY: valid pointer to stack u32.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    (pid != 0).then_some(pid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,16 +131,3 @@ mod tests {
     }
 }
 
-
-/// Returns the PID of the process owning the active foreground window, if any.
-pub fn foreground_process_id() -> Option<u32> {
-    // SAFETY: GetForegroundWindow returns the foreground HWND or NULL.
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_invalid() {
-        return None;
-    }
-    let mut pid = 0u32;
-    // SAFETY: valid pointer to stack u32.
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    (pid != 0).then_some(pid)
-}

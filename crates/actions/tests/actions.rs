@@ -177,20 +177,20 @@ fn affinity_get_and_set() {
 fn direct_efficiency_and_power_throttling() {
     let (mut child, ct) = spawn_ping();
     let initial_priority = get_priority_class(child.id(), ct).unwrap();
-    assert_eq!(is_efficiency_mode(child.id(), ct).unwrap(), false);
+    assert!(!is_efficiency_mode(child.id(), ct).unwrap());
     
     // Test pure power throttling (leaves priority intact)
     set_power_throttling(child.id(), ct, true).unwrap();
-    assert_eq!(is_efficiency_mode(child.id(), ct).unwrap(), true);
+    assert!(is_efficiency_mode(child.id(), ct).unwrap());
     assert_eq!(get_priority_class(child.id(), ct).unwrap(), initial_priority);
     set_power_throttling(child.id(), ct, false).unwrap();
-    assert_eq!(is_efficiency_mode(child.id(), ct).unwrap(), false);
+    assert!(!is_efficiency_mode(child.id(), ct).unwrap());
 
     // Test full efficiency mode (changes priority to Idle)
     set_efficiency_mode(child.id(), ct, true).unwrap();
-    assert_eq!(is_efficiency_mode(child.id(), ct).unwrap(), true);
+    assert!(is_efficiency_mode(child.id(), ct).unwrap());
     set_efficiency_mode(child.id(), ct, false).unwrap();
-    assert_eq!(is_efficiency_mode(child.id(), ct).unwrap(), false);
+    assert!(!is_efficiency_mode(child.id(), ct).unwrap());
     
     child.kill().ok();
     child.wait().ok();
