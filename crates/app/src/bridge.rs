@@ -881,6 +881,7 @@ impl Bridge {
             icon: icon.unwrap_or_else(|| self.no_icon.clone()), windows: r.windows, last_in_card: r.last_in_card, pid: r.pid.clone().into(),
             col_pid: r.col_pid.clone().into(), col_proc_name: r.col_proc_name.clone().into(), col_status: r.col_status.clone().into(),
             col_threads: r.col_threads.clone().into(), col_handles: r.col_handles.clone().into(), col_publisher: r.col_publisher.clone().into(),
+            restrained: r.restrained,
         }).collect();
         sync_model(&*self.rows, rows);
         self.sync_current();

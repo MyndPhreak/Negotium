@@ -43,6 +43,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_col_threads(s.col_threads);
     ui.set_col_handles(s.col_handles);
     ui.set_col_publisher(s.col_publisher);
+    ui.set_settings_aequilibrium_enabled(s.moderator.aequilibrium_enabled);
     // Off: GraphClock rests the view on the newest sample at once (PF3).
     ui.global::<crate::GraphClock>().set_smooth(s.smooth_graphs);
 }
