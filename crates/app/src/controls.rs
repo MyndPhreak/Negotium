@@ -252,10 +252,10 @@ impl Controls {
         self.refresh_ms.store(ms.max(100), Ordering::Relaxed);
         self.poke();
     }
-    /// The chosen rate while visible; hidden in the tray, 2 s or the chosen rate if slower (spec 4.2).
+    /// The chosen rate while visible; hidden in the tray, 1 s or the chosen rate if slower.
     pub fn interval(&self) -> Duration {
         let refresh = self.refresh_ms.load(Ordering::Relaxed).max(100) as u64;
-        Duration::from_millis(if self.visible() { refresh } else { refresh.max(2000) })
+        Duration::from_millis(if self.visible() { refresh } else { refresh.max(1000) })
     }
     pub fn moderator_config(&self) -> negotium_moderator::ModeratorConfig {
         self.moderator.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -338,7 +338,7 @@ mod tests {
         c.set_visible(true);
         assert_eq!(c.interval(), Duration::from_secs(1));
         c.set_visible(false);
-        assert_eq!(c.interval(), Duration::from_secs(2));
+        assert_eq!(c.interval(), Duration::from_secs(1));
     }
 
     #[test]
@@ -349,7 +349,7 @@ mod tests {
         c.set_visible(true);
         assert_eq!(c.interval(), Duration::from_millis(500));
         c.set_visible(false);
-        assert_eq!(c.interval(), Duration::from_secs(2), "hidden: 2 s (spec 4.2)");
+        assert_eq!(c.interval(), Duration::from_secs(1), "hidden: 1 s");
         c.set_refresh_ms(5000);
         assert_eq!(c.interval(), Duration::from_secs(5), "hidden never ticks faster than chosen");
         c.set_visible(true);

@@ -107,7 +107,7 @@ fn read_history<R>(history: &SharedHistory, f: impl FnOnce(&History) -> R) -> R 
 fn keep_sample(history: &SharedHistory, snap: &negotium_snapshot::Snapshot, rows: &[negotium_model::AppRow], for_tray: bool) -> Option<TraySample> {
     write_history(history, |h| {
         let kept = h.push(snap.taken_at_ms, &snap.totals, rows);
-        (kept && for_tray).then(|| TraySample::from_history(h, snap.taken_at_ms, snap.totals.cpu_pct))
+        (kept && for_tray).then(|| TraySample::from_snapshot(h, snap))
     })
 }
 
