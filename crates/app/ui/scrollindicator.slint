@@ -14,7 +14,7 @@ export component ScrollIndicator inherits Rectangle {
     in property <bool> interactive: true;
     property <length> overflow: max(0px, root.content-height - root.visible-height);
     property <length> track: root.height - 4px;
-    width: 10px;
+    width: 14px;
 
     drag := TouchArea {
         enabled: root.interactive;
