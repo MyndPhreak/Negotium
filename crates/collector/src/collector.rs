@@ -1,6 +1,6 @@
 //! One tick = one consistent Snapshot. Each source fails independently.
 use crate::{
-    IdentityCache, PdhSources, ProcessReader, SystemInfo, local_time_ms, logical_cpus, memory_totals, read_system_info,
+    IdentityCache, PdhSources, ProcessReader, RawProcess, SystemInfo, local_time_ms, logical_cpus, memory_totals, read_system_info,
     scan_windows, uptime_s,
 };
 use negotium_snapshot::{GpuSample, ProcessSample, Snapshot, SystemTotals};
@@ -9,6 +9,9 @@ use std::time::Instant;
 
 pub struct Collector {
     processes: ProcessReader,
+    /// The last process list read. Reused when a read fails, so one failed read doesn't make every
+    /// process look exited to the caches downstream (its unchanged CPU times give 0% for that tick).
+    last_raw: Vec<RawProcess>,
     identity: IdentityCache,
     pdh: Result<PdhSources, u32>,
     started: Instant,
@@ -16,6 +19,9 @@ pub struct Collector {
     info: SystemInfo,
     net: crate::net::NetTable,
     gpu_temps: crate::gpu::GpuTemps,
+    /// When DXGI adapters were last enumerated, and the PDH adapter keys that enumeration did not
+    /// list (`gpu::needs_rescan`).
+    gpu_scan: (Instant, Vec<String>),
     cpu_temp: crate::cputemp::CpuTemp,
     /// Per-process network: the kernel network trace, only when asked for (`with_net_feed`) and
     /// elevated.
@@ -39,11 +45,13 @@ impl Collector {
         let info = read_system_info();
         Self {
             processes: ProcessReader::new(),
+            last_raw: Vec::new(),
             identity: IdentityCache::new(),
             pdh: PdhSources::open(),
             started,
             logical_cpus: logical_cpus(),
             gpu_temps: crate::gpu::GpuTemps::open(&info.gpus),
+            gpu_scan: (Instant::now(), Vec::new()),
             cpu_temp: crate::cputemp::CpuTemp::open(),
             info,
             net: crate::net::NetTable::new(),
@@ -89,14 +97,16 @@ impl Collector {
         let taken_at_ms = self.started.elapsed().as_millis() as u64;
         let mut source_errors = Vec::new();
 
-        let raw = self.processes.read().unwrap_or_else(|status| {
-            source_errors.push(format!("processes: NTSTATUS {status:#010x}"));
-            Vec::new()
-        });
-        let alive: HashSet<(u32, i64)> = raw.iter().map(|p| (p.pid, p.create_time)).collect();
+        match self.processes.read() {
+            Ok(raw) => self.last_raw = raw,
+            Err(status) => source_errors.push(format!("processes: NTSTATUS {status:#010x}")),
+        }
+        let alive: HashSet<(u32, i64)> = self.last_raw.iter().map(|p| (p.pid, p.create_time)).collect();
         self.identity.retain_alive(&alive);
-        let processes: Vec<ProcessSample> = raw
-            .into_iter()
+        let processes: Vec<ProcessSample> = self
+            .last_raw
+            .iter()
+            .cloned()
             .map(|p| {
                 let id = self.identity.get(p.pid, p.create_time).clone();
                 ProcessSample {
@@ -168,6 +178,17 @@ impl Collector {
                 source_errors.extend(r.errors);
             }
             Err(status) => source_errors.push(format!("pdh open: {status:#010x}")),
+        }
+
+        // A new LUID (driver update, re-enabled adapter) would drop every engine sample of that
+        // adapter: enumerate again, and reopen the temperature handles for the new list.
+        let now = Instant::now();
+        let pdh_keys = || gpu_parts.0.iter().flatten().map(|s| s.key.as_str());
+        if crate::gpu::needs_rescan(pdh_keys(), &self.info.gpus, &self.gpu_scan.1, self.gpu_scan.0, now) {
+            let (gpus, errors) = crate::gpu::enumerate_gpus();
+            self.gpu_temps = crate::gpu::GpuTemps::open(&gpus);
+            self.gpu_scan = (now, pdh_keys().filter(|k| !gpus.iter().any(|g| g.key == *k)).map(String::from).collect());
+            (self.info.gpus, self.info.gpu_errors) = (gpus, errors);
         }
 
         // Independent of PDH: DXGI enumeration and kernel temperature queries fail on their own.
