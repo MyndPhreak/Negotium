@@ -12,4 +12,4 @@ mod exclusions;
 pub use actions::{ModeratorAction, ModeratorEvent, RestoreReason};
 pub use config::{ModeratorConfig, PersistentRule, RestraintMode};
 pub use engine::{Moderator, RestrainedProcess};
-pub use exclusions::{is_safety_excluded, is_user_excluded, CRITICAL_SYSTEM_PROCESSES};
+pub use exclusions::{image_stem, is_safety_excluded, is_user_excluded, same_image, CRITICAL_SYSTEM_PROCESSES};

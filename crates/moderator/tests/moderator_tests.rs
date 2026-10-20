@@ -129,7 +129,7 @@ fn aequilibrium_immediate_restoration_when_process_becomes_foreground() {
     moderator.tick(&snap1, &rates, None, &config);
     let snap2 = make_snap(1000, 90.0, vec![p.clone()]);
     moderator.tick(&snap2, &rates, None, &config);
-    moderator.record_original_state(100, 1000, PriorityClass::Normal, false);
+    moderator.record_original_state(100, 1000, Some(PriorityClass::Normal), Some(false));
     assert!(moderator.is_restrained(100, 1000));
 
     // User switches to photoshop window (becomes foreground PID 100)
@@ -238,4 +238,90 @@ fn persistent_rules_applied_once_per_process_instance() {
     let (actions3, events3) = moderator.tick(&snap3, &rates, None, &config);
     assert_eq!(actions3.len(), 1, "New process instance should have rule applied");
     assert_eq!(events3.len(), 1);
+}
+
+#[test]
+fn persistent_rule_added_while_process_runs_is_applied() {
+    let mut moderator = Moderator::new();
+    let mut config = ModeratorConfig::default();
+    let game = make_proc(600, 1, 1000, "game.exe");
+    let rates = HashMap::new();
+
+    let (actions, _) = moderator.tick(&make_snap(0, 20.0, vec![game.clone()]), &rates, None, &config);
+    assert!(actions.is_empty(), "no rule yet");
+
+    config.rules.push(PersistentRule {
+        name: "Game.Exe".to_string(),
+        priority: Some(PriorityClass::High),
+        affinity_mask: None,
+        cpu_sets: None,
+        efficiency_mode: None,
+    });
+    let (actions, _) = moderator.tick(&make_snap(1000, 20.0, vec![game.clone()]), &rates, None, &config);
+    assert_eq!(actions.len(), 1, "a rule added while the process runs applies to it");
+
+    let (actions, _) = moderator.tick(&make_snap(2000, 20.0, vec![game.clone()]), &rates, None, &config);
+    assert!(actions.is_empty(), "an unchanged rule is not applied again");
+
+    config.rules[0].priority = Some(PriorityClass::AboveNormal);
+    let (actions, _) = moderator.tick(&make_snap(3000, 20.0, vec![game]), &rates, None, &config);
+    assert_eq!(actions.len(), 1, "an edited rule is applied again");
+}
+
+#[test]
+fn shell_focus_does_not_exempt_apps_it_launched() {
+    let mut moderator = Moderator::new();
+    let config = ModeratorConfig::default();
+    let explorer = make_proc(300, 1, 900, "explorer.exe");
+    let app = make_proc(301, 300, 1000, "burner.exe");
+    let mut rates = HashMap::new();
+    rates.insert((301, 1000), 45.0);
+
+    for t in [0, 1000] {
+        moderator.tick(&make_snap(t, 85.0, vec![explorer.clone(), app.clone()]), &rates, Some(300), &config);
+    }
+    assert!(moderator.is_restrained(301, 1000), "the desktop having focus doesn't make explorer's children foreground");
+}
+
+#[test]
+fn user_exclusion_matches_any_exe_casing() {
+    let mut moderator = Moderator::new();
+    let mut config = ModeratorConfig::default();
+    config.exclusions.push("burner".to_string());
+    let p = make_proc(100, 1, 1000, "Burner.Exe");
+    let mut rates = HashMap::new();
+    rates.insert((100, 1000), 45.0);
+
+    for t in [0, 1000] {
+        moderator.tick(&make_snap(t, 85.0, vec![p.clone()]), &rates, None, &config);
+    }
+    assert!(!moderator.is_restrained(100, 1000));
+}
+
+#[test]
+fn restore_all_ends_every_restraint_with_its_original_state() {
+    let mut moderator = Moderator::new();
+    let config = ModeratorConfig::default();
+    let p = make_proc(100, 1, 1000, "burner.exe");
+    let mut rates = HashMap::new();
+    rates.insert((100, 1000), 45.0);
+    for t in [0, 1000] {
+        moderator.tick(&make_snap(t, 85.0, vec![p.clone()]), &rates, None, &config);
+    }
+    moderator.record_original_state(100, 1000, Some(PriorityClass::High), None);
+
+    let (actions, events) = moderator.restore_all(RestoreReason::Shutdown);
+    assert_eq!(
+        actions,
+        vec![ModeratorAction::Restore {
+            pid: 100,
+            create_time: 1000,
+            name: "burner.exe".to_string(),
+            reason: RestoreReason::Shutdown,
+            original_priority: Some(PriorityClass::High),
+            original_efficiency: None,
+        }]
+    );
+    assert_eq!(events.len(), 1);
+    assert_eq!(moderator.restrained_count(), 0);
 }

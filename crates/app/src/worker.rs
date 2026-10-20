@@ -176,6 +176,93 @@ impl LiveSource {
     }
 }
 
+impl LiveSource {
+    /// Carries out the moderator's actions and logs its events. Win32 failures are ignored: the
+    /// process may have exited or be out of reach, and the next tick sees whatever took effect.
+    fn carry_out(&mut self, actions: Vec<negotium_moderator::ModeratorAction>, events: Vec<negotium_moderator::ModeratorEvent>) {
+        use negotium_actions::PriorityClass;
+        use negotium_moderator::{ModeratorAction, ModeratorEvent, RestraintMode};
+        for action in actions {
+            match action {
+                ModeratorAction::Restrain { pid, create_time, name: _, mode } => {
+                    let original_priority = negotium_actions::get_priority_class(pid, create_time).ok();
+                    let original_efficiency = negotium_actions::is_efficiency_mode(pid, create_time).ok();
+                    self.moderator.record_original_state(pid, create_time, original_priority, original_efficiency);
+                    // A priority that couldn't be read couldn't be put back: leave it alone.
+                    let lower_priority = original_priority.is_some();
+                    match mode {
+                        RestraintMode::Both => {
+                            let _ = negotium_actions::set_power_throttling(pid, create_time, true);
+                            if lower_priority {
+                                let _ = negotium_actions::set_priority_class(pid, create_time, PriorityClass::BelowNormal);
+                            }
+                        }
+                        RestraintMode::EcoQosOnly => {
+                            let _ = negotium_actions::set_power_throttling(pid, create_time, true);
+                        }
+                        RestraintMode::BelowNormalOnly => {
+                            if lower_priority {
+                                let _ = negotium_actions::set_priority_class(pid, create_time, PriorityClass::BelowNormal);
+                            }
+                        }
+                        RestraintMode::Idle => {
+                            let _ = negotium_actions::set_power_throttling(pid, create_time, true);
+                            if lower_priority {
+                                let _ = negotium_actions::set_priority_class(pid, create_time, PriorityClass::Idle);
+                            }
+                        }
+                    }
+                }
+                ModeratorAction::Restore { pid, create_time, name: _, reason: _, original_priority, original_efficiency } => {
+                    if let Some(prio) = original_priority {
+                        let _ = negotium_actions::set_priority_class(pid, create_time, prio);
+                    }
+                    let _ = negotium_actions::set_power_throttling(pid, create_time, original_efficiency.unwrap_or(false));
+                }
+                ModeratorAction::ApplyRule { pid, create_time, name: _, priority, affinity_mask, cpu_sets, efficiency_mode } => {
+                    // Efficiency mode first: it sets the priority class too (Idle on, Normal off),
+                    // and a priority the rule names explicitly must win.
+                    if let Some(eff) = efficiency_mode {
+                        let _ = negotium_actions::set_efficiency_mode(pid, create_time, eff);
+                    }
+                    if let Some(prio) = priority {
+                        let _ = negotium_actions::set_priority_class(pid, create_time, prio);
+                    }
+                    if let Some(mask) = affinity_mask {
+                        let _ = negotium_actions::set_process_affinity(pid, create_time, mask);
+                    }
+                    if let Some(sets) = &cpu_sets {
+                        let _ = negotium_actions::set_process_cpu_sets(pid, create_time, sets);
+                    }
+                }
+            }
+        }
+
+        for event in events {
+            match event {
+                ModeratorEvent::RestraintStarted { pid, name, cpu_pct, mode: _ } => {
+                    self.log.info(&format!("Moderator: Restrained {name} (PID {pid}) using {cpu_pct:.1}% CPU"));
+                }
+                ModeratorEvent::RestraintRestored { pid, name, reason, duration_ms } => {
+                    self.log.info(&format!("Moderator: Restored {name} (PID {pid}) after {duration_ms}ms (reason: {reason:?})"));
+                }
+                ModeratorEvent::RuleApplied { pid, name, summary } => {
+                    self.log.info(&format!("Moderator: Applied rule to {name} (PID {pid}): {summary}"));
+                }
+            }
+        }
+    }
+}
+
+/// A restraint outlives the worker unless it is undone here: on exit, and on a restart after a
+/// panic, whose fresh moderator knows nothing of the old one's restraints.
+impl Drop for LiveSource {
+    fn drop(&mut self) {
+        let (actions, events) = self.moderator.restore_all(negotium_moderator::RestoreReason::Shutdown);
+        self.carry_out(actions, events);
+    }
+}
+
 impl Source for LiveSource {
     fn next_frame(&mut self, controls: &Controls) -> Option<Frame> {
         let snap = self.collector.tick();
@@ -199,70 +286,7 @@ impl Source for LiveSource {
         let mod_config = controls.moderator_config();
         let (mod_actions, mod_events) = self.moderator.tick(&snap, &proc_rates, foreground_pid, &mod_config);
 
-        for action in mod_actions {
-            match action {
-                negotium_moderator::ModeratorAction::Restrain { pid, create_time, name: _, mode } => {
-                    let original_priority = negotium_actions::get_priority_class(pid, create_time).ok();
-                    let original_efficiency = negotium_actions::is_efficiency_mode(pid, create_time).ok();
-                    if let (Some(prio), Some(eff)) = (original_priority, original_efficiency) {
-                        self.moderator.record_original_state(pid, create_time, prio, eff);
-                    }
-                    match mode {
-                        negotium_moderator::RestraintMode::Both => {
-                            let _ = negotium_actions::set_power_throttling(pid, create_time, true);
-                            let _ = negotium_actions::set_priority_class(pid, create_time, negotium_actions::PriorityClass::BelowNormal);
-                        }
-                        negotium_moderator::RestraintMode::EcoQosOnly => {
-                            let _ = negotium_actions::set_power_throttling(pid, create_time, true);
-                        }
-                        negotium_moderator::RestraintMode::BelowNormalOnly => {
-                            let _ = negotium_actions::set_priority_class(pid, create_time, negotium_actions::PriorityClass::BelowNormal);
-                        }
-                        negotium_moderator::RestraintMode::Idle => {
-                            let _ = negotium_actions::set_efficiency_mode(pid, create_time, true);
-                        }
-                    }
-                }
-                negotium_moderator::ModeratorAction::Restore { pid, create_time, name: _, reason: _, original_priority, original_efficiency } => {
-                    if let Some(prio) = original_priority {
-                        let _ = negotium_actions::set_priority_class(pid, create_time, prio);
-                    }
-                    if let Some(eff) = original_efficiency {
-                        let _ = negotium_actions::set_power_throttling(pid, create_time, eff);
-                    } else {
-                        let _ = negotium_actions::set_power_throttling(pid, create_time, false);
-                    }
-                }
-                negotium_moderator::ModeratorAction::ApplyRule { pid, create_time, name: _, priority, affinity_mask, cpu_sets, efficiency_mode } => {
-                    if let Some(prio) = priority {
-                        let _ = negotium_actions::set_priority_class(pid, create_time, prio);
-                    }
-                    if let Some(mask) = affinity_mask {
-                        let _ = negotium_actions::set_process_affinity(pid, create_time, mask);
-                    }
-                    if let Some(sets) = &cpu_sets {
-                        let _ = negotium_actions::set_process_cpu_sets(pid, create_time, sets);
-                    }
-                    if let Some(eff) = efficiency_mode {
-                        let _ = negotium_actions::set_efficiency_mode(pid, create_time, eff);
-                    }
-                }
-            }
-        }
-
-        for event in mod_events {
-            match event {
-                negotium_moderator::ModeratorEvent::RestraintStarted { pid, name, cpu_pct, mode: _ } => {
-                    self.log.info(&format!("Moderator: Restrained {name} (PID {pid}) using {cpu_pct:.1}% CPU"));
-                }
-                negotium_moderator::ModeratorEvent::RestraintRestored { pid, name, reason, duration_ms } => {
-                    self.log.info(&format!("Moderator: Restored {name} (PID {pid}) after {duration_ms}ms (reason: {reason:?})"));
-                }
-                negotium_moderator::ModeratorEvent::RuleApplied { pid, name, summary } => {
-                    self.log.info(&format!("Moderator: Applied rule to {name} (PID {pid}): {summary}"));
-                }
-            }
-        }
+        self.carry_out(mod_actions, mod_events);
         let tray_sample = keep_sample(&self.history, &snap, &rows, controls.tray_cpu() && self.tray.is_some());
         // Every tick, visible or hidden, so the tray never waits on a stale answer (crate::tray, PF2).
         controls.set_shell_hung(crate::platform::shell_tray_hung());

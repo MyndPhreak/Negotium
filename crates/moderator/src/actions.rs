@@ -6,6 +6,8 @@ pub enum RestoreReason {
     CpuDropped,
     BecameForeground,
     ProcessExited,
+    /// Negotium is exiting or its worker is restarting: nothing will be left to restore it later.
+    Shutdown,
 }
 
 #[derive(Clone, Debug, PartialEq)]

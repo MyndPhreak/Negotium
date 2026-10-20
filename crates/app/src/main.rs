@@ -16,11 +16,15 @@ use std::time::Duration;
 
 struct ActiveAffinityTarget {
     name: String,
+    /// The image name a remembered rule is saved under (view::Target::process_name).
+    process_name: String,
     procs: Vec<(u32, i64)>,
 }
 
 struct ActivePriorityTarget {
     name: String,
+    /// The image name a remembered rule is saved under (view::Target::process_name).
+    process_name: String,
     procs: Vec<(u32, i64)>,
 }
 
@@ -44,6 +48,9 @@ thread_local! {
 
 /// How long an exit waits for pending settings writes (the file, the GPU marker) to land.
 const EXIT_FLUSH: Duration = Duration::from_secs(1);
+
+/// How long an exit waits for the worker to stop, which undoes the moderator's restraints.
+const WORKER_EXIT_WAIT: Duration = Duration::from_secs(2);
 
 /// How long `--exit-running` (the installer) waits for running instances to finish exiting.
 const EXIT_RUNNING_WAIT: Duration = Duration::from_secs(10);
@@ -559,7 +566,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         })
     };
-    let _worker = worker::spawn(controls.clone(), history, epoch, Some(tray_sink), move |frame| {
+    let worker = worker::spawn(controls.clone(), history, epoch, Some(tray_sink), move |frame| {
         if !latest.put(frame) {
             return;
         }
@@ -1030,9 +1037,10 @@ fn main() -> Result<(), slint::PlatformError> {
                                 });
                             }
                         }
-                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| r.name.eq_ignore_ascii_case(&target.name) && r.affinity_mask.is_some());
+                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.affinity_mask.is_some());
                         *active_affinity.lock().unwrap() = Some(ActiveAffinityTarget {
                             name: target.name.clone(),
+                            process_name: target.process_name.clone(),
                             procs: target.procs.clone(),
                         });
                         if let Some(ui) = weak.upgrade() {
@@ -1066,9 +1074,10 @@ fn main() -> Result<(), slint::PlatformError> {
                             negotium_actions::PriorityClass::BelowNormal => 4,
                             negotium_actions::PriorityClass::Idle => 5,
                         };
-                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| r.name.eq_ignore_ascii_case(&target.name) && r.priority.is_some());
+                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.priority.is_some());
                         *active_priority.lock().unwrap() = Some(ActivePriorityTarget {
                             name: target.name.clone(),
+                            process_name: target.process_name.clone(),
                             procs: target.procs.clone(),
                         });
                         if let Some(ui) = weak.upgrade() {
@@ -1088,20 +1097,15 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             if action.as_str() == "toggle-aequilibrium-exclusion" {
-                let stem = target.name.strip_suffix(".exe").or_else(|| target.name.strip_suffix(".EXE")).unwrap_or(&target.name);
+                // The moderator matches image names, not an app card's friendly name.
+                let image = &target.process_name;
                 let mut s = settings.borrow_mut();
-                let already_excluded = s.moderator.exclusions.iter().any(|ex| {
-                    let ex_stem = ex.strip_suffix(".exe").or_else(|| ex.strip_suffix(".EXE")).unwrap_or(ex);
-                    ex_stem.eq_ignore_ascii_case(stem)
-                });
+                let already_excluded = negotium_moderator::is_user_excluded(image, &s.moderator.exclusions);
                 let toast_msg = if already_excluded {
-                    s.moderator.exclusions.retain(|ex| {
-                        let ex_stem = ex.strip_suffix(".exe").or_else(|| ex.strip_suffix(".EXE")).unwrap_or(ex);
-                        !ex_stem.eq_ignore_ascii_case(stem)
-                    });
+                    s.moderator.exclusions.retain(|ex| !negotium_moderator::same_image(ex, image));
                     format!("Included {} in Aequilibrium.", target.name)
                 } else {
-                    s.moderator.exclusions.push(target.name.clone());
+                    s.moderator.exclusions.push(image.clone());
                     format!("Excluded {} from Aequilibrium.", target.name)
                 };
                 controls.set_moderator_config(s.moderator.clone());
@@ -1226,11 +1230,11 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             if remember {
                 let mut s = settings.borrow_mut();
-                if let Some(r) = s.moderator.rules.iter_mut().find(|r| r.name.eq_ignore_ascii_case(&target.name)) {
+                if let Some(r) = s.moderator.rules.iter_mut().find(|r| negotium_moderator::same_image(&r.name, &target.process_name)) {
                     r.affinity_mask = Some(new_mask);
                 } else {
                     s.moderator.rules.push(negotium_moderator::PersistentRule {
-                        name: target.name.clone(),
+                        name: target.process_name.clone(),
                         priority: None,
                         affinity_mask: Some(new_mask),
                         cpu_sets: None,
@@ -1290,11 +1294,11 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             if remember {
                 let mut s = settings.borrow_mut();
-                if let Some(r) = s.moderator.rules.iter_mut().find(|r| r.name.eq_ignore_ascii_case(&target.name)) {
+                if let Some(r) = s.moderator.rules.iter_mut().find(|r| negotium_moderator::same_image(&r.name, &target.process_name)) {
                     r.priority = Some(prio);
                 } else {
                     s.moderator.rules.push(negotium_moderator::PersistentRule {
-                        name: target.name.clone(),
+                        name: target.process_name.clone(),
                         priority: Some(prio),
                         affinity_mask: None,
                         cpu_sets: None,
@@ -1464,6 +1468,12 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     let result = slint::run_event_loop_until_quit();
+    // Let the worker stop and undo its restraints (bounded). begin_exit normally asked already.
+    controls.request_stop();
+    let deadline = std::time::Instant::now() + WORKER_EXIT_WAIT;
+    while !worker.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     if let Some(path) = frame_stats_path {
         let _ = std::fs::write(path, frame_stats.borrow().summary_json());
     }

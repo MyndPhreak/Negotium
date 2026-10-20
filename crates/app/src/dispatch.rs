@@ -144,7 +144,7 @@ mod tests {
 
     fn target(critical: bool) -> Target {
         Target {
-            name: "App".into(), root: Some((10, 1)), procs: vec![(10, 1), (11, 2), (12, 3)],
+            name: "App".into(), process_name: "app.exe".into(), root: Some((10, 1)), procs: vec![(10, 1), (11, 2), (12, 3)],
             hung_pid: Some((11, 2)), image_path: Some(r"C:\App\app.exe".into()), critical, group: false,
         }
     }
