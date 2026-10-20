@@ -1,8 +1,8 @@
 //! Updates from GitHub Releases (spec goals 8–10). The installed copy asks GitHub's public API
 //! for the latest release of MyndPhreak/Negotium; a newer `vX.Y.Z` with exactly one `.msi` on
 //! GitHub over HTTPS is offered in a banner ("Update to vX.Y.Z"). Accepting downloads that MSI to
-//! `%TEMP%\Negotium-update`, checks it against the release's SHA-256 digest (when GitHub gives
-//! one), starts `msiexec /i "<msi>" /passive NEGOTIUM_RELAUNCH=1` elevated (one UAC prompt) and
+//! `%TEMP%\Negotium-update`, checks it against the release's SHA-256 digest (a release without
+//! one is refused), starts `msiexec /i "<msi>" /passive NEGOTIUM_RELAUNCH=1` elevated (one UAC prompt) and
 //! quits, so the installer can replace the exe (it also asks a still-running Negotium to exit) and
 //! then start the new version. A declined prompt keeps Negotium running. The next start of the
 //! installed copy deletes the installers earlier updates left behind.
@@ -85,9 +85,9 @@ pub struct Release {
 pub enum AssetDigest {
     /// `sha256:<64 hex digits>`.
     Sha256(Digest),
-    /// None given (assets uploaded before GitHub added digests): installed unverified, logged.
+    /// None given (assets uploaded before GitHub added digests): refused, never installed.
     Absent,
-    /// Another algorithm Negotium can't check: like [`AssetDigest::Absent`], logged as such.
+    /// Another algorithm Negotium can't check: refused like [`AssetDigest::Absent`].
     Unknown(String),
 }
 
@@ -117,7 +117,8 @@ pub enum UpdateError {
     Download(String),
     /// The installer couldn't be saved.
     Io(String),
-    /// The installer isn't the release's: its SHA-256 differs from the asset's digest.
+    /// The installer isn't known to be the release's: its SHA-256 differs from the asset's digest,
+    /// or the asset gives no SHA-256 to check it against.
     Digest(String),
     /// msiexec couldn't be started.
     Start(String),
@@ -139,7 +140,7 @@ impl std::fmt::Display for UpdateError {
             UpdateError::Release(e) => write!(f, "the release can't be installed: {e}"),
             UpdateError::Download(e) => write!(f, "the download isn't an installer: {e}"),
             UpdateError::Io(e) => write!(f, "the installer couldn't be saved: {e}"),
-            UpdateError::Digest(e) => write!(f, "the installer isn't the release's: {e}"),
+            UpdateError::Digest(e) => write!(f, "the installer couldn't be verified as the release's: {e}"),
             UpdateError::Start(e) => write!(f, "the installer couldn't be started: {e}"),
             UpdateError::Cancelled => f.write_str("it was cancelled"),
             UpdateError::TooLarge(limit) => write!(f, "GitHub's answer was larger than {limit} bytes"),
@@ -435,8 +436,8 @@ pub fn sha256(bytes: &[u8]) -> Result<Digest, UpdateError> {
 /// the release's digest and then `launch`ed, the handle still open: from the hash to msiexec
 /// reading it, nothing can change, rename or delete the file. The handle is returned for the
 /// caller to keep until Negotium exits. A mismatch deletes the file (through a handle, never a
-/// link) and nothing runs; a release without a SHA-256 is logged once and installed unverified.
-/// Off the UI thread in the app.
+/// link) and nothing runs; so does a release without a SHA-256 (no digest, or one Negotium can't
+/// check): an elevated installer is never run unverified. Off the UI thread in the app.
 pub fn verify_and_launch(
     msi: &Path,
     digest: &AssetDigest,
@@ -445,20 +446,22 @@ pub fn verify_and_launch(
 ) -> Result<std::fs::File, UpdateError> {
     use std::io::Read;
     let held = secure::open_held(msi)?;
+    let refuse = |held: std::fs::File, why: String| {
+        drop(held);
+        let _ = secure::delete_no_follow(msi);
+        log(&format!("{}: {why}; not installed", msi.display()));
+        Err(UpdateError::Digest(why))
+    };
     match digest {
         AssetDigest::Sha256(expected) => {
             let mut bytes = Vec::new();
             (&held).take(MAX_MSI_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| UpdateError::Io(e.to_string()))?;
             if sha256(&bytes)? != *expected {
-                drop(held);
-                let _ = secure::delete_no_follow(msi);
-                return Err(UpdateError::Digest("its SHA-256 doesn't match the release's digest".into()));
+                return refuse(held, "its SHA-256 doesn't match the release's digest".into());
             }
         }
-        AssetDigest::Absent => log(&format!("{}: the release gives no SHA-256 digest; installing it unverified", msi.display())),
-        AssetDigest::Unknown(d) => {
-            log(&format!("{}: the release's digest {d:?} isn't one Negotium can check; installing it unverified", msi.display()))
-        }
+        AssetDigest::Absent => return refuse(held, "the release gives no SHA-256 digest to check it against".into()),
+        AssetDigest::Unknown(d) => return refuse(held, format!("the release's digest {d:?} isn't a SHA-256 Negotium can check")),
     }
     launch(msi)?;
     Ok(held)
@@ -1096,13 +1099,16 @@ mod tests {
         assert_eq!(launched, std::slice::from_ref(&msi), "a match runs");
         assert!(log.is_empty());
 
+        // No SHA-256 to check against: refused, deleted, never run.
         for digest in [AssetDigest::Absent, AssetDigest::Unknown("sha512:00".into())] {
+            std::fs::write(&msi, b"abc").unwrap();
             let (result, launched, log) = verify(&msi, &digest, Ok(()));
-            assert_eq!(result, Ok(()));
-            assert_eq!(launched, std::slice::from_ref(&msi), "{digest:?}: runs, unverified");
+            assert!(matches!(result, Err(UpdateError::Digest(_))), "{digest:?}: {result:?}");
+            assert!(launched.is_empty(), "{digest:?}: never runs unverified");
+            assert!(!msi.exists(), "{digest:?}: and is deleted");
             assert_eq!(log.len(), 1, "logged once: {log:?}");
-            assert!(log[0].contains("unverified"));
         }
+        std::fs::write(&msi, b"abc").unwrap();
 
         let (result, _, _) = verify(&msi, &good, Err(UpdateError::Cancelled));
         assert_eq!(result, Err(UpdateError::Cancelled), "a declined prompt comes back as such");
