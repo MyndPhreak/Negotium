@@ -8,11 +8,21 @@ use negotium::settings;
 use negotium::settingspage::Integrations;
 use negotium::smooth::OnScreen;
 use negotium::{MainWindow, NegotiumTray, worker};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+struct ActiveAffinityTarget {
+    name: String,
+    procs: Vec<(u32, i64)>,
+}
+
+struct ActivePriorityTarget {
+    name: String,
+    procs: Vec<(u32, i64)>,
+}
 
 fn warn(msg: &str) {
     negotium::log::Log::new(negotium::log::Log::default_path()).warn(msg);
@@ -963,6 +973,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Row actions. The UI thread only plans; every job runs on its own thread.
     let pending: std::rc::Rc<std::cell::RefCell<Option<negotium::dispatch::Job>>> = Default::default();
+    let active_affinity: Arc<Mutex<Option<ActiveAffinityTarget>>> = Default::default();
+    let active_priority: Arc<Mutex<Option<ActivePriorityTarget>>> = Default::default();
     let start_job = {
         let weak = weak.clone();
         move |job: negotium::dispatch::Job| {
@@ -987,6 +999,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let pending = pending.clone();
         let start_job = start_job.clone();
         let (settings, controls, saver) = (settings.clone(), controls.clone(), saver.clone());
+        let (active_affinity, active_priority) = (active_affinity.clone(), active_priority.clone());
         ui.on_row_action(move |action, id| {
             // Clone out of the borrow and release it before doing anything else.
             let (target, procs) = {
@@ -994,6 +1007,86 @@ fn main() -> Result<(), slint::PlatformError> {
                 (b.target(id), b.all_procs().to_vec())
             };
             let Some(target) = target else { return };
+            if action.as_str() == "set-affinity" {
+                let root_proc = target.root.or_else(|| target.procs.first().copied());
+                let Some((pid, ct)) = root_proc else { return; };
+                match negotium_actions::get_process_affinity(pid, ct) {
+                    Ok((proc_mask, sys_mask)) => {
+                        let mut core_items = Vec::new();
+                        let mut all_checked = true;
+                        let mut any_checked = false;
+                        for i in 0..64 {
+                            if (sys_mask & (1u64 << i)) != 0 {
+                                let checked = (proc_mask & (1u64 << i)) != 0;
+                                if !checked {
+                                    all_checked = false;
+                                } else {
+                                    any_checked = true;
+                                }
+                                core_items.push(negotium::CoreItem {
+                                    id: i,
+                                    name: format!("CPU {i}").into(),
+                                    checked,
+                                });
+                            }
+                        }
+                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| r.name.eq_ignore_ascii_case(&target.name) && r.affinity_mask.is_some());
+                        *active_affinity.lock().unwrap() = Some(ActiveAffinityTarget {
+                            name: target.name.clone(),
+                            procs: target.procs.clone(),
+                        });
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_affinity_title(format!("Set CPU Affinity - {} (PID {})", target.name, pid).into());
+                            ui.set_affinity_process_name(target.name.clone().into());
+                            ui.set_affinity_cores(slint::ModelRc::new(slint::VecModel::from(core_items)));
+                            ui.set_affinity_all_cores(all_checked);
+                            ui.set_affinity_can_apply(any_checked);
+                            ui.set_affinity_remember(has_rule);
+                            ui.set_affinity_visible(true);
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_toast(err.message(&target.name, elevated).into());
+                        }
+                    }
+                }
+                return;
+            }
+            if action.as_str() == "set-priority" {
+                let root_proc = target.root.or_else(|| target.procs.first().copied());
+                let Some((pid, ct)) = root_proc else { return; };
+                match negotium_actions::get_priority_class(pid, ct) {
+                    Ok(priority) => {
+                        let idx = match priority {
+                            negotium_actions::PriorityClass::Realtime => 0,
+                            negotium_actions::PriorityClass::High => 1,
+                            negotium_actions::PriorityClass::AboveNormal => 2,
+                            negotium_actions::PriorityClass::Normal => 3,
+                            negotium_actions::PriorityClass::BelowNormal => 4,
+                            negotium_actions::PriorityClass::Idle => 5,
+                        };
+                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| r.name.eq_ignore_ascii_case(&target.name) && r.priority.is_some());
+                        *active_priority.lock().unwrap() = Some(ActivePriorityTarget {
+                            name: target.name.clone(),
+                            procs: target.procs.clone(),
+                        });
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_priority_title(format!("Set CPU Priority - {} (PID {})", target.name, pid).into());
+                            ui.set_priority_process_name(target.name.clone().into());
+                            ui.set_priority_selected(idx);
+                            ui.set_priority_remember(has_rule);
+                            ui.set_priority_visible(true);
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_toast(err.message(&target.name, elevated).into());
+                        }
+                    }
+                }
+                return;
+            }
             if action.as_str() == "toggle-aequilibrium-exclusion" {
                 let stem = target.name.strip_suffix(".exe").or_else(|| target.name.strip_suffix(".EXE")).unwrap_or(&target.name);
                 let mut s = settings.borrow_mut();
@@ -1051,6 +1144,181 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    {
+        let weak = weak.clone();
+        ui.on_affinity_toggle_core(move |core_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let model = ui.get_affinity_cores();
+            let mut all_checked = true;
+            let mut any_checked = false;
+            for idx in 0..model.row_count() {
+                if let Some(mut item) = model.row_data(idx) {
+                    if item.id == core_id {
+                        item.checked = !item.checked;
+                        model.set_row_data(idx, item.clone());
+                    }
+                    if item.checked {
+                        any_checked = true;
+                    } else {
+                        all_checked = false;
+                    }
+                }
+            }
+            ui.set_affinity_all_cores(all_checked);
+            ui.set_affinity_can_apply(any_checked);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.on_affinity_toggle_all(move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let model = ui.get_affinity_cores();
+            for idx in 0..model.row_count() {
+                if let Some(mut item) = model.row_data(idx) {
+                    item.checked = on;
+                    model.set_row_data(idx, item);
+                }
+            }
+            ui.set_affinity_all_cores(on);
+            ui.set_affinity_can_apply(on && model.row_count() > 0);
+        });
+    }
+    {
+        let weak = weak.clone();
+        let active = active_affinity.clone();
+        ui.on_affinity_cancel(move || {
+            active.lock().unwrap().take();
+            if let Some(ui) = weak.upgrade() {
+                ui.set_affinity_visible(false);
+            }
+        });
+    }
+    {
+        let weak = weak.clone();
+        let active = active_affinity.clone();
+        let (settings, controls, saver) = (settings.clone(), controls.clone(), saver.clone());
+        ui.on_affinity_apply(move |remember| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_affinity_visible(false);
+            let Some(target) = active.lock().unwrap().take() else { return };
+            let model = ui.get_affinity_cores();
+            let mut new_mask = 0u64;
+            let mut count = 0;
+            for idx in 0..model.row_count() {
+                if let Some(item) = model.row_data(idx)
+                    && item.checked
+                {
+                    new_mask |= 1u64 << (item.id as u64);
+                    count += 1;
+                }
+            }
+            if new_mask == 0 {
+                ui.set_toast("At least one CPU core must be selected.".into());
+                return;
+            }
+            let mut applied = 0;
+            let mut err = None;
+            for &(pid, ct) in &target.procs {
+                match negotium_actions::set_process_affinity(pid, ct, new_mask) {
+                    Ok(_) => applied += 1,
+                    Err(e) => err = Some(e),
+                }
+            }
+            if remember {
+                let mut s = settings.borrow_mut();
+                if let Some(r) = s.moderator.rules.iter_mut().find(|r| r.name.eq_ignore_ascii_case(&target.name)) {
+                    r.affinity_mask = Some(new_mask);
+                } else {
+                    s.moderator.rules.push(negotium_moderator::PersistentRule {
+                        name: target.name.clone(),
+                        priority: None,
+                        affinity_mask: Some(new_mask),
+                        cpu_sets: None,
+                        efficiency_mode: None,
+                    });
+                }
+                controls.set_moderator_config(s.moderator.clone());
+                drop(saver.save(s.clone()));
+            }
+            let toast = if applied > 0 {
+                if remember {
+                    format!("Set CPU affinity for {} to {} core(s) (saved as rule).", target.name, count)
+                } else {
+                    format!("Set CPU affinity for {} to {} core(s).", target.name, count)
+                }
+            } else if let Some(e) = err {
+                e.message(&target.name, elevated)
+            } else {
+                format!("No active process to set affinity for {}.", target.name)
+            };
+            ui.set_toast(toast.into());
+        });
+    }
+    {
+        let weak = weak.clone();
+        let active = active_priority.clone();
+        ui.on_priority_cancel(move || {
+            active.lock().unwrap().take();
+            if let Some(ui) = weak.upgrade() {
+                ui.set_priority_visible(false);
+            }
+        });
+    }
+    {
+        let weak = weak.clone();
+        let active = active_priority.clone();
+        let (settings, controls, saver) = (settings.clone(), controls.clone(), saver.clone());
+        ui.on_priority_apply(move |selected_idx, remember| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_priority_visible(false);
+            let Some(target) = active.lock().unwrap().take() else { return };
+            let prio = match selected_idx {
+                0 => negotium_actions::PriorityClass::Realtime,
+                1 => negotium_actions::PriorityClass::High,
+                2 => negotium_actions::PriorityClass::AboveNormal,
+                3 => negotium_actions::PriorityClass::Normal,
+                4 => negotium_actions::PriorityClass::BelowNormal,
+                _ => negotium_actions::PriorityClass::Idle,
+            };
+            let mut applied = 0;
+            let mut err = None;
+            for &(pid, ct) in &target.procs {
+                match negotium_actions::set_priority_class(pid, ct, prio) {
+                    Ok(_) => applied += 1,
+                    Err(e) => err = Some(e),
+                }
+            }
+            if remember {
+                let mut s = settings.borrow_mut();
+                if let Some(r) = s.moderator.rules.iter_mut().find(|r| r.name.eq_ignore_ascii_case(&target.name)) {
+                    r.priority = Some(prio);
+                } else {
+                    s.moderator.rules.push(negotium_moderator::PersistentRule {
+                        name: target.name.clone(),
+                        priority: Some(prio),
+                        affinity_mask: None,
+                        cpu_sets: None,
+                        efficiency_mode: None,
+                    });
+                }
+                controls.set_moderator_config(s.moderator.clone());
+                drop(saver.save(s.clone()));
+            }
+            let toast = if applied > 0 {
+                if remember {
+                    format!("Set priority for {} to {} (saved as rule).", target.name, prio.display_name())
+                } else {
+                    format!("Set priority for {} to {}.", target.name, prio.display_name())
+                }
+            } else if let Some(e) = err {
+                e.message(&target.name, elevated)
+            } else {
+                format!("No active process to set priority for {}.", target.name)
+            };
+            ui.set_toast(toast.into());
+        });
+    }
+
     {
         let weak = weak.clone();
         ui.on_dismiss_toast(move || {

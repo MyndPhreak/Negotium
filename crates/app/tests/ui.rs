@@ -4757,3 +4757,34 @@ fn the_startup_check_switch_is_saved() {
     assert_eq!(switch(&ui, label).accessible_checked(), Some(false));
     saved(&path, "check updates off", |s| !s.check_updates);
 }
+
+#[test]
+fn cpu_affinity_and_priority_modals_toggle_and_report() {
+    let ui = shown_window();
+    assert!(!ui.get_modal_open());
+    assert!(!ui.get_affinity_visible());
+    assert!(!ui.get_priority_visible());
+
+    // Show affinity modal
+    ui.set_affinity_title("Set CPU Affinity - test.exe (PID 100)".into());
+    ui.set_affinity_process_name("test.exe".into());
+    let cores = vec![
+        negotium::CoreItem { id: 0, name: "CPU 0".into(), checked: true },
+        negotium::CoreItem { id: 1, name: "CPU 1".into(), checked: true },
+    ];
+    ui.set_affinity_cores(slint::ModelRc::new(slint::VecModel::from(cores)));
+    ui.set_affinity_visible(true);
+    assert!(ui.get_modal_open());
+
+    // Show priority modal
+    ui.set_affinity_visible(false);
+    ui.set_priority_title("Set CPU Priority - test.exe (PID 100)".into());
+    ui.set_priority_process_name("test.exe".into());
+    ui.set_priority_selected(3); // Normal
+    ui.set_priority_visible(true);
+    assert!(ui.get_modal_open());
+    assert_eq!(ui.get_priority_selected(), 3);
+
+    ui.set_priority_visible(false);
+    assert!(!ui.get_modal_open());
+}
