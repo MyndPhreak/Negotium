@@ -29,6 +29,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, EnumWindows, FindWindowW, GetPropW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic,
     MSGFLT_ALLOW, PostMessageW, RegisterWindowMessageW, RemovePropW, SIZE_MINIMIZED, SM_CXSMICON, SW_RESTORE, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
+    GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WM_EXITSIZEMOVE,
+    WPF_RESTORETOMAXIMIZED,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
@@ -280,6 +282,125 @@ pub fn primary_work_area() -> Option<(i32, i32, i32, i32)> {
     Some((rect.left, rect.top, rect.right, rect.bottom))
 }
 
+/// Reads the current window geometry (normal position and size, plus maximized flag) from `hwnd`.
+pub fn read_window_geometry(hwnd: HWND) -> Option<crate::settings::WindowGeometry> {
+    let mut wp = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: plain query on our own window handle.
+    unsafe {
+        GetWindowPlacement(hwnd, &mut wp).ok()?;
+    }
+    let r = wp.rcNormalPosition;
+    let width = (r.right - r.left).max(0) as u32;
+    let height = (r.bottom - r.top).max(0) as u32;
+    if width < 100 || height < 100 {
+        return None;
+    }
+    let maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32
+        || (wp.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0);
+    Some(crate::settings::WindowGeometry {
+        x: r.left,
+        y: r.top,
+        width: width.max(760),
+        height: height.max(440),
+        maximized,
+    })
+}
+
+/// Applies `geo` to `hwnd`: size, normal position, and maximized state.
+pub fn apply_window_geometry(hwnd: HWND, geo: crate::settings::WindowGeometry) -> bool {
+    let mut wp = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: querying placement on our own window handle.
+    if unsafe { GetWindowPlacement(hwnd, &mut wp) }.is_err() {
+        return false;
+    }
+    wp.rcNormalPosition = windows::Win32::Foundation::RECT {
+        left: geo.x,
+        top: geo.y,
+        right: geo.x + geo.width as i32,
+        bottom: geo.y + geo.height as i32,
+    };
+    if geo.maximized {
+        wp.showCmd = SW_SHOWMAXIMIZED.0 as u32;
+    } else {
+        wp.showCmd = SW_SHOWNORMAL.0 as u32;
+    }
+    // SAFETY: plain call on our own window handle.
+    unsafe { SetWindowPlacement(hwnd, &wp).is_ok() }
+}
+
+/// Sanitizes saved geometry against connected monitors and minimum dimensions.
+pub fn sanitize_geometry(geo: crate::settings::WindowGeometry) -> crate::settings::WindowGeometry {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO, MonitorFromRect, MONITOR_DEFAULTTONULL};
+
+    let width = geo.width.max(760);
+    let height = geo.height.max(440);
+    let rect = RECT {
+        left: geo.x,
+        top: geo.y,
+        right: geo.x + width as i32,
+        bottom: geo.y + height as i32,
+    };
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let monitor_work = unsafe {
+        let monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL);
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            None
+        } else {
+            let w = info.rcWork;
+            Some((w.left, w.top, w.right, w.bottom))
+        }
+    };
+
+    let primary = primary_work_area().unwrap_or((0, 0, 1920, 1080));
+    sanitize_geometry_bounds(geo, primary, monitor_work)
+}
+
+/// Pure helper for bounds clamping / centering, so multi-monitor logic can be unit-tested.
+pub fn sanitize_geometry_bounds(
+    geo: crate::settings::WindowGeometry,
+    primary_work: (i32, i32, i32, i32),
+    monitor_work: Option<(i32, i32, i32, i32)>,
+) -> crate::settings::WindowGeometry {
+    let width = geo.width.max(760);
+    let height = geo.height.max(440);
+
+    let Some(work) = monitor_work else {
+        // Disconnected monitor or completely off-screen: center on primary work area
+        let (cx, cy) = centered(primary_work, (width as i32, height as i32));
+        return crate::settings::WindowGeometry {
+            x: cx,
+            y: cy,
+            width,
+            height,
+            maximized: geo.maximized,
+        };
+    };
+
+    let (left, top, right, bottom) = work;
+    let min_visible_x = 100.min(width as i32);
+    let clamped_x = geo.x.clamp(left - width as i32 + min_visible_x, right - min_visible_x);
+    let clamped_y = geo.y.clamp(top, (bottom - 40).max(top));
+
+    crate::settings::WindowGeometry {
+        x: clamped_x,
+        y: clamped_y,
+        width,
+        height,
+        maximized: geo.maximized,
+    }
+}
+
 /// Whether `hwnd` is minimised now: a launch from a shortcut set to "Minimized" starts so, before
 /// the window hooks can hear WM_SIZE.
 pub fn is_minimised(hwnd: HWND) -> bool {
@@ -304,6 +425,8 @@ pub enum ShellEvent {
     /// The installer asked this instance to exit ([`exit_instances_of`]), before it replaces the
     /// files: quit as the tray's Exit does.
     Exit,
+    /// The main window was moved, resized, maximized, or restored.
+    MovedOrResized,
 }
 
 // Cached: the subclass compares every message the main window receives against these.
@@ -395,7 +518,14 @@ unsafe extern "system" fn subclass_proc(
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
     } else if msg == WM_SIZE {
         // SAFETY: as above.
-        unsafe { (*hook)(ShellEvent::Minimised(wparam.0 as u32 == SIZE_MINIMIZED)) };
+        let minimised = wparam.0 as u32 == SIZE_MINIMIZED;
+        unsafe { (*hook)(ShellEvent::Minimised(minimised)) };
+        if !minimised {
+            unsafe { (*hook)(ShellEvent::MovedOrResized) };
+        }
+    } else if msg == WM_EXITSIZEMOVE {
+        // SAFETY: as above.
+        unsafe { (*hook)(ShellEvent::MovedOrResized) };
     } else if (msg == WM_SETTINGCHANGE && is_colour_scheme_change(lparam)) || msg == WM_DWMCOLORIZATIONCOLORCHANGED {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::SettingsChanged) };
@@ -1198,5 +1328,39 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         drop(first);
         assert!(waiter.join().unwrap(), "a restarted instance gets the lock once the old one exits");
+    }
+
+    #[test]
+    fn geometry_bounds_are_sanitized_and_monitored() {
+        use crate::settings::WindowGeometry;
+        let primary = (0, 0, 1920, 1040);
+        let secondary = (1920, 0, 3840, 1080);
+
+        // Disconnected monitor: centers on primary while preserving width & height
+        let offscreen = WindowGeometry { x: 2500, y: 100, width: 1200, height: 800, maximized: false };
+        let sanitized = sanitize_geometry_bounds(offscreen, primary, None);
+        assert_eq!(sanitized.x, 360, "centered horizontally");
+        assert_eq!(sanitized.y, 120, "centered vertically");
+        assert_eq!(sanitized.width, 1200, "width preserved");
+        assert_eq!(sanitized.height, 800, "height preserved");
+
+        // Connected secondary monitor: preserved within secondary work area
+        let on_secondary = sanitize_geometry_bounds(offscreen, primary, Some(secondary));
+        assert_eq!(on_secondary.x, 2500);
+        assert_eq!(on_secondary.y, 100);
+        assert_eq!(on_secondary.width, 1200);
+        assert_eq!(on_secondary.height, 800);
+
+        // Window dragged off the top: title bar clamped down into view
+        let off_top = WindowGeometry { x: 100, y: -50, width: 1000, height: 720, maximized: true };
+        let sanitized_top = sanitize_geometry_bounds(off_top, primary, Some(primary));
+        assert_eq!(sanitized_top.y, 0, "title bar brought to top edge");
+        assert!(sanitized_top.maximized, "maximized flag preserved");
+
+        // Window below minimum size: clamped to 760x440
+        let too_small = WindowGeometry { x: 50, y: 50, width: 400, height: 200, maximized: false };
+        let sanitized_small = sanitize_geometry_bounds(too_small, primary, Some(primary));
+        assert_eq!(sanitized_small.width, 760);
+        assert_eq!(sanitized_small.height, 440);
     }
 }

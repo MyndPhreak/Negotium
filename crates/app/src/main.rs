@@ -28,18 +28,37 @@ fn warn(msg: &str) {
     negotium::log::Log::new(negotium::log::Log::default_path()).warn(msg);
 }
 
+thread_local! {
+    /// A restart as admin is waiting on its UAC prompt (UI thread only).
+    static RESTART_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The active settings on the UI thread, accessible for exit and geometry sync.
+    static CURRENT_SETTINGS: RefCell<Option<Rc<RefCell<settings::Settings>>>> = const { RefCell::new(None) };
+}
+
+fn save_window_geometry(geo: settings::WindowGeometry, saver: &settings::Saver) {
+    CURRENT_SETTINGS.with(|s| {
+        if let Some(s) = s.borrow().as_ref() {
+            s.borrow_mut().window_geometry = Some(geo);
+            drop(saver.save(s.borrow().clone()));
+        }
+    });
+}
+
 /// Shows the main window from the tray or a second launch: un-hides, restores, focuses.
 fn show_main(on_screen: &OnScreen, weak: &slint::Weak<MainWindow>) {
     if let Some(ui) = weak.upgrade() {
         platform::bring_to_front(&ui);
+        let maximized = CURRENT_SETTINGS.with(|s| {
+            s.borrow().as_ref().and_then(|s| s.borrow().window_geometry).is_some_and(|g| g.maximized)
+        });
+        if maximized && let Some(hwnd) = platform::main_hwnd(&ui) {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_MAXIMIZE);
+            }
+        }
     }
     // Visible again (the worker's pace); graphs scroll unless the window is still minimised.
     on_screen.show();
-}
-
-thread_local! {
-    /// A restart as admin is waiting on its UAC prompt (UI thread only).
-    static RESTART_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// How long an exit waits for pending settings writes (the file, the GPU marker) to land.
@@ -54,6 +73,9 @@ const EXIT_RUNNING_WAIT: Duration = Duration::from_secs(10);
 /// instance (a restart as admin) reads the new state.
 fn begin_exit(controls: &Controls, weak: &slint::Weak<MainWindow>, saver: &settings::Saver) {
     if let Some(hwnd) = weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)) {
+        if let Some(geo) = platform::read_window_geometry(hwnd) {
+            save_window_geometry(geo, saver);
+        }
         platform::unmark_main_window(hwnd);
     }
     if RESTART_PENDING.with(|p| p.get()) {
@@ -389,6 +411,7 @@ fn main() -> Result<(), slint::PlatformError> {
     platform::apply_accent(&ui);
     // Settings in effect for this run; the Settings page changes them and saves to `settings_path`.
     let settings = Rc::new(RefCell::new(settings));
+    CURRENT_SETTINGS.with(|s| *s.borrow_mut() = Some(settings.clone()));
     // Copied out: no borrow is held while the theme is applied (window calls).
     let initial = settings.borrow().clone();
     negotium::settingspage::apply_settings(&ui, &initial);
@@ -903,6 +926,12 @@ fn main() -> Result<(), slint::PlatformError> {
             match settings::close_action(keep_in_tray, exit_on_close) {
                 settings::CloseAction::Exit => begin_exit(&controls, &close_weak, &saver),
                 settings::CloseAction::HideToTray => {
+                    if let Some(ui) = close_weak.upgrade()
+                        && let Some(hwnd) = platform::main_hwnd(&ui)
+                        && let Some(geo) = platform::read_window_geometry(hwnd)
+                    {
+                        save_window_geometry(geo, &saver);
+                    }
                     // The worker slows to the tray pace and graphs stop scrolling.
                     on_screen.hide();
                     // A hidden window cannot report pointer-leave, so release the hover freeze here.
@@ -1365,9 +1394,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Started in the tray: the window is created far off screen, so the moment before it can be
     // hidden (below) shows nothing.
+    let saved_geo = settings.borrow().window_geometry.map(platform::sanitize_geometry);
     if in_tray {
         let (x, y) = platform::OFF_SCREEN;
         ui.window().set_position(slint::PhysicalPosition::new(x, y));
+    } else if let Some(geo) = saved_geo {
+        ui.window().set_position(slint::PhysicalPosition::new(geo.x, geo.y));
+        ui.window().set_size(slint::PhysicalSize::new(geo.width, geo.height));
     }
     ui.show()?;
     // The native HWND is created lazily once the event loop runs, so poll until it exists; then,
@@ -1415,6 +1448,18 @@ fn main() -> Result<(), slint::PlatformError> {
                             // The installer is about to replace the files.
                             ShellEvent::Exit => begin_exit(&controls, &weak, &tray_wiring.saver),
                             ShellEvent::Minimised(_) => {} // handled above
+                            ShellEvent::MovedOrResized => {
+                                if let Some(ui) = weak.upgrade()
+                                    && let Some(hwnd) = platform::main_hwnd(&ui)
+                                    && let Some(geo) = platform::read_window_geometry(hwnd)
+                                {
+                                    CURRENT_SETTINGS.with(|s| {
+                                        if let Some(s) = s.borrow().as_ref() {
+                                            s.borrow_mut().window_geometry = Some(geo);
+                                        }
+                                    });
+                                }
+                            }
                             ShellEvent::SettingsChanged => {
                                 if let Some(ui) = weak.upgrade() {
                                     let theme = settings.borrow().theme;
@@ -1446,8 +1491,16 @@ fn main() -> Result<(), slint::PlatformError> {
                 // or a second launch shows it.
                 if in_tray {
                     let _ = ui.hide();
-                    let (x, y) = platform::on_screen_position(platform::centered_position(hwnd), platform::primary_work_area());
+                    let (x, y) = match saved_geo {
+                        Some(geo) => (geo.x, geo.y),
+                        None => platform::on_screen_position(platform::centered_position(hwnd), platform::primary_work_area()),
+                    };
                     ui.window().set_position(slint::PhysicalPosition::new(x, y));
+                    if let Some(geo) = saved_geo {
+                        ui.window().set_size(slint::PhysicalSize::new(geo.width, geo.height));
+                    }
+                } else if let Some(geo) = saved_geo {
+                    platform::apply_window_geometry(hwnd, geo);
                 }
                 // The window is up: the installed copy looks for an update, off the UI thread.
                 updater.startup(settings.borrow().check_updates);
