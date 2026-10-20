@@ -80,8 +80,6 @@ impl ActionError {
         let code = e.code();
         if code == ERROR_ACCESS_DENIED.to_hresult() {
             ActionError::AccessDenied
-        } else if code == ERROR_INVALID_PARAMETER.to_hresult() {
-            ActionError::AlreadyExited
         } else if code == ERROR_CANCELLED.to_hresult() {
             ActionError::Cancelled
         } else {
@@ -93,7 +91,10 @@ impl ActionError {
 pub const CRITICAL_PROCESSES: &[&str] = &["csrss", "wininit", "winlogon", "lsass", "smss", "services", "System"];
 
 pub fn is_critical(name: &str) -> bool {
-    let stem = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
+    let stem = match name.len().checked_sub(4).and_then(|i| name.split_at_checked(i)) {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case(".exe") => stem,
+        _ => name,
+    };
     CRITICAL_PROCESSES.iter().any(|c| c.eq_ignore_ascii_case(stem))
 }
 
@@ -108,12 +109,19 @@ impl Drop for OwnedHandle {
     }
 }
 
+/// OpenProcess on a PID that no longer exists fails with ERROR_INVALID_PARAMETER. Only here does
+/// that code mean "exited": from other calls (a bad affinity mask, an unsupported info class) it is
+/// a real failure, so `from_win` reports it as `Other`.
+fn open_error(e: &windows::core::Error) -> ActionError {
+    if e.code() == ERROR_INVALID_PARAMETER.to_hresult() { ActionError::AlreadyExited } else { ActionError::from_win(e) }
+}
+
 /// Opens `pid` with `access` (plus query rights) and checks its creation time.
 pub(crate) fn open_verified(pid: u32, create_time: i64, access: PROCESS_ACCESS_RIGHTS) -> Result<OwnedHandle, ActionError> {
     // SAFETY: plain Win32 call; the handle is owned by OwnedHandle.
     let handle = unsafe { OpenProcess(access | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
         .map(OwnedHandle)
-        .map_err(|e| ActionError::from_win(&e))?;
+        .map_err(|e| open_error(&e))?;
     let (mut created, mut exited, mut kernel, mut user) =
         (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     // SAFETY: valid handle and four writable FILETIMEs.
@@ -167,7 +175,17 @@ mod tests {
     #[test]
     fn critical_names_match_with_or_without_exe() {
         assert!(is_critical("csrss.exe") && is_critical("LSASS") && is_critical("System"));
+        assert!(is_critical("Csrss.Exe") && is_critical("wininit.eXe"));
         assert!(!is_critical("chrome.exe"));
+    }
+
+    #[test]
+    fn invalid_parameter_means_exited_only_when_opening_the_process() {
+        let invalid = windows::core::Error::from(ERROR_INVALID_PARAMETER.to_hresult());
+        assert_eq!(open_error(&invalid), ActionError::AlreadyExited);
+        assert!(matches!(ActionError::from_win(&invalid), ActionError::Other(_)));
+        let denied = windows::core::Error::from(ERROR_ACCESS_DENIED.to_hresult());
+        assert_eq!(open_error(&denied), ActionError::AccessDenied);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::mem::size_of;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{HANDLE, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
 use windows::Win32::Storage::FileSystem::SearchPathW;
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
@@ -272,9 +272,10 @@ pub fn escape_xml(s: &str) -> String {
 /// Builds the XML configuration content for a Windows Sandbox (.wsb) session.
 ///
 /// If `prog` refers to an existing host file or directory outside the Windows system directory,
-/// its parent directory (or `working_dir`) is mapped read-only into the sandbox at
+/// its parent directory is mapped read-only into the sandbox at
 /// `C:\Users\WDAGUtilityAccount\Desktop\Shared`, and `<LogonCommand>` invokes the application
-/// inside the sandbox. If `prog` is a system command or built-in tool, it is invoked directly.
+/// inside the sandbox. `working_dir` then only helps resolve `prog`: the program's own folder is
+/// always the one mapped, since the start command points into it. If `prog` is a system command or built-in tool, it is invoked directly.
 pub fn build_wsb_config(prog: &str, args: &str, working_dir: Option<&Path>) -> String {
     let mut xml = String::from("<Configuration>\n  <Networking>Default</Networking>\n");
 
@@ -294,8 +295,8 @@ pub fn build_wsb_config(prog: &str, args: &str, working_dir: Option<&Path>) -> S
             };
             (None, cmd)
         } else {
-            // Non-system executable on host: map parent folder read-only to Desktop\Shared
-            let folder = working_dir.map(Path::to_path_buf).or_else(|| file.parent().map(Path::to_path_buf));
+            // Non-system executable on host: map its parent folder read-only to Desktop\Shared
+            let folder = file.parent().map(Path::to_path_buf);
             let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or(prog);
             let sandbox_path = format!(r"C:\Users\WDAGUtilityAccount\Desktop\Shared\{filename}");
             let cmd = if args.is_empty() {
@@ -421,10 +422,17 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), ActionError> {
     let hmem = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }
         .map_err(|e| ActionError::Other(format!("Failed to allocate clipboard memory: {e}")))?;
 
+    // Until SetClipboardData succeeds the block is ours to free.
+    let fail = |msg: String| {
+        // SAFETY: `hmem` came from GlobalAlloc above and was not handed to the clipboard.
+        let _ = unsafe { GlobalFree(Some(hmem)) };
+        Err(ActionError::Other(msg))
+    };
+
     // SAFETY: Locks the global memory handle to write the UTF-16 string into it.
     let ptr = unsafe { GlobalLock(hmem) };
     if ptr.is_null() {
-        return Err(ActionError::Other("Failed to lock clipboard memory".into()));
+        return fail("Failed to lock clipboard memory".into());
     }
     unsafe {
         std::ptr::copy_nonoverlapping(utf16.as_ptr() as *const u8, ptr as *mut u8, bytes);
@@ -436,13 +444,14 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), ActionError> {
 
     // SAFETY: Opens the clipboard, empties it, and assigns the global memory.
     unsafe {
-        OpenClipboard(None)
-            .map_err(|e| ActionError::Other(format!("Failed to open clipboard: {e}")))?;
+        if let Err(e) = OpenClipboard(None) {
+            return fail(format!("Failed to open clipboard: {e}"));
+        }
         let _ = EmptyClipboard();
         let res = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0)));
         let _ = CloseClipboard();
         if res.is_err() {
-            return Err(ActionError::Other("Failed to set clipboard data".into()));
+            return fail("Failed to set clipboard data".into());
         }
     }
     Ok(())
@@ -474,16 +483,14 @@ pub fn enable_windows_sandbox_in_terminal(owner_hwnd: isize) -> Result<(), Actio
 /// Opens a standard Windows File Open Dialog modal to `owner` to browse for an executable.
 /// Returns the chosen path, or `None` if cancelled or on failure.
 pub fn pick_executable(owner: isize) -> Option<std::path::PathBuf> {
-    use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-    };
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     use windows::Win32::UI::Shell::{
         FileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, IFileOpenDialog, SIGDN_FILESYSPATH,
     };
 
-    // SAFETY: Initializes COM STA on this thread; balanced by CoUninitialize.
-    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // Declared before the COM objects so it drops (and uninitializes, if init succeeded) after them.
+    let _com = crate::startup::ComApartment::enter();
     let dialog: IFileOpenDialog = unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) }.ok()?;
 
     let filters = [
@@ -504,15 +511,13 @@ pub fn pick_executable(owner: isize) -> Option<std::path::PathBuf> {
         let _ = dialog.SetTitle(w!("Browse"));
         let hwnd = HWND(owner as *mut c_void);
         if dialog.Show(Some(hwnd)).is_err() {
-            CoUninitialize();
             return None;
         }
         let item = dialog.GetResult().ok()?;
         let display_name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        let path = std::path::PathBuf::from(display_name.to_string().ok()?);
+        let path = display_name.to_string().ok().map(std::path::PathBuf::from);
         CoTaskMemFree(Some(display_name.as_ptr() as *const c_void));
-        CoUninitialize();
-        Some(path)
+        path
     }
 }
 
@@ -580,6 +585,24 @@ mod tests {
         assert!(xml.contains("<ReadOnly>true</ReadOnly>"));
         assert!(xml.contains(r#"C:\Users\WDAGUtilityAccount\Desktop\Shared\negotium_test_app.exe"#));
         assert!(xml.contains("--run"));
+    }
+
+    #[test]
+    fn build_wsb_config_maps_the_program_folder_even_with_a_working_dir() {
+        let app_dir = std::env::temp_dir().join("negotium_wsb_app_dir");
+        let other_dir = std::env::temp_dir().join("negotium_wsb_other_dir");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let test_file = app_dir.join("negotium_wsb_app.exe");
+        std::fs::write(&test_file, b"test").unwrap();
+
+        let xml = build_wsb_config(test_file.to_str().unwrap(), "", Some(&other_dir));
+        let _ = std::fs::remove_dir_all(&app_dir);
+        let _ = std::fs::remove_dir_all(&other_dir);
+
+        assert!(xml.contains(&format!("<HostFolder>{}</HostFolder>", escape_xml(&app_dir.to_string_lossy()))));
+        assert!(!xml.contains("negotium_wsb_other_dir"));
+        assert!(xml.contains(r#"C:\Users\WDAGUtilityAccount\Desktop\Shared\negotium_wsb_app.exe"#));
     }
 
     #[test]
