@@ -100,7 +100,7 @@ jobs:
           if ($msi[0].Name -ne $expected) { throw "unexpected MSI name $($msi[0].Name), expected $expected" }
           "MSI_PATH=$($msi[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: msi
           path: ${{ env.MSI_PATH }}
