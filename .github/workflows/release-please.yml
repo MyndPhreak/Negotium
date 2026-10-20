@@ -5,9 +5,8 @@ on:
     branches:
       - main
 
-permissions:
-  contents: write
-  pull-requests: write
+# Each job asks for what it needs: only release-please and the final upload can write.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,6 +16,9 @@ env:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created || steps.release.outputs.releases_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -32,13 +34,16 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' || needs.release-please.outputs.release_created == true }}
     runs-on: windows-latest
+    # Builds with a read-only token and no build cache (a release is built clean); the MSI is
+    # attached and the draft release published by publish-msi.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
 
       - name: Check the tag matches the workspace version
         shell: pwsh
@@ -79,9 +84,9 @@ jobs:
           }
           "WIX_BIN=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - uses: cargo-bins/cargo-binstall@v1.26.0
+      # Built from crates.io with its lockfile, not a prebuilt binary.
       - name: Install cargo-wix
-        run: cargo binstall --no-confirm cargo-wix@0.3.9
+        run: cargo install cargo-wix --locked --version 0.3.9
 
       - name: Build the MSI
         run: cargo wix -p negotium --bin-path "$env:WIX_BIN" --no-build --nocapture
@@ -95,11 +100,35 @@ jobs:
           if ($msi[0].Name -ne $expected) { throw "unexpected MSI name $($msi[0].Name), expected $expected" }
           "MSI_PATH=$($msi[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Upload MSI to GitHub Release
-        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi
+          path: ${{ env.MSI_PATH }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # release-please creates the release as a draft (release-please-config.json): it is published
+  # only once its MSI is attached, so the updater never sees a latest release without one.
+  publish-msi:
+    needs: [release-please, build-msi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: msi
+          path: msi
+
+      - name: Upload the MSI and publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
-          gh release upload $env:TAG $env:MSI_PATH --repo $env:GITHUB_REPOSITORY --clobber
-          Write-Host "Uploaded $env:MSI_PATH to release $env:TAG"
+          set -euo pipefail
+          shopt -s nullglob
+          files=(msi/*.msi)
+          if [ "${#files[@]}" -ne 1 ]; then echo "expected exactly one MSI, found ${#files[@]}" >&2; exit 1; fi
+          gh release upload "$TAG" "${files[0]}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          echo "Uploaded ${files[0]} to release $TAG and published it"
