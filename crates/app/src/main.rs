@@ -535,6 +535,7 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     negotium::bridge::set_current(bridge.clone());
     ui.set_settings_pawnio_installed(negotium_collector::cputemp::pawnio_installed());
+    ui.set_windows_sandbox_available(negotium_actions::runtask::is_windows_sandbox_available());
 
     // Startup page: listing calls the registry, the file system, COM and WinRT, so it runs on an
     // action thread and the result comes back through the bridge (negotium::startup). The list is
@@ -728,6 +729,36 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let (controls, weak) = (controls.clone(), weak.clone());
+        let copy_weak = weak.clone();
+        ui.on_copy_windows_sandbox_cmd(move || {
+            let res = negotium_actions::runtask::copy_to_clipboard(negotium_actions::runtask::ENABLE_SANDBOX_CMD);
+            let weak = copy_weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    match res {
+                        Ok(()) => ui.set_toast("Command copied to clipboard.".into()),
+                        Err(e) => ui.set_toast(format!("Could not copy command: {e}").into()),
+                    }
+                }
+            });
+        });
+        let term_weak = weak.clone();
+        ui.on_enable_windows_sandbox_terminal(move || {
+            let owner = term_weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
+            let weak = term_weak.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = negotium_actions::runtask::enable_windows_sandbox_in_terminal(owner)
+                    && !matches!(e, negotium_actions::ActionError::Cancelled)
+                {
+                    let msg = format!("Could not launch terminal: {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_toast(msg.into());
+                        }
+                    });
+                }
+            });
+        });
         ui.on_select_device(move |id| {
             controls.select_device(&id);
             if let Some(ui) = weak.upgrade() {
