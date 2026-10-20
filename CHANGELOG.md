@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/MyndPhreak/Negotium/compare/v0.5.0...v0.6.0) (2026-10-20)
+
+
+### Features
+
+* **app:** add CPU affinity and priority modals with rule persistence ([#10](https://github.com/MyndPhreak/Negotium/issues/10)) ([1c787df](https://github.com/MyndPhreak/Negotium/commit/1c787dfc335151a7472ad491a5868bd3b94759d2))
+
 ## [0.5.0](https://github.com/MyndPhreak/Negotium/compare/v0.4.0...v0.5.0) (2026-10-20)
 
 
