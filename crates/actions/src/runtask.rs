@@ -225,12 +225,7 @@ fn launch_shell(
 
 /// Checks whether a path resides inside the Windows directory (e.g. C:\Windows\System32).
 fn is_system_path(path: &Path) -> bool {
-    if let Ok(sysroot) = std::env::var("SystemRoot") {
-        if path.starts_with(Path::new(&sysroot)) {
-            return true;
-        }
-    }
-    false
+    std::env::var("SystemRoot").is_ok_and(|sysroot| path.starts_with(Path::new(&sysroot)))
 }
 
 /// Resolves an executable name or path to a host file if possible.
