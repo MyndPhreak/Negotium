@@ -38,6 +38,7 @@ jobs:
           ref: ${{ needs.release-please.outputs.tag_name }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Check the tag matches the workspace version
         shell: pwsh
@@ -54,9 +55,7 @@ jobs:
           Write-Host "Tag $env:TAG matches version $($pkg.version)"
           "VERSION=$($pkg.version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Test
-        run: cargo test --workspace --no-fail-fast -- --skip busy_child_reports_one_core_of_cpu
-
+      # negotium.exe is built in release mode for packaging. Tests are validated by CI.
       - name: Build release
         run: cargo build --release -p negotium
 
@@ -80,8 +79,9 @@ jobs:
           }
           "WIX_BIN=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - uses: cargo-bins/cargo-binstall@v1.26.0
       - name: Install cargo-wix
-        run: cargo install cargo-wix --version 0.3.9 --locked
+        run: cargo binstall --no-confirm cargo-wix@0.3.9
 
       - name: Build the MSI
         run: cargo wix -p negotium --bin-path "$env:WIX_BIN" --no-build --nocapture
