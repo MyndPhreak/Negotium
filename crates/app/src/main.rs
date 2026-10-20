@@ -62,6 +62,7 @@ struct TrayWiring {
     saver: settings::Saver,
     integrations: Rc<Integrations>,
     taskmgr_shown: Rc<Cell<bool>>,
+    settings: Rc<RefCell<settings::Settings>>,
 }
 
 fn make_tray(
@@ -80,6 +81,23 @@ fn make_tray(
     {
         let integrations = wiring.integrations.clone();
         tray.on_open_task_manager(move || integrations.open_task_manager());
+    }
+    tray.set_aequilibrium_enabled(wiring.settings.borrow().moderator.aequilibrium_enabled);
+    {
+        let (controls, weak, saver, settings) = (controls.clone(), weak.clone(), saver.clone(), wiring.settings.clone());
+        let tray_weak = tray.as_weak();
+        tray.on_toggle_aequilibrium(move || {
+            let new_val = !settings.borrow().moderator.aequilibrium_enabled;
+            settings.borrow_mut().moderator.aequilibrium_enabled = new_val;
+            controls.set_moderator_config(settings.borrow().moderator.clone());
+            drop(saver.save(settings.borrow().clone()));
+            if let Some(t) = tray_weak.upgrade() {
+                t.set_aequilibrium_enabled(new_val);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_aequilibrium_enabled(new_val);
+            }
+        });
     }
     {
         let (controls, weak, saver) = (controls.clone(), weak.clone(), saver.clone());
@@ -395,6 +413,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // installed copy's redirect is on.
     let tray: Rc<RefCell<Option<NegotiumTray>>> = Default::default();
     let taskmgr_shown: Rc<Cell<bool>> = Default::default();
+    {
+        let (settings, controls, saver, tray) = (settings.clone(), controls.clone(), saver.clone(), tray.clone());
+        ui.on_settings_aequilibrium_toggled(move |on| {
+            settings.borrow_mut().moderator.aequilibrium_enabled = on;
+            controls.set_moderator_config(settings.borrow().moderator.clone());
+            drop(saver.save(settings.borrow().clone()));
+            if let Some(tray) = tray.borrow().as_ref() {
+                tray.set_aequilibrium_enabled(on);
+            }
+        });
+    }
     let redirect_shown = {
         // Weak: the tray's own menu handler holds these integrations, which hold this.
         let (tray, taskmgr_shown) = (Rc::downgrade(&tray), taskmgr_shown.clone());
@@ -481,7 +510,7 @@ fn main() -> Result<(), slint::PlatformError> {
             log: Box::new(warn),
         },
     );
-    let tray_wiring = Rc::new(TrayWiring { saver: saver.clone(), integrations, taskmgr_shown });
+    let tray_wiring = Rc::new(TrayWiring { saver: saver.clone(), integrations, taskmgr_shown, settings: settings.clone() });
     let bridge = Bridge::install(&ui, controls.clone());
     // Program icons: extracted on the loader's own thread (shell and GDI calls, never in a frame);
     // each result comes back to the bridge's cache on the UI thread, which re-pushes the rows
@@ -957,6 +986,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = weak.clone();
         let pending = pending.clone();
         let start_job = start_job.clone();
+        let (settings, controls, saver) = (settings.clone(), controls.clone(), saver.clone());
         ui.on_row_action(move |action, id| {
             // Clone out of the borrow and release it before doing anything else.
             let (target, procs) = {
@@ -964,6 +994,30 @@ fn main() -> Result<(), slint::PlatformError> {
                 (b.target(id), b.all_procs().to_vec())
             };
             let Some(target) = target else { return };
+            if action.as_str() == "toggle-aequilibrium-exclusion" {
+                let stem = target.name.strip_suffix(".exe").or_else(|| target.name.strip_suffix(".EXE")).unwrap_or(&target.name);
+                let mut s = settings.borrow_mut();
+                let already_excluded = s.moderator.exclusions.iter().any(|ex| {
+                    let ex_stem = ex.strip_suffix(".exe").or_else(|| ex.strip_suffix(".EXE")).unwrap_or(ex);
+                    ex_stem.eq_ignore_ascii_case(stem)
+                });
+                let toast_msg = if already_excluded {
+                    s.moderator.exclusions.retain(|ex| {
+                        let ex_stem = ex.strip_suffix(".exe").or_else(|| ex.strip_suffix(".EXE")).unwrap_or(ex);
+                        !ex_stem.eq_ignore_ascii_case(stem)
+                    });
+                    format!("Included {} in Aequilibrium.", target.name)
+                } else {
+                    s.moderator.exclusions.push(target.name.clone());
+                    format!("Excluded {} from Aequilibrium.", target.name)
+                };
+                controls.set_moderator_config(s.moderator.clone());
+                drop(saver.save(s.clone()));
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_toast(toast_msg.into());
+                }
+                return;
+            }
             match negotium::dispatch::plan(action.as_str(), &target, &procs) {
                 negotium::dispatch::Plan::Run(job) => start_job(job),
                 negotium::dispatch::Plan::Confirm(text, job) => {

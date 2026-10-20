@@ -31,6 +31,7 @@ export struct RowData {
     col-threads: string,
     col-handles: string,
     col-publisher: string,
+    restrained: bool,
 }
 
 // Column geometry shared by the header and every row, so each number sits under its header.
@@ -318,6 +319,8 @@ component RowMenu inherits Rectangle {
             MenuItem { title: "End task"; enabled: root.actionable; activated => { root.action("end-task"); } }
             MenuItem { title: "End process tree"; enabled: root.actionable; activated => { root.action("end-tree"); } }
             MenuItem { title: "Efficiency mode"; enabled: root.actionable; activated => { root.action("efficiency"); } }
+            MenuSeparator { }
+            MenuItem { title: "Exclude from Aequilibrium"; enabled: root.actionable; activated => { root.action("toggle-aequilibrium-exclusion"); } }
             MenuSeparator { }
             MenuItem { title: "Open file location"; enabled: root.actionable; activated => { root.action("open-location"); } }
             MenuItem { title: "Details"; enabled: root.actionable; activated => { root.action("details"); } }
@@ -729,7 +732,18 @@ export component AppList inherits VerticalLayout {
                                                         horizontal-stretch: 1;
                                                         alignment: center;
                                                         spacing: 1px;
-                                                        Text { text: r.name; color: Theme.text; font-size: 13.5px; overflow: elide; }
+                                                        HorizontalLayout {
+                                                            spacing: 6px;
+                                                            alignment: start;
+                                                            Text { text: r.name; color: Theme.text; font-size: 13.5px; overflow: elide; }
+                                                            if r.restrained : Image {
+                                                                source: @image-url("../assets/aequilibrium.svg");
+                                                                width: 14px;
+                                                                height: 14px;
+                                                                vertical-alignment: center;
+                                                                accessible-label: "Restrained by Aequilibrium";
+                                                            }
+                                                        }
                                                         Text {
                                                             text: r.exited ? "Exited" : r.sub;
                                                             color: r.hung != "" ? Theme.danger-text : Theme.muted;
@@ -809,6 +823,13 @@ export component AppList inherits VerticalLayout {
                                                         alignment: start;
                                                         spacing: 6px;
                                                         Text { text: r.name; color: Theme.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+                                                        if r.restrained : Image {
+                                                            source: @image-url("../assets/aequilibrium.svg");
+                                                            width: 13px;
+                                                            height: 13px;
+                                                            vertical-alignment: center;
+                                                            accessible-label: "Restrained by Aequilibrium";
+                                                        }
                                                         Text { text: r.pid; color: Theme.muted; font-size: 12.5px; vertical-alignment: center; }
                                                         if r.exited : Text { text: "Exited"; color: Theme.muted; font-size: 11.5px; vertical-alignment: center; }
                                                         if r.hung != "" : Text { text: r.hung; color: Theme.danger-text; font-size: 11.5px; vertical-alignment: center; }

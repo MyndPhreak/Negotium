@@ -77,6 +77,7 @@ pub struct RowView {
     pub col_threads: String,
     pub col_handles: String,
     pub col_publisher: String,
+    pub restrained: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -461,6 +462,7 @@ pub fn build_frame(
             kind: RowKind::App, sub, bars: bars(r), icon: image_path.unwrap_or_default(),
             windows: r.key == AppKey::Windows, last_in_card: false, pid: String::new(),
             col_pid, col_proc_name, col_status, col_threads, col_handles, col_publisher,
+            restrained: has_restrained,
         });
         // Child rows only where the UI can show them: expanded apps, everything while searching, and
         // a Windows group with a hung member (the group row itself is never actionable, so the hung
@@ -512,6 +514,7 @@ pub fn build_frame(
                     col_threads: sample.filter(|s| s.threads > 0).map(|s| s.threads.to_string()).unwrap_or_else(|| "—".into()),
                     col_handles: sample.filter(|s| s.handles > 0).map(|s| s.handles.to_string()).unwrap_or_else(|| "—".into()),
                     col_publisher: proc_pub.unwrap_or_else(|| "—".into()),
+                    restrained: opts.restrained.contains(&pid_key),
                 });
             }
         }

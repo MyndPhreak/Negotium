@@ -217,6 +217,8 @@ export component SettingsPage inherits VerticalLayout {
     callback check-updates-toggled(bool);
     callback check-updates-now();
     callback open-windows-task-manager();
+    in property <bool> aequilibrium-enabled: true;
+    callback aequilibrium-toggled(bool);
     // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
     property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
     max-width: 16384px;
@@ -274,6 +276,18 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     toggled(on) => { root.smooth-graphs-toggled(on); }
                     focus-gained => { sv.reveal(smooth-row.absolute-position.y, smooth-row.height); }
+                }
+            }
+            aequilibrium-row := SettingRow {
+                title: "Aequilibrium (Runaway CPU restraint)";
+                description: "Automatically throttles background processes consuming high CPU when the system is under pressure, keeping the desktop responsive.";
+                Toggle {
+                    label: aequilibrium-row.title;
+                    description: aequilibrium-row.description;
+                    checked: root.aequilibrium-enabled;
+                    interactive: root.interactive;
+                    toggled(on) => { root.aequilibrium-toggled(on); }
+                    focus-gained => { sv.reveal(aequilibrium-row.absolute-position.y, aequilibrium-row.height); }
                 }
             }
             group-row := SettingRow {

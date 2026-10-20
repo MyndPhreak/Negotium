@@ -198,6 +198,8 @@ export component MainWindow inherits Window {
     in property <bool> settings-gpu-running: true;
     in property <bool> settings-gpu-env-override;
     in-out property <bool> settings-pawnio-installed: false;
+    in-out property <bool> settings-aequilibrium-enabled: true;
+    callback settings-aequilibrium-toggled(bool);
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback always-on-top-toggled(bool);
@@ -468,6 +470,8 @@ export component MainWindow inherits Window {
                         check-updates: root.settings-check-updates;
                         update-status: root.settings-update-status;
                         version-text: root.version-text;
+                        aequilibrium-enabled: root.settings-aequilibrium-enabled;
+                        aequilibrium-toggled(on) => { root.settings-aequilibrium-toggled(on); }
                         bottom-inset: root.toast-inset;
                         interactive: !root.modal-open;
                         refresh-chosen(i) => { root.refresh-chosen(i); }

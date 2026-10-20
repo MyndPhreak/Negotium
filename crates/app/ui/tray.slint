@@ -8,14 +8,20 @@ export component NegotiumTray inherits SystemTrayIcon {
     tooltip: root.live-tooltip;
     // crate::settingspage::Integrations: the installed copy with its Ctrl+Shift+Esc redirect on.
     in property <bool> taskmgr-shown;
+    in property <bool> aequilibrium-enabled: true;
     callback open();
     callback open-task-manager();
+    callback toggle-aequilibrium();
     callback exit();
     // Left-click on the icon opens the window too.
     clicked => { root.open(); }
     Menu {
         MenuItem { title: "Open"; activated => { root.open(); } }
         if root.taskmgr-shown: MenuItem { title: "Open Windows Task Manager"; activated => { root.open-task-manager(); } }
+        MenuItem {
+            title: root.aequilibrium-enabled ? "Disable Aequilibrium" : "Enable Aequilibrium";
+            activated => { root.toggle-aequilibrium(); }
+        }
         MenuItem { title: "Exit"; activated => { root.exit(); } }
     }
 }
