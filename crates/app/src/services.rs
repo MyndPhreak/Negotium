@@ -74,12 +74,14 @@ pub fn filter_service_rows(rows: &[ServiceRow], search: &str) -> Vec<ServiceRow>
     rows.iter().filter(|r| r.search_text.contains(&needle)).cloned().collect()
 }
 
-pub type ServiceJobResult = (Vec<ServiceEntry>, Option<String>);
+/// The new list (None: listing failed, and the page keeps the last one, as Startup does) and any
+/// failure to show.
+pub type ServiceJobResult = (Option<Vec<ServiceEntry>>, Option<String>);
 
 pub fn list_job() -> ServiceJobResult {
     match list_services() {
-        Ok(entries) => (entries, None),
-        Err(e) => (Vec::new(), Some(format!("Couldn't list services: {e}."))),
+        Ok(entries) => (Some(entries), None),
+        Err(e) => (None, Some(format!("Couldn't list services: {e}."))),
     }
 }
 
@@ -107,7 +109,7 @@ pub fn spawn_job(weak: slint::Weak<MainWindow>, job: impl FnOnce() -> ServiceJob
     std::thread::spawn(move || {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
         let (entries, failure) = match res {
-            Ok((entries, failure)) => (Some(entries), failure),
+            Ok((entries, failure)) => (entries, failure),
             Err(_) => (None, Some("Something went wrong on the Services page.".to_string())),
         };
         let _ = slint::invoke_from_event_loop(move || {

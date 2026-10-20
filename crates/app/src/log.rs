@@ -34,19 +34,18 @@ impl Log {
     }
 
     pub fn info(&mut self, msg: &str) {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let line: String = msg.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-        if let Ok(mut f) = self.writes.open(&self.path, Open::Append) {
-            let _ = writeln!(f, "{secs} INFO {line}");
-        }
+        self.write("INFO", msg);
     }
+
     pub fn warn(&mut self, msg: &str) {
         if !self.seen.insert(msg.to_string()) {
             return;
         }
+        self.write("WARN", msg);
+    }
+
+    /// Appends one `level` line, rotating first when the log is past MAX_LOG_BYTES.
+    fn write(&mut self, level: &str, msg: &str) {
         if std::fs::metadata(&self.path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
             if !self.writes.may_move() {
                 return; // elevated: never rotated, and not grown past the limit
@@ -59,7 +58,7 @@ impl Log {
             .unwrap_or(0);
         let line: String = msg.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         if let Ok(mut f) = self.writes.open(&self.path, Open::Append) {
-            let _ = writeln!(f, "{secs} WARN {line}");
+            let _ = writeln!(f, "{secs} {level} {line}");
         }
     }
 }
@@ -95,6 +94,17 @@ mod tests {
         log.warn("after rotation");
         assert!(dir.join("negotium.log.1").exists());
         assert!(std::fs::read_to_string(dir.join("negotium.log")).unwrap().contains("after rotation"));
+    }
+
+    #[test]
+    fn info_rotates_when_too_large() {
+        let dir = temp_dir("rotate-info");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("negotium.log"), vec![b'x'; MAX_LOG_BYTES as usize + 1]).unwrap();
+        let mut log = Log::with_writes(dir.join("negotium.log"), Writes::Plain);
+        log.info("after rotation");
+        assert!(dir.join("negotium.log.1").exists());
+        assert!(std::fs::read_to_string(dir.join("negotium.log")).unwrap().contains(" INFO after rotation"));
     }
 
     /// Elevated: appended through the guarded write, never rotated (renaming would act on
