@@ -95,6 +95,9 @@ export component RunTaskModal inherits Rectangle {
     callback run(string, string, int, int, bool);
     callback cancel();
     callback browse();
+    in property <bool> sandbox-available: true;
+    callback enable-sandbox-terminal();
+    callback copy-sandbox-cmd();
     background: #00000066;
     TouchArea { }
     FocusScope {
@@ -103,7 +106,7 @@ export component RunTaskModal inherits Rectangle {
                 root.cancel();
                 return accept;
             }
-            if (event.text == Key.Return && root.command != "") {
+            if (event.text == Key.Return && (root.command != "" || root.privilege-mode == 3)) {
                 root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
                 return accept;
             }
@@ -159,19 +162,46 @@ export component RunTaskModal inherits Rectangle {
                 Text { text: "Privilege & security level"; color: Theme.text; font-size: 12px; font-weight: 600; }
                 Choice {
                     label: "Privilege level";
-                    description: "Normal, Administrator, Standard User (de-elevated), or Low-Integrity Sandbox";
-                    options: ["Normal", "Admin (Elevated)", "Standard User", "Sandboxed"];
+                    description: "Normal, Administrator, Standard User (de-elevated), or Windows Sandbox";
+                    options: ["Normal", "Admin (Elevated)", "Standard User", "Windows Sandbox"];
                     selected: root.privilege-mode;
                     chosen(i) => { root.privilege-mode = i; }
                 }
                 Text {
                     text: root.privilege-mode == 1 ? "Runs with full administrative privileges (prompts for UAC if needed)."
                         : root.privilege-mode == 2 ? "Drops administrative rights and runs as a restricted standard user token."
-                        : root.privilege-mode == 3 ? "Runs with an untrusted Low-Integrity token (cannot modify user profile files or registry)."
+                        : root.privilege-mode == 3 ? "Runs inside an isolated, disposable Windows Sandbox virtual machine (read-only host folder)."
                         : "Runs with Negotium's current user privileges.";
                     color: Theme.muted;
                     font-size: 11px;
                     wrap: word-wrap;
+                }
+                if root.privilege-mode == 3 && !root.sandbox-available : Rectangle {
+                    background: Theme.accent.with-alpha(0.12);
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: Theme.accent.with-alpha(0.3);
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+                        Text {
+                            text: "Windows Sandbox is not enabled on this PC.";
+                            color: Theme.text;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: "Run in Terminal (Admin)";
+                                clicked => { root.enable-sandbox-terminal(); }
+                            }
+                            Button {
+                                text: "Copy Command";
+                                clicked => { root.copy-sandbox-cmd(); }
+                            }
+                        }
+                    }
                 }
             }
             VerticalLayout {
@@ -210,7 +240,7 @@ export component RunTaskModal inherits Rectangle {
                 Button {
                     text: "Run";
                     primary: true;
-                    enabled: root.command != "";
+                    enabled: root.command != "" || root.privilege-mode == 3;
                     clicked => {
                         root.run(root.command, root.working-dir, root.privilege-mode, root.compat-mode, root.efficiency-mode);
                     }

@@ -22,6 +22,8 @@ windows = { workspace = true, features = [
     "Win32_System_Services",
     "Win32_System_Variant",
     "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Management_Deployment",
     "ApplicationModel",
     "Foundation",

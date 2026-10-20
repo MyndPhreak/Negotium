@@ -41,6 +41,7 @@ export component MainWindow inherits Window {
     in-out property <bool> run-task-visible;
     in-out property <string> run-task-command;
     in-out property <string> run-task-working-dir;
+    in property <bool> windows-sandbox-available: true;
     in property <[DeviceData]> perf-devices;
     in-out property <string> perf-selected: "cpu";
     in property <string> perf-title;
@@ -125,6 +126,8 @@ export component MainWindow inherits Window {
     callback toggle-column(int);
     callback run-new-task(string, string, int, int, bool);
     callback browse-executable();
+    callback enable-windows-sandbox-terminal();
+    callback copy-windows-sandbox-cmd();
     callback open-tile(int);
     callback toggle-row(int);
     callback row-action(string, int);
@@ -553,7 +556,10 @@ export component MainWindow inherits Window {
     if root.run-task-visible : RunTaskModal {
         command <=> root.run-task-command;
         working-dir <=> root.run-task-working-dir;
+        sandbox-available: root.windows-sandbox-available;
         browse => { root.browse-executable(); }
+        enable-sandbox-terminal => { root.enable-windows-sandbox-terminal(); }
+        copy-sandbox-cmd => { root.copy-windows-sandbox-cmd(); }
         run(cmd, dir, priv-mode, compat, eco) => {
             root.run-task-visible = false;
             root.run-new-task(cmd, dir, priv-mode, compat, eco);

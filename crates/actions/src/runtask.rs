@@ -1,30 +1,23 @@
 //! Custom "Run new task" power launcher: supports Normal, Elevated (Administrator), Force Standard
-//! User (`RunAsInvoker`), and Sandboxed (Low Integrity token) launches, compatibility layers,
+//! User (`RunAsInvoker`), and Windows Sandbox (isolated disposable VM) launches, compatibility layers,
 //! optional working directory, and starting in Efficiency Mode (EcoQoS + idle priority).
 use crate::{ActionError, OwnedHandle};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
-use std::path::Path;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LocalFree};
-use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
-use windows::Win32::Security::{
-    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, PSID, SID_AND_ATTRIBUTES, SetTokenInformation,
-    TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    TokenIntegrityLevel,
-};
-
-const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
+use std::path::{Path, PathBuf};
+use windows::Win32::Foundation::{HANDLE, HWND};
 use windows::Win32::Storage::FileSystem::SearchPathW;
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, IDLE_PRIORITY_CLASS, OpenProcessToken, PROCESS_INFORMATION,
-    PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
-    ProcessPowerThrottling, STARTUPINFOW, SetPriorityClass, SetProcessInformation,
+    IDLE_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
 };
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{HSTRING, PCWSTR, PWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrivilegeMode {
@@ -32,7 +25,7 @@ pub enum PrivilegeMode {
     Normal,
     Elevated,
     ForceInvoker,
-    LowIntegrity,
+    WindowsSandbox,
 }
 
 impl PrivilegeMode {
@@ -40,7 +33,7 @@ impl PrivilegeMode {
         match i {
             1 => Self::Elevated,
             2 => Self::ForceInvoker,
-            3 => Self::LowIntegrity,
+            3 => Self::WindowsSandbox,
             _ => Self::Normal,
         }
     }
@@ -120,8 +113,15 @@ pub fn compat_env(privilege: PrivilegeMode, compat: CompatLayer) -> Option<Strin
 
 /// Launches the requested command off the UI thread.
 pub fn run_new_task(opts: &RunTaskOptions, owner_hwnd: isize) -> Result<(), ActionError> {
-    let Some((prog, args)) = split_command(&opts.command) else {
-        return Err(ActionError::Other("enter a program, path, or command to run".into()));
+    let (prog, args) = match split_command(&opts.command) {
+        Some((p, a)) => (p, a),
+        None => {
+            if opts.privilege == PrivilegeMode::WindowsSandbox {
+                ("", "")
+            } else {
+                return Err(ActionError::Other("enter a program, path, or command to run".into()));
+            }
+        }
     };
     let working_dir = opts.working_dir.trim();
     let dir_opt = (!working_dir.is_empty()).then(|| Path::new(working_dir));
@@ -132,7 +132,7 @@ pub fn run_new_task(opts: &RunTaskOptions, owner_hwnd: isize) -> Result<(), Acti
     }
     match opts.privilege {
         PrivilegeMode::Elevated => launch_shell(w!("runas"), prog, args, dir_opt, owner_hwnd, opts.efficiency_mode),
-        PrivilegeMode::LowIntegrity => launch_low_integrity(prog, args, dir_opt, opts),
+        PrivilegeMode::WindowsSandbox => launch_windows_sandbox(prog, args, dir_opt, opts.efficiency_mode),
         PrivilegeMode::Normal | PrivilegeMode::ForceInvoker => launch_standard(prog, args, dir_opt, owner_hwnd, opts),
     }
 }
@@ -223,107 +223,251 @@ fn launch_shell(
     Ok(())
 }
 
-/// Resolves an executable name (e.g. `notepad` or `cmd.exe`) via `SearchPathW` when needed so
-/// `CreateProcessAsUserW` can launch it.
-fn resolve_executable(prog: &str) -> HSTRING {
+/// Checks whether a path resides inside the Windows directory (e.g. C:\Windows\System32).
+fn is_system_path(path: &Path) -> bool {
+    std::env::var("SystemRoot").is_ok_and(|sysroot| path.starts_with(Path::new(&sysroot)))
+}
+
+/// Resolves an executable name or path to a host file if possible.
+fn resolve_executable_path(prog: &str, working_dir: Option<&Path>) -> Option<PathBuf> {
+    let p = Path::new(prog);
+    if p.is_file() {
+        return Some(p.to_path_buf());
+    }
+    if let Some(dir) = working_dir {
+        let candidate = dir.join(p);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
     let name = HSTRING::from(prog);
     let mut buf = vec![0u16; 1024];
     // SAFETY: searches PATH for `name` (adding `.exe` if needed) into `buf`.
     let len = unsafe { SearchPathW(PCWSTR::null(), &name, w!(".exe"), Some(&mut buf), None) };
     if len > 0 && (len as usize) < buf.len() {
-        HSTRING::from_wide(&buf[..len as usize])
-    } else {
-        name
+        let found = PathBuf::from(HSTRING::from_wide(&buf[..len as usize]).to_string_lossy());
+        if found.is_file() {
+            return Some(found);
+        }
     }
+    None
 }
 
-fn launch_low_integrity(
+/// Escapes XML special characters for inclusion in a .wsb configuration.
+pub fn escape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Builds the XML configuration content for a Windows Sandbox (.wsb) session.
+///
+/// If `prog` refers to an existing host file or directory outside the Windows system directory,
+/// its parent directory (or `working_dir`) is mapped read-only into the sandbox at
+/// `C:\Users\WDAGUtilityAccount\Desktop\Shared`, and `<LogonCommand>` invokes the application
+/// inside the sandbox. If `prog` is a system command or built-in tool, it is invoked directly.
+pub fn build_wsb_config(prog: &str, args: &str, working_dir: Option<&Path>) -> String {
+    let mut xml = String::from("<Configuration>\n  <Networking>Default</Networking>\n");
+
+    let host_file = if prog.is_empty() {
+        None
+    } else {
+        resolve_executable_path(prog, working_dir)
+    };
+
+    let (mapped_host_dir, logon_command) = if let Some(ref file) = host_file {
+        if is_system_path(file) {
+            // Built-in system utility (e.g. C:\Windows\System32\notepad.exe)
+            let cmd = if args.is_empty() {
+                format!(r#"cmd.exe /c start "" "{prog}""#)
+            } else {
+                format!(r#"cmd.exe /c start "" "{prog}" {args}"#)
+            };
+            (None, cmd)
+        } else {
+            // Non-system executable on host: map parent folder read-only to Desktop\Shared
+            let folder = working_dir.map(Path::to_path_buf).or_else(|| file.parent().map(Path::to_path_buf));
+            let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or(prog);
+            let sandbox_path = format!(r"C:\Users\WDAGUtilityAccount\Desktop\Shared\{filename}");
+            let cmd = if args.is_empty() {
+                format!(r#"cmd.exe /c start "" "{sandbox_path}""#)
+            } else {
+                format!(r#"cmd.exe /c start "" "{sandbox_path}" {args}"#)
+            };
+            (folder, cmd)
+        }
+    } else if !prog.is_empty() {
+        let folder = working_dir.map(Path::to_path_buf);
+        let cmd = if args.is_empty() {
+            format!(r#"cmd.exe /c start "" "{prog}""#)
+        } else {
+            format!(r#"cmd.exe /c start "" "{prog}" {args}"#)
+        };
+        (folder, cmd)
+    } else {
+        (working_dir.map(Path::to_path_buf), String::new())
+    };
+
+    if let Some(ref dir) = mapped_host_dir {
+        xml.push_str("  <MappedFolders>\n    <MappedFolder>\n");
+        xml.push_str(&format!("      <HostFolder>{}</HostFolder>\n", escape_xml(&dir.to_string_lossy())));
+        xml.push_str("      <SandboxFolder>C:\\Users\\WDAGUtilityAccount\\Desktop\\Shared</SandboxFolder>\n");
+        xml.push_str("      <ReadOnly>true</ReadOnly>\n    </MappedFolder>\n  </MappedFolders>\n");
+    }
+
+    if !logon_command.is_empty() {
+        xml.push_str("  <LogonCommand>\n");
+        xml.push_str(&format!("    <Command>{}</Command>\n", escape_xml(&logon_command)));
+        xml.push_str("  </LogonCommand>\n");
+    }
+
+    xml.push_str("</Configuration>\n");
+    xml
+}
+
+/// Locates the `WindowsSandbox.exe` binary on the host system.
+fn find_windows_sandbox_exe() -> Option<PathBuf> {
+    if let Ok(sysroot) = std::env::var("SystemRoot") {
+        let p = Path::new(&sysroot).join("System32").join("WindowsSandbox.exe");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let name = HSTRING::from("WindowsSandbox.exe");
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: searches PATH for `WindowsSandbox.exe` into `buf`.
+    let len = unsafe { SearchPathW(PCWSTR::null(), &name, None, Some(&mut buf), None) };
+    if len > 0 && (len as usize) < buf.len() {
+        let found = PathBuf::from(HSTRING::from_wide(&buf[..len as usize]).to_string_lossy());
+        if found.is_file() {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn launch_windows_sandbox(
     prog: &str,
     args: &str,
     dir: Option<&Path>,
-    opts: &RunTaskOptions,
+    efficiency_mode: bool,
 ) -> Result<(), ActionError> {
-    let mut token = HANDLE::default();
-    // SAFETY: opens our own process token and wraps it in OwnedHandle.
-    unsafe {
-        OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
-            &mut token,
+    let sandbox_exe = find_windows_sandbox_exe().ok_or_else(|| {
+        ActionError::Other(
+            "Windows Sandbox is not installed or enabled. To enable it, open 'Turn Windows features on or off' and check 'Windows Sandbox' (or run 'Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All' in an Administrator PowerShell) and restart.".into(),
         )
+    })?;
+
+    let wsb_content = build_wsb_config(prog, args, dir);
+    let temp_dir = std::env::temp_dir();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let wsb_path = temp_dir.join(format!("negotium-task-{timestamp}.wsb"));
+
+    std::fs::write(&wsb_path, wsb_content)
+        .map_err(|e| ActionError::Other(format!("Failed to write sandbox configuration: {e}")))?;
+
+    // Spawn Windows Sandbox with the generated .wsb configuration
+    let mut cmd = std::process::Command::new(sandbox_exe);
+    cmd.arg(&wsb_path);
+    if efficiency_mode {
+        cmd.creation_flags(IDLE_PRIORITY_CLASS.0);
     }
-    .map_err(|e| ActionError::from_win(&e))?;
-    let token = OwnedHandle(token);
+    let child = cmd
+        .spawn()
+        .map_err(|e| ActionError::Other(format!("Failed to start Windows Sandbox: {e}")))?;
 
-    let mut restricted = HANDLE::default();
-    // SAFETY: creates a restricted primary token with maximum privileges stripped.
-    unsafe { CreateRestrictedToken(token.0, DISABLE_MAX_PRIVILEGE, None, None, None, &mut restricted) }
-        .map_err(|e| ActionError::from_win(&e))?;
-    let restricted = OwnedHandle(restricted);
+    if efficiency_mode {
+        let raw = HANDLE(child.as_raw_handle());
+        apply_efficiency_to_handle(raw);
+    }
 
-    // S-1-16-4096 = Low Mandatory Level
-    let mut low_sid = PSID::default();
-    // SAFETY: converts static SID string; freed with LocalFree below.
-    unsafe { ConvertStringSidToSidW(w!("S-1-16-4096"), &mut low_sid) }.map_err(|e| ActionError::from_win(&e))?;
-    struct FreeSid(PSID);
-    impl Drop for FreeSid {
-        fn drop(&mut self) {
-            // SAFETY: allocated by ConvertStringSidToSidW.
-            unsafe {
-                let _ = LocalFree(Some( windows::Win32::Foundation::HLOCAL(self.0.0) ));
-            }
+    // Clean up temporary .wsb file after WindowsSandbox has loaded it
+    let cleanup_path = wsb_path;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(cleanup_path);
+    });
+
+    Ok(())
+}
+
+/// The official PowerShell command to enable the Windows Sandbox feature on Windows 10/11 Pro & Enterprise.
+pub const ENABLE_SANDBOX_CMD: &str =
+    "Enable-WindowsOptionalFeature -Online -FeatureName \"Containers-DisposableClientVM\" -All";
+
+/// Returns whether `WindowsSandbox.exe` is installed on this machine.
+pub fn is_windows_sandbox_available() -> bool {
+    find_windows_sandbox_exe().is_some()
+}
+
+/// Copies the given UTF-8 text into the Windows clipboard as CF_UNICODETEXT.
+pub fn copy_to_clipboard(text: &str) -> Result<(), ActionError> {
+    let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = utf16.len() * std::mem::size_of::<u16>();
+
+    // SAFETY: Allocates movable global memory for the clipboard data.
+    let hmem = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }
+        .map_err(|e| ActionError::Other(format!("Failed to allocate clipboard memory: {e}")))?;
+
+    // SAFETY: Locks the global memory handle to write the UTF-16 string into it.
+    let ptr = unsafe { GlobalLock(hmem) };
+    if ptr.is_null() {
+        return Err(ActionError::Other("Failed to lock clipboard memory".into()));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(utf16.as_ptr() as *const u8, ptr as *mut u8, bytes);
+        let _ = GlobalUnlock(hmem);
+    }
+
+    // CF_UNICODETEXT = 13
+    const CF_UNICODETEXT: u32 = 13;
+
+    // SAFETY: Opens the clipboard, empties it, and assigns the global memory.
+    unsafe {
+        OpenClipboard(None)
+            .map_err(|e| ActionError::Other(format!("Failed to open clipboard: {e}")))?;
+        let _ = EmptyClipboard();
+        let res = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0)));
+        let _ = CloseClipboard();
+        if res.is_err() {
+            return Err(ActionError::Other("Failed to set clipboard data".into()));
         }
     }
-    let _free_sid = FreeSid(low_sid);
+    Ok(())
+}
 
-    let tml = TOKEN_MANDATORY_LABEL { Label: SID_AND_ATTRIBUTES { Sid: low_sid, Attributes: SE_GROUP_INTEGRITY } };
-    // SAFETY: sets the restricted token's integrity level to Low.
-    unsafe {
-        SetTokenInformation(
-            restricted.0,
-            TokenIntegrityLevel,
-            &tml as *const _ as *const c_void,
-            size_of::<TOKEN_MANDATORY_LABEL>() as u32,
-        )
-    }
-    .map_err(|e| ActionError::from_win(&e))?;
-
-    let resolved = resolve_executable(prog);
-    let full_cmd = if args.is_empty() {
-        format!("\"{}\"", resolved.to_string_lossy())
-    } else {
-        format!("\"{}\" {args}", resolved.to_string_lossy())
+/// Launches an elevated PowerShell window to run the command enabling Windows Sandbox.
+pub fn enable_windows_sandbox_in_terminal(owner_hwnd: isize) -> Result<(), ActionError> {
+    let _com = crate::startup::ComApartment::enter();
+    let file = HSTRING::from("powershell.exe");
+    let cmd = format!(
+        "-NoExit -Command \"Write-Host 'Enabling Windows Sandbox feature...' -ForegroundColor Cyan; Write-Host '{ENABLE_SANDBOX_CMD}' -ForegroundColor Yellow; {ENABLE_SANDBOX_CMD}\""
+    );
+    let params = HSTRING::from(cmd);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        hwnd: HWND(owner_hwnd as *mut c_void),
+        fMask: SEE_MASK_NOASYNC,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
     };
-    let mut cmd_wide: Vec<u16> = full_cmd.encode_utf16().chain(std::iter::once(0)).collect();
-    let dir_h = dir.map(|d| HSTRING::from(d.as_os_str())).unwrap_or_default();
-    let si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
-    let mut pi = PROCESS_INFORMATION::default();
-    let flags = if opts.efficiency_mode { IDLE_PRIORITY_CLASS } else { Default::default() };
-    // SAFETY: `restricted` is a primary token, `cmd_wide` is NUL-terminated mutable UTF-16.
-    unsafe {
-        CreateProcessAsUserW(
-            Some(restricted.0),
-            &resolved,
-            Some(PWSTR(cmd_wide.as_mut_ptr())),
-            None,
-            None,
-            false,
-            flags,
-            None,
-            if dir.is_some() { PCWSTR(dir_h.as_ptr()) } else { PCWSTR::null() },
-            &si,
-            &mut pi,
-        )
-    }
-    .map_err(|e| ActionError::from_win(&e))?;
-    let proc = OwnedHandle(pi.hProcess);
-    // SAFETY: thread handle from CreateProcessAsUserW closed immediately.
-    unsafe {
-        let _ = CloseHandle(pi.hThread);
-    }
-    if opts.efficiency_mode {
-        apply_efficiency_to_handle(proc.0);
-    }
+    // SAFETY: `info` is initialized and all HSTRING buffers outlive the call.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| ActionError::from_win(&e))?;
     Ok(())
 }
 
@@ -398,5 +542,54 @@ mod tests {
             compat_env(PrivilegeMode::ForceInvoker, CompatLayer::HighDpiAware).as_deref(),
             Some("RunAsInvoker HIGHDPIAWARE")
         );
+    }
+
+    #[test]
+    fn escape_xml_handles_special_characters() {
+        assert_eq!(escape_xml("normal_text"), "normal_text");
+        assert_eq!(escape_xml(r#"<a b="1" & '2'>"#), "&lt;a b=&quot;1&quot; &amp; &apos;2&apos;&gt;");
+    }
+
+    #[test]
+    fn build_wsb_config_blank() {
+        let xml = build_wsb_config("", "", None);
+        assert!(xml.contains("<Configuration>"));
+        assert!(xml.contains("<Networking>Default</Networking>"));
+        assert!(!xml.contains("<MappedFolders>"));
+        assert!(!xml.contains("<LogonCommand>"));
+    }
+
+    #[test]
+    fn build_wsb_config_system_command() {
+        let xml = build_wsb_config("cmd.exe", "/k echo hello", None);
+        assert!(xml.contains("<Configuration>"));
+        assert!(xml.contains(r#"cmd.exe /c start &quot;&quot; &quot;cmd.exe&quot; /k echo hello"#));
+        assert!(!xml.contains("<MappedFolders>"));
+    }
+
+    #[test]
+    fn build_wsb_config_with_mapped_folder() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("negotium_test_app.exe");
+        std::fs::write(&test_file, b"test").unwrap();
+
+        let xml = build_wsb_config(test_file.to_str().unwrap(), "--run", None);
+        let _ = std::fs::remove_file(&test_file);
+
+        assert!(xml.contains("<MappedFolders>"));
+        assert!(xml.contains("<ReadOnly>true</ReadOnly>"));
+        assert!(xml.contains(r#"C:\Users\WDAGUtilityAccount\Desktop\Shared\negotium_test_app.exe"#));
+        assert!(xml.contains("--run"));
+    }
+
+    #[test]
+    fn enable_sandbox_command_is_valid_powershell() {
+        assert!(ENABLE_SANDBOX_CMD.starts_with("Enable-WindowsOptionalFeature"));
+        assert!(ENABLE_SANDBOX_CMD.contains("Containers-DisposableClientVM"));
+    }
+
+    #[test]
+    fn clipboard_copy_does_not_panic() {
+        let _ = copy_to_clipboard("negotium_test_clipboard");
     }
 }
