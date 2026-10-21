@@ -9,6 +9,7 @@ A fast, modern Task Manager replacement for Windows 11, written in Rust with [Sl
 - **Performance** pages for CPU, memory, each disk, GPU and network adapter, with history and a hover list of the busiest apps.
 - **Startup** apps: see and turn off what starts with Windows.
 - **Actions** — end task, end process tree, efficiency mode, force-close frozen apps, open file location.
+- **Not responding prompt** — when an app's window hangs, a small always-on-top prompt offers Wait, Restart or Force quit, even while Negotium sits in the tray (switchable in Settings).
 - **Tray** — keeps running in the tray with an optional CPU graph icon.
 
 ## Install

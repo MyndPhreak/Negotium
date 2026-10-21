@@ -254,6 +254,25 @@ impl LiveSource {
     }
 }
 
+/// Processes with a hung window, for the "isn't responding" prompt. System-critical processes and
+/// Negotium itself are left out: ending them is never offered.
+fn hung_apps(rows: &[negotium_model::AppRow]) -> Vec<crate::hangwatch::HungApp> {
+    let own = std::process::id();
+    rows.iter()
+        .flat_map(|app| app.processes.iter().map(move |p| (app, p)))
+        .filter(|(_, p)| p.pid != own && !negotium_actions::is_critical(&p.name))
+        .filter_map(|(app, p)| {
+            Some(crate::hangwatch::HungApp {
+                pid: p.pid,
+                create_time: p.create_time,
+                name: app.name.clone(),
+                process_name: p.name.clone(),
+                hung_ms: p.hung_for_ms?,
+            })
+        })
+        .collect()
+}
+
 /// A restraint outlives the worker unless it is undone here: on exit, and on a restart after a
 /// panic, whose fresh moderator knows nothing of the old one's restraints.
 impl Drop for LiveSource {
@@ -290,6 +309,7 @@ impl Source for LiveSource {
         let tray_sample = keep_sample(&self.history, &snap, &rows, controls.tray_cpu() && self.tray.is_some());
         // Every tick, visible or hidden, so the tray never waits on a stale answer (crate::tray, PF2).
         controls.set_shell_hung(crate::platform::shell_tray_hung());
+        controls.set_hung_apps(hung_apps(&rows));
         if let (Some(sample), Some(tray)) = (tray_sample, &self.tray) {
             tray(sample);
         }

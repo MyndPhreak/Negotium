@@ -179,6 +179,8 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> keep-in-tray;
     // Graphs scroll continuously between samples (crate::smooth).
     in property <bool> smooth-graphs;
+    // Negotium's own prompt when an app stops responding (crate::hangprompt).
+    in property <bool> hang-prompt;
     // The Overview groups apps by type (crate::controls::Controls::grouped).
     in property <bool> group-by-type;
     // The tray icon draws the CPU graph (crate::tray).
@@ -208,6 +210,7 @@ export component SettingsPage inherits VerticalLayout {
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
+    callback hang-prompt-toggled(bool);
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
@@ -276,6 +279,18 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     toggled(on) => { root.smooth-graphs-toggled(on); }
                     focus-gained => { sv.reveal(smooth-row.absolute-position.y, smooth-row.height); }
+                }
+            }
+            hang-row := SettingRow {
+                title: "Offer to end apps that stop responding";
+                description: "Shows a small prompt in the corner of the screen with Wait, Restart and Force quit when an app's window hangs, even while Negotium is in the tray.";
+                Toggle {
+                    label: hang-row.title;
+                    description: hang-row.description;
+                    checked: root.hang-prompt;
+                    interactive: root.interactive;
+                    toggled(on) => { root.hang-prompt-toggled(on); }
+                    focus-gained => { sv.reveal(hang-row.absolute-position.y, hang-row.height); }
                 }
             }
             aequilibrium-row := SettingRow {

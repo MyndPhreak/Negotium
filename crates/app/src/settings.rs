@@ -58,6 +58,10 @@ pub struct Settings {
     pub group_by_type: bool,
     /// Look for a newer release when Negotium starts (the installed copy only).
     pub check_updates: bool,
+    /// Offer to end an app whose window has stopped responding (crate::hangprompt).
+    pub hang_prompt: bool,
+    /// Image names (lowercase) the user chose "Don't ask for this app" for.
+    pub hang_ignored: Vec<String>,
     /// Negotium starts when the user signs in. Whether the Run value or logon task exists is read
     /// from the machine; this is the choice the user made.
     pub start_with_windows: bool,
@@ -88,6 +92,8 @@ impl Default for Settings {
             sort_descending: true,
             group_by_type: true,
             check_updates: true,
+            hang_prompt: true,
+            hang_ignored: Vec::new(),
             start_with_windows: false,
             col_pid: false,
             col_proc_name: false,
@@ -256,6 +262,8 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(sort_descending);
     field!(group_by_type);
     field!(check_updates);
+    field!(hang_prompt);
+    field!(hang_ignored);
     field!(start_with_windows);
     field!(col_pid);
     field!(col_proc_name);

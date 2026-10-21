@@ -5,6 +5,8 @@ pub mod controls;
 pub mod dispatch;
 pub mod format;
 pub mod graph;
+pub mod hangprompt;
+pub mod hangwatch;
 pub mod icons;
 pub mod install;
 pub mod integrate;

@@ -1,0 +1,58 @@
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Negotium's own "isn't responding" prompt (crate::hangprompt): a small always-on-top window in
+// the corner of the screen, shown while an app's window is hung, whether or not Negotium's main
+// window is open.
+export component HangPrompt inherits Window {
+    in property <string> app-name;
+    in property <string> detail;
+    in property <string> status;
+    in property <bool> busy: false;
+    in property <bool> can-relaunch: true;
+    callback wait();
+    callback force-quit();
+    callback relaunch();
+    callback ignore-app();
+
+    title: "Not responding";
+    always-on-top: true;
+    no-frame: true;
+    width: 420px;
+    height: 176px;
+    background: Theme.dark ? #2b2b2b : #ffffff;
+
+    Rectangle {
+        border-width: 1px;
+        border-color: Theme.card-border;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 8px;
+            Text {
+                text: root.app-name + " isn't responding";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.status != "" ? root.status : root.detail;
+                color: root.status != "" ? Theme.danger-text : Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+                vertical-alignment: top;
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button { text: "Don't ask for this app"; enabled: !root.busy; clicked => { root.ignore-app(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Wait"; enabled: !root.busy; clicked => { root.wait(); } }
+                if root.can-relaunch : Button { text: "Restart"; enabled: !root.busy; clicked => { root.relaunch(); } }
+                Button { text: root.busy ? "Ending…" : "Force quit"; primary: true; enabled: !root.busy; clicked => { root.force-quit(); } }
+            }
+        }
+    }
+}

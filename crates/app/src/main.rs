@@ -1446,6 +1446,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // once: apply the chrome, hook the window (tray re-creation, activation by a second launch)
     // and mark it for that second launch. Every tick is also the renderer watchdog's heartbeat
     // (the UI thread is alive), and the tray icon waits until the watchdog has resolved.
+    // Negotium's own "isn't responding" prompt; lives as long as the event loop.
+    let _hang_timer = negotium::hangprompt::install(settings.clone(), saver.clone(), controls.clone(), elevated);
     let chrome_timer = Rc::new(slint::Timer::default());
     {
         let weak = weak.clone();
