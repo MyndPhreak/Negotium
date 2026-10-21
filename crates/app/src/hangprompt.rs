@@ -11,47 +11,78 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_secs(1);
-const LOGICAL_SIZE: (f32, f32) = (420.0, 176.0);
+/// How often the strip follows its ghost window.
+const TRACK: Duration = Duration::from_millis(50);
+/// How long a missing ghost is tolerated (in `TRACK` ticks) before falling back to the corner prompt.
+const GHOST_LOST_TICKS: u32 = 20;
+const CORNER_SIZE: (f32, f32) = (420.0, 176.0);
+const STRIP_HEIGHT: f32 = 32.0;
 const MARGIN: f32 = 16.0;
 
 struct State {
     watch: HangWatch,
+    /// The corner prompt, made on first use.
     prompt: Option<HangPrompt>,
+    /// The strip over the hung window's title bar (Settings > experimental), made on first use.
+    strip: Option<HangPrompt>,
+    /// The ghost window the strip follows while it is shown.
+    ghost: Option<isize>,
+    ghost_lost: u32,
     current: Option<HungApp>,
     epoch: Instant,
 }
 
-/// Starts polling. Keep the returned timer alive for as long as the prompt should work.
-pub fn install(settings: Rc<RefCell<Settings>>, saver: Saver, controls: Arc<Controls>, elevated: bool) -> slint::Timer {
+/// The polling timer and the strip's tracking timer; keep both alive.
+pub struct Timers(#[allow(dead_code)] slint::Timer, #[allow(dead_code)] slint::Timer);
+
+type Shared = Rc<(Rc<RefCell<Settings>>, Saver, bool)>;
+
+/// Starts polling. Keep the returned timers alive for as long as the prompt should work.
+pub fn install(settings: Rc<RefCell<Settings>>, saver: Saver, controls: Arc<Controls>, elevated: bool) -> Timers {
     let state = Rc::new(RefCell::new(State {
         watch: HangWatch::new(settings.borrow().hang_ignored.clone()),
         prompt: None,
+        strip: None,
+        ghost: None,
+        ghost_lost: 0,
         current: None,
         epoch: Instant::now(),
     }));
-    let timer = slint::Timer::default();
-    timer.start(slint::TimerMode::Repeated, POLL, move || {
-        let (enabled, apps) = (settings.borrow().hang_prompt, controls.hung_apps());
-        let poll = {
-            let mut s = state.borrow_mut();
-            let now = s.epoch.elapsed().as_millis() as u64;
-            s.watch.poll(now, enabled, &apps)
-        };
-        match poll {
-            Poll::Keep => {
-                // The prompted app keeps counting up.
-                let s = state.borrow();
-                if let (Some(p), Some(cur)) = (&s.prompt, &s.current)
-                    && let Some(app) = apps.iter().find(|a| a.key() == cur.key())
-                {
-                    p.set_detail(detail(app).into());
+    let shared: Shared = Rc::new((settings, saver, elevated));
+    let poll_timer = slint::Timer::default();
+    {
+        let (state, shared, controls) = (state.clone(), shared.clone(), controls.clone());
+        poll_timer.start(slint::TimerMode::Repeated, POLL, move || {
+            let (enabled, apps) = (shared.0.borrow().hang_prompt, controls.hung_apps());
+            let poll = {
+                let mut s = state.borrow_mut();
+                let now = s.epoch.elapsed().as_millis() as u64;
+                s.watch.poll(now, enabled, &apps)
+            };
+            match poll {
+                Poll::Keep => {
+                    // The prompted app keeps counting up.
+                    let s = state.borrow();
+                    if let Some(cur) = &s.current
+                        && let Some(app) = apps.iter().find(|a| a.key() == cur.key())
+                    {
+                        for p in [&s.prompt, &s.strip].into_iter().flatten() {
+                            p.set_detail(detail(app).into());
+                            p.set_seconds(format!("{}s", app.hung_ms / 1000).into());
+                        }
+                    }
                 }
+                Poll::Hide => hide(&state),
+                Poll::Show(app) => show(&state, &shared, app),
             }
-            Poll::Hide => hide(&state),
-            Poll::Show(app) => show(&state, &settings, &saver, elevated, app),
-        }
-    });
-    timer
+        });
+    }
+    let track_timer = slint::Timer::default();
+    {
+        let state = state.clone();
+        track_timer.start(slint::TimerMode::Repeated, TRACK, move || track(&state, &shared));
+    }
+    Timers(poll_timer, track_timer)
 }
 
 fn detail(app: &HungApp) -> String {
@@ -61,41 +92,121 @@ fn detail(app: &HungApp) -> String {
 fn hide(state: &Rc<RefCell<State>>) {
     let mut s = state.borrow_mut();
     s.current = None;
-    if let Some(p) = &s.prompt {
+    s.ghost = None;
+    for p in [&s.prompt, &s.strip].into_iter().flatten() {
         let _ = p.hide();
     }
 }
 
-fn show(state: &Rc<RefCell<State>>, settings: &Rc<RefCell<Settings>>, saver: &Saver, elevated: bool, app: HungApp) {
-    let mut s = state.borrow_mut();
-    if s.prompt.is_none() {
-        match HangPrompt::new() {
-            Ok(p) => {
-                wire(&p, state, settings, saver, elevated);
-                s.prompt = Some(p);
-            }
-            Err(_) => {
-                s.watch.closed();
-                return;
-            }
-        }
+fn show(state: &Rc<RefCell<State>>, shared: &Shared, app: HungApp) {
+    let ghost = shared.0.borrow().hang_overlay.then(|| {
+        negotium_collector::windows_scan::ghost_windows().into_iter().find(|g| g.pid == app.pid)
+    });
+    state.borrow_mut().current = Some(app.clone());
+    if let Some(Some(g)) = ghost
+        && show_strip(state, shared, &app, g)
+    {
+        return;
     }
-    let Some(p) = &s.prompt else { return };
+    show_corner(state, shared, &app);
+}
+
+/// Makes the prompt window on first use and wires its buttons.
+fn ensure(slot: &mut Option<HangPrompt>, compact: bool, state: &Rc<RefCell<State>>, shared: &Shared) -> bool {
+    if slot.is_none() {
+        let Ok(p) = HangPrompt::new() else { return false };
+        p.set_compact(compact);
+        wire(&p, state, &shared.0, &shared.1, shared.2);
+        *slot = Some(p);
+    }
+    true
+}
+
+fn fill(p: &HangPrompt, app: &HungApp, elevated: bool) {
     p.set_app_name(app.name.clone().into());
-    p.set_detail(detail(&app).into());
+    p.set_detail(detail(app).into());
+    p.set_seconds(format!("{}s", app.hung_ms / 1000).into());
     p.set_status("".into());
     p.set_busy(false);
     // Restarting an app from an elevated Negotium would hand it admin rights it did not have.
     p.set_can_relaunch(!elevated);
+}
+
+fn show_corner(state: &Rc<RefCell<State>>, shared: &Shared, app: &HungApp) {
+    let mut s = state.borrow_mut();
+    if let Some(strip) = &s.strip {
+        let _ = strip.hide();
+    }
+    s.ghost = None;
+    if !ensure(&mut s.prompt, false, state, shared) {
+        s.watch.closed();
+        return;
+    }
+    let Some(p) = &s.prompt else { return };
+    fill(p, app, shared.2);
     if p.show().is_ok() {
+        platform::make_non_activating(p.window());
         // Bottom-right of the work area, above the taskbar.
         if let Some((_, _, right, bottom)) = platform::primary_work_area() {
             let scale = p.window().scale_factor();
-            let (w, h, m) = ((LOGICAL_SIZE.0 * scale) as i32, (LOGICAL_SIZE.1 * scale) as i32, (MARGIN * scale) as i32);
+            let (w, h, m) = ((CORNER_SIZE.0 * scale) as i32, (CORNER_SIZE.1 * scale) as i32, (MARGIN * scale) as i32);
+            p.window().set_size(slint::PhysicalSize::new(w as u32, h as u32));
             p.window().set_position(slint::PhysicalPosition::new(right - w - m, bottom - h - m));
         }
     }
-    s.current = Some(app);
+}
+
+/// The strip over the ghost's title bar. Returns false when it can't be made or placed, so the
+/// caller falls back to the corner prompt.
+fn show_strip(state: &Rc<RefCell<State>>, shared: &Shared, app: &HungApp, ghost: negotium_collector::windows_scan::GhostWindow) -> bool {
+    let mut s = state.borrow_mut();
+    if !ensure(&mut s.strip, true, state, shared) {
+        return false;
+    }
+    let Some(p) = &s.strip else { return false };
+    fill(p, app, shared.2);
+    if p.show().is_err() {
+        return false;
+    }
+    platform::make_non_activating(p.window());
+    let height = (STRIP_HEIGHT * p.window().scale_factor()) as i32;
+    let placed = platform::place_above(p.window(), ghost.hwnd, ghost.rect, height);
+    if !placed {
+        let _ = p.hide();
+        return false;
+    }
+    if let Some(corner) = &s.prompt {
+        let _ = corner.hide();
+    }
+    s.ghost = Some(ghost.hwnd);
+    s.ghost_lost = 0;
+    true
+}
+
+/// Keeps the strip on its ghost window; when the ghost stays gone while the app is still hung,
+/// falls back to the corner prompt.
+fn track(state: &Rc<RefCell<State>>, shared: &Shared) {
+    let fallback = {
+        let mut s = state.borrow_mut();
+        let (Some(ghost), Some(strip)) = (s.ghost, &s.strip) else { return };
+        match negotium_collector::windows_scan::ghost_rect(ghost) {
+            Some(rect) => {
+                let height = (STRIP_HEIGHT * strip.window().scale_factor()) as i32;
+                let (left, right) = (rect.0, rect.2);
+                strip.window().set_size(slint::PhysicalSize::new((right - left).max(1) as u32, height as u32));
+                platform::place_above(strip.window(), ghost, rect, height);
+                s.ghost_lost = 0;
+                None
+            }
+            None => {
+                s.ghost_lost += 1;
+                (s.ghost_lost >= GHOST_LOST_TICKS).then(|| s.current.clone()).flatten()
+            }
+        }
+    };
+    if let Some(app) = fallback {
+        show_corner(state, shared, &app);
+    }
 }
 
 fn wire(p: &HangPrompt, state: &Rc<RefCell<State>>, settings: &Rc<RefCell<Settings>>, saver: &Saver, elevated: bool) {

@@ -10,6 +10,10 @@ export component HangPrompt inherits Window {
     in property <string> status;
     in property <bool> busy: false;
     in property <bool> can-relaunch: true;
+    // A one-row strip drawn over the hung window's title bar (the experimental overlay) instead of
+    // the corner prompt; Rust sizes and places it (crate::platform::place_above).
+    in property <bool> compact: false;
+    in property <string> seconds;
     callback wait();
     callback force-quit();
     callback relaunch();
@@ -18,14 +22,33 @@ export component HangPrompt inherits Window {
     title: "Not responding";
     always-on-top: true;
     no-frame: true;
-    width: 420px;
-    height: 176px;
-    background: Theme.dark ? #2b2b2b : #ffffff;
+    preferred-width: root.compact ? 640px : 420px;
+    preferred-height: root.compact ? 32px : 176px;
+    background: root.compact ? #7a4b00 : (Theme.dark ? #2b2b2b : #ffffff);
 
     Rectangle {
         border-width: 1px;
         border-color: Theme.card-border;
-        VerticalLayout {
+        if root.compact : HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 4px;
+            padding-top: 2px;
+            padding-bottom: 2px;
+            spacing: 6px;
+            Text {
+                text: root.status != "" ? root.status : root.app-name + " isn't responding · " + root.seconds;
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Button { text: "Wait"; enabled: !root.busy; clicked => { root.wait(); } }
+            if root.can-relaunch : Button { text: "Restart"; enabled: !root.busy; clicked => { root.relaunch(); } }
+            Button { text: root.busy ? "Ending…" : "Force quit"; primary: true; enabled: !root.busy; clicked => { root.force-quit(); } }
+        }
+        if !root.compact : VerticalLayout {
             padding: 16px;
             spacing: 8px;
             Text {

@@ -32,6 +32,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
     ui.set_settings_hang_prompt(s.hang_prompt);
+    ui.set_settings_hang_overlay(s.hang_overlay);
     ui.set_settings_tray_cpu(s.tray_cpu);
     ui.set_settings_group_by_type(s.group_by_type);
     ui.set_settings_check_updates(s.check_updates);
@@ -619,6 +620,12 @@ impl SettingsWiring {
             let change = change.clone();
             ui.on_tray_toggled(move |on| {
                 change.apply(|s| s.keep_in_tray = on);
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_hang_overlay_toggled(move |on| {
+                change.apply(|s| s.hang_overlay = on);
             });
         }
         {

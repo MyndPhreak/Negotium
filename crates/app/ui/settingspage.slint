@@ -181,6 +181,7 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> smooth-graphs;
     // Negotium's own prompt when an app stops responding (crate::hangprompt).
     in property <bool> hang-prompt;
+    in property <bool> hang-overlay;
     // The Overview groups apps by type (crate::controls::Controls::grouped).
     in property <bool> group-by-type;
     // The tray icon draws the CPU graph (crate::tray).
@@ -211,6 +212,7 @@ export component SettingsPage inherits VerticalLayout {
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
     callback hang-prompt-toggled(bool);
+    callback hang-overlay-toggled(bool);
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
@@ -291,6 +293,18 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     toggled(on) => { root.hang-prompt-toggled(on); }
                     focus-gained => { sv.reveal(hang-row.absolute-position.y, hang-row.height); }
+                }
+            }
+            hang-overlay-row := SettingRow {
+                title: "Draw the prompt over the frozen window (experimental)";
+                description: "Replaces the corner prompt with a strip over the frozen window's title bar. Turn off if it appears in the wrong place.";
+                Toggle {
+                    label: hang-overlay-row.title;
+                    description: hang-overlay-row.description;
+                    checked: root.hang-overlay;
+                    interactive: root.interactive && root.hang-prompt;
+                    toggled(on) => { root.hang-overlay-toggled(on); }
+                    focus-gained => { sv.reveal(hang-overlay-row.absolute-position.y, hang-overlay-row.height); }
                 }
             }
             aequilibrium-row := SettingRow {

@@ -163,11 +163,54 @@ pub fn on_settings_changed(ui: &MainWindow, theme: ThemeChoice) {
 }
 
 fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
-    let handle = ui.window().window_handle();
+    hwnd_of_window(ui.window())
+}
+
+/// The native handle of any Slint window, once it exists.
+pub fn hwnd_of_window(window: &slint::Window) -> Option<HWND> {
+    let handle = window.window_handle();
     let raw = handle.window_handle().ok()?.as_raw();
     match raw {
         RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as *mut c_void)),
         _ => None,
+    }
+}
+
+/// Keeps a small utility window (the hang prompt and strip) from taking keyboard focus when it
+/// appears, and off the taskbar and Alt+Tab. Call after `show()`; returns whether it applied.
+pub fn make_non_activating(window: &slint::Window) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    };
+    let Some(hwnd) = hwnd_of_window(window) else { return false };
+    // SAFETY: plain style read-modify-write on our own window handle.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | (WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as isize);
+    }
+    true
+}
+
+/// Puts `overlay` at `rect` (left, top, right, bottom; height capped to `height`) directly above
+/// `target` in the z-order, without activating it. Returns false when either window is gone.
+pub fn place_above(overlay: &slint::Window, target: isize, rect: (i32, i32, i32, i32), height: i32) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GW_HWNDPREV, GetWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+    };
+    let Some(me) = hwnd_of_window(overlay) else { return false };
+    let target = HWND(target as *mut c_void);
+    let (left, top, right, _) = rect;
+    // SAFETY: z-order and position calls on our own window and a handle that may have gone stale
+    // (the calls then fail and are reported as false).
+    unsafe {
+        let above = GetWindow(target, GW_HWNDPREV).ok().filter(|h| !h.is_invalid());
+        let (after, flags) = match above {
+            // Already directly above the target: only move and size.
+            Some(h) if h == me => (None, SWP_NOACTIVATE | SWP_NOZORDER),
+            Some(h) => (Some(h), SWP_NOACTIVATE),
+            None => (Some(HWND_TOP), SWP_NOACTIVATE),
+        };
+        SetWindowPos(me, after, left, top, right - left, height, flags).is_ok()
     }
 }
 

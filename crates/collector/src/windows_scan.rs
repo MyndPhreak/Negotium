@@ -1,9 +1,9 @@
 //! Top-level window enumeration used for app grouping and "Not responding" detection.
 use negotium_snapshot::WindowSample;
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowThreadProcessId,
-    InternalGetWindowText, IsHungAppWindow, IsWindowVisible,
+    EnumWindows, GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowRect, GetWindowThreadProcessId,
+    InternalGetWindowText, IsHungAppWindow, IsWindow, IsWindowVisible,
 };
 use std::sync::OnceLock;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -85,6 +85,70 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
         out.push(WindowSample { pid, hung, title });
     }
     true.into()
+}
+
+/// The stand-in DWM shows for a hung window: its handle and where it is on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GhostWindow {
+    pub hwnd: isize,
+    /// The process whose window hung.
+    pub pid: u32,
+    /// Screen position (left, top, right, bottom) in physical pixels.
+    pub rect: (i32, i32, i32, i32),
+}
+
+/// Every visible ghost window with the process behind it. Reads window state only; sends no
+/// window message, so a hung window can't block it.
+pub fn ghost_windows() -> Vec<GhostWindow> {
+    let mut out: Vec<GhostWindow> = Vec::new();
+    unsafe extern "system" fn visit_ghost(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: lparam is the `&mut Vec<GhostWindow>` passed below for the synchronous enumeration.
+        let out = unsafe { &mut *(lparam.0 as *mut Vec<GhostWindow>) };
+        // SAFETY: read-only queries (no window messages) on a handle supplied by EnumWindows.
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return true.into();
+            }
+            let mut class = [0u16; 64];
+            let class_len = GetClassNameW(hwnd, &mut class).max(0) as usize;
+            if !is_ghost_class(&class[..class_len]) {
+                return true.into();
+            }
+            let Some(f) = hung_window_from_ghost_window() else { return true.into() };
+            let original = f(hwnd);
+            if original.is_invalid() {
+                return true.into();
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(original, Some(&mut pid));
+            if let (true, Some(rect)) = (pid != 0, window_rect(hwnd)) {
+                out.push(GhostWindow { hwnd: hwnd.0 as isize, pid, rect });
+            }
+        }
+        true.into()
+    }
+    // SAFETY: `out` outlives the synchronous EnumWindows call that receives its address.
+    let _ = unsafe { EnumWindows(Some(visit_ghost), LPARAM(&mut out as *mut Vec<GhostWindow> as isize)) };
+    out
+}
+
+/// Where a ghost window is now, or `None` once it is gone or hidden (the app recovered).
+pub fn ghost_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    let hwnd = HWND(hwnd as *mut std::ffi::c_void);
+    // SAFETY: IsWindow/IsWindowVisible only read window state; they accept any handle value.
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
+            return None;
+        }
+    }
+    window_rect(hwnd)
+}
+
+fn window_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
+    let mut r = RECT::default();
+    // SAFETY: GetWindowRect writes one RECT to the writable local passed.
+    unsafe { GetWindowRect(hwnd, &mut r) }.ok()?;
+    Some((r.left, r.top, r.right, r.bottom))
 }
 
 /// Reads the window's stored title without sending any window message.

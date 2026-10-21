@@ -215,6 +215,7 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-keep-in-tray: true;
     in-out property <bool> settings-smooth-graphs: true;
     in-out property <bool> settings-hang-prompt: true;
+    in-out property <bool> settings-hang-overlay: false;
     in-out property <bool> settings-group-by-type: true;
     in-out property <bool> settings-tray-cpu: true;
     in-out property <bool> settings-gpu-rendering: true;
@@ -230,6 +231,7 @@ export component MainWindow inherits Window {
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
     callback hang-prompt-toggled(bool);
+    callback hang-overlay-toggled(bool);
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback gpu-rendering-toggled(bool);
@@ -482,6 +484,7 @@ export component MainWindow inherits Window {
                         keep-in-tray: root.settings-keep-in-tray;
                         smooth-graphs: root.settings-smooth-graphs;
                         hang-prompt: root.settings-hang-prompt;
+                        hang-overlay: root.settings-hang-overlay;
                         group-by-type: root.settings-group-by-type;
                         tray-cpu: root.settings-tray-cpu;
                         gpu-rendering: root.settings-gpu-rendering;
@@ -506,6 +509,7 @@ export component MainWindow inherits Window {
                         tray-toggled(on) => { root.tray-toggled(on); }
                         smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
                         hang-prompt-toggled(on) => { root.hang-prompt-toggled(on); }
+                        hang-overlay-toggled(on) => { root.hang-overlay-toggled(on); }
                         group-by-type-toggled(on) => { root.group-by-type-toggled(on); }
                         tray-cpu-toggled(on) => { root.tray-cpu-toggled(on); }
                         gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }

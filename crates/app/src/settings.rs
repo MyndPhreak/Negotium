@@ -60,6 +60,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// Offer to end an app whose window has stopped responding (crate::hangprompt).
     pub hang_prompt: bool,
+    /// Experimental: draw the prompt as a strip over the hung window's title bar instead of in the corner.
+    pub hang_overlay: bool,
     /// Image names (lowercase) the user chose "Don't ask for this app" for.
     pub hang_ignored: Vec<String>,
     /// Negotium starts when the user signs in. Whether the Run value or logon task exists is read
@@ -93,6 +95,7 @@ impl Default for Settings {
             group_by_type: true,
             check_updates: true,
             hang_prompt: true,
+            hang_overlay: false,
             hang_ignored: Vec::new(),
             start_with_windows: false,
             col_pid: false,
@@ -263,6 +266,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(group_by_type);
     field!(check_updates);
     field!(hang_prompt);
+    field!(hang_overlay);
     field!(hang_ignored);
     field!(start_with_windows);
     field!(col_pid);
