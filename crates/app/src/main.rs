@@ -19,6 +19,27 @@ struct ActiveAffinityTarget {
     /// The image name a remembered rule is saved under (view::Target::process_name).
     process_name: String,
     procs: Vec<(u32, i64)>,
+    /// Quick-select chips shown in the dialog, in display order.
+    presets: Vec<negotium_collector::cpulayout::Preset>,
+}
+
+/// Mask of the cores currently ticked in the affinity dialog.
+fn affinity_checked_mask(model: &slint::ModelRc<negotium::CoreItem>) -> u64 {
+    (0..model.row_count())
+        .filter_map(|i| model.row_data(i))
+        .filter(|c| c.checked)
+        .fold(0, |m, c| m | (1u64 << c.id as u64))
+}
+
+/// Re-derives which chip is lit and whether Apply is allowed after the ticked cores change.
+fn refresh_affinity_chips(ui: &MainWindow, presets: &[negotium_collector::cpulayout::Preset]) {
+    let mask = affinity_checked_mask(&ui.get_affinity_cores());
+    let chips = presets
+        .iter()
+        .map(|p| negotium::CorePreset { label: p.label.clone().into(), active: p.mask == mask })
+        .collect::<Vec<_>>();
+    ui.set_affinity_presets(slint::ModelRc::new(slint::VecModel::from(chips)));
+    ui.set_affinity_can_apply(mask != 0);
 }
 
 struct ActivePriorityTarget {
@@ -1048,36 +1069,52 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some((pid, ct)) = root_proc else { return; };
                 match negotium_actions::get_process_affinity(pid, ct) {
                     Ok((proc_mask, sys_mask)) => {
-                        let mut core_items = Vec::new();
-                        let mut all_checked = true;
-                        let mut any_checked = false;
-                        for i in 0..64 {
-                            if (sys_mask & (1u64 << i)) != 0 {
-                                let checked = (proc_mask & (1u64 << i)) != 0;
-                                if !checked {
-                                    all_checked = false;
-                                } else {
-                                    any_checked = true;
-                                }
-                                core_items.push(negotium::CoreItem {
-                                    id: i,
-                                    name: format!("CPU {i}").into(),
-                                    checked,
-                                });
-                            }
+                        use negotium_collector::cpulayout;
+                        let mut cpus = negotium_collector::sysinfo::logical_cpus();
+                        cpus.retain(|c| c.id < 64 && sys_mask & (1u64 << c.id) != 0);
+                        if cpus.is_empty() {
+                            // Topology unreadable: fall back to a plain list of the allowed cores.
+                            cpus = (0..64u32)
+                                .filter(|i| sys_mask & (1u64 << i) != 0)
+                                .map(|id| cpulayout::LogicalCpu { id, smt_sibling: false, efficiency_class: 0, l3_group: None, l3_bytes: 0 })
+                                .collect();
                         }
+                        let sections = cpulayout::sections(&cpus);
+                        let presets = cpulayout::presets(&cpus, &sections);
+                        let grid = cpulayout::grid(&sections);
+                        let smt = |id: u32| cpus.iter().any(|c| c.id == id && c.smt_sibling);
+                        let core_items = grid
+                            .cells
+                            .iter()
+                            .map(|c| negotium::CoreItem {
+                                id: c.id as i32,
+                                name: format!("CPU {}", c.id).into(),
+                                checked: proc_mask & (1u64 << c.id) != 0,
+                                row: c.row as i32,
+                                col: c.col as i32,
+                                smt: smt(c.id),
+                            })
+                            .collect::<Vec<_>>();
+                        let headers = grid
+                            .headers
+                            .iter()
+                            .map(|h| negotium::CoreHeader { label: h.label.clone().into(), row: h.row as i32 })
+                            .collect::<Vec<_>>();
+                        let grid_rows = grid.rows as i32;
                         let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.affinity_mask.is_some());
                         *active_affinity.lock().unwrap() = Some(ActiveAffinityTarget {
                             name: target.name.clone(),
                             process_name: target.process_name.clone(),
                             procs: target.procs.clone(),
+                            presets: presets.clone(),
                         });
                         if let Some(ui) = weak.upgrade() {
                             ui.set_affinity_title(format!("Set CPU Affinity - {} (PID {})", target.name, pid).into());
                             ui.set_affinity_process_name(target.name.clone().into());
                             ui.set_affinity_cores(slint::ModelRc::new(slint::VecModel::from(core_items)));
-                            ui.set_affinity_all_cores(all_checked);
-                            ui.set_affinity_can_apply(any_checked);
+                            ui.set_affinity_headers(slint::ModelRc::new(slint::VecModel::from(headers)));
+                            ui.set_affinity_grid_rows(grid_rows);
+                            refresh_affinity_chips(&ui, &presets);
                             ui.set_affinity_remember(has_rule);
                             ui.set_affinity_visible(true);
                         }
@@ -1179,41 +1216,39 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let weak = weak.clone();
+        let active = active_affinity.clone();
         ui.on_affinity_toggle_core(move |core_id| {
             let Some(ui) = weak.upgrade() else { return };
             let model = ui.get_affinity_cores();
-            let mut all_checked = true;
-            let mut any_checked = false;
             for idx in 0..model.row_count() {
-                if let Some(mut item) = model.row_data(idx) {
-                    if item.id == core_id {
-                        item.checked = !item.checked;
-                        model.set_row_data(idx, item.clone());
-                    }
-                    if item.checked {
-                        any_checked = true;
-                    } else {
-                        all_checked = false;
-                    }
+                if let Some(mut item) = model.row_data(idx)
+                    && item.id == core_id
+                {
+                    item.checked = !item.checked;
+                    model.set_row_data(idx, item);
                 }
             }
-            ui.set_affinity_all_cores(all_checked);
-            ui.set_affinity_can_apply(any_checked);
+            if let Some(target) = active.lock().unwrap().as_ref() {
+                refresh_affinity_chips(&ui, &target.presets);
+            }
         });
     }
     {
         let weak = weak.clone();
-        ui.on_affinity_toggle_all(move |on| {
+        let active = active_affinity.clone();
+        ui.on_affinity_select_preset(move |index| {
             let Some(ui) = weak.upgrade() else { return };
+            let guard = active.lock().unwrap();
+            let Some(target) = guard.as_ref() else { return };
+            let Some(preset) = usize::try_from(index).ok().and_then(|i| target.presets.get(i)) else { return };
             let model = ui.get_affinity_cores();
             for idx in 0..model.row_count() {
                 if let Some(mut item) = model.row_data(idx) {
-                    item.checked = on;
+                    item.checked = preset.mask & (1u64 << item.id as u64) != 0;
                     model.set_row_data(idx, item);
                 }
             }
-            ui.set_affinity_all_cores(on);
-            ui.set_affinity_can_apply(on && model.row_count() > 0);
+            refresh_affinity_chips(&ui, &target.presets);
         });
     }
     {

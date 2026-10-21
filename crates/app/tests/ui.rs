@@ -4769,8 +4769,8 @@ fn cpu_affinity_and_priority_modals_toggle_and_report() {
     ui.set_affinity_title("Set CPU Affinity - test.exe (PID 100)".into());
     ui.set_affinity_process_name("test.exe".into());
     let cores = vec![
-        negotium::CoreItem { id: 0, name: "CPU 0".into(), checked: true },
-        negotium::CoreItem { id: 1, name: "CPU 1".into(), checked: true },
+        negotium::CoreItem { id: 0, name: "CPU 0".into(), checked: true, row: 0, col: 0, smt: false },
+        negotium::CoreItem { id: 1, name: "CPU 1".into(), checked: true, row: 0, col: 1, smt: true },
     ];
     ui.set_affinity_cores(slint::ModelRc::new(slint::VecModel::from(cores)));
     ui.set_affinity_visible(true);

@@ -173,6 +173,14 @@ fn raw_proc_info(rel: LOGICAL_PROCESSOR_RELATIONSHIP) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Per-logical-CPU topology (SMT, hybrid class, L3 group) for the affinity dialog; empty if unreadable.
+pub fn logical_cpus() -> Vec<crate::cpulayout::LogicalCpu> {
+    match (raw_proc_info(RelationProcessorCore), raw_proc_info(RelationCache)) {
+        (Some(cores), cache) => crate::cpulayout::parse_cpus(&cores, cache.as_deref().unwrap_or(&[])),
+        _ => Vec::new(),
+    }
+}
+
 pub fn cpu_topology() -> CpuTopology {
     let count_records = |rel: LOGICAL_PROCESSOR_RELATIONSHIP| -> Option<u32> {
         let buf = raw_proc_info(rel)?;

@@ -254,16 +254,31 @@ export struct CoreItem {
     id: int,
     name: string,
     checked: bool,
+    row: int,
+    col: int,
+    smt: bool,
+}
+
+export struct CoreHeader {
+    label: string,
+    row: int,
+}
+
+export struct CorePreset {
+    label: string,
+    active: bool,
 }
 
 export component CpuAffinityModal inherits Rectangle {
     in property <string> title: "Set CPU Affinity";
     in property <string> process-name: "";
     in-out property <[CoreItem]> cores: [];
-    in-out property <bool> all-cores: true;
+    in property <[CoreHeader]> headers: [];
+    in property <[CorePreset]> presets: [];
+    in property <int> grid-rows: 0;
     in-out property <bool> remember: false;
     callback toggle-core(int);
-    callback toggle-all(bool);
+    callback select-preset(int);
     callback apply(bool);
     callback cancel();
 
@@ -285,7 +300,7 @@ export component CpuAffinityModal inherits Rectangle {
         }
     }
     Rectangle {
-        width: min(parent.width - 48px, 480px);
+        width: min(parent.width - 48px, 500px);
         height: layout.preferred-height;
         border-radius: Theme.radius;
         background: Theme.dark ? #2b2b2b : #ffffff;
@@ -307,73 +322,78 @@ export component CpuAffinityModal inherits Rectangle {
                 wrap: word-wrap;
             }
 
-            // All Processors row
-            Rectangle {
-                height: 38px;
-                border-radius: 4px;
-                background: Theme.card;
-                border-width: 1px;
-                border-color: Theme.card-border;
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 8px;
-                    Text {
-                        text: "<All Processors>";
-                        color: Theme.text;
-                        font-size: 13px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+            // Quick-select chips: All, one per CCD / core class, physical cores only
+            HorizontalLayout {
+                alignment: start;
+                spacing: 6px;
+                for preset[i] in root.presets : Rectangle {
+                    height: 28px;
+                    width: chip-label.preferred-width + 24px;
+                    border-radius: 14px;
+                    background: preset.active ? Theme.accent : (chip-touch.has-hover ? Theme.text.with-alpha(0.1) : Theme.card);
+                    border-width: 1px;
+                    border-color: preset.active ? Theme.accent : Theme.card-border;
+                    chip-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.select-preset(i); }
                     }
-                    Toggle {
-                        checked: root.all-cores;
-                        toggled(on) => {
-                            root.toggle-all(on);
-                        }
+                    chip-label := Text {
+                        text: preset.label;
+                        color: preset.active ? #ffffff : Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
                     }
                 }
             }
 
-            // Cores list
+            // Core grid
             Rectangle {
                 border-radius: 4px;
                 background: Theme.card;
                 border-width: 1px;
                 border-color: Theme.card-border;
+                height: min(root.grid-rows * 38px + 16px, 280px);
                 ScrollView {
-                    max-height: 200px;
-                    VerticalLayout {
-                        padding: 6px;
-                        spacing: 2px;
-                        for core[i] in root.cores : Rectangle {
-                            height: 30px;
-                            border-radius: 4px;
-                            background: core-touch.has-hover ? Theme.text.with-alpha(0.06) : transparent;
-                            core-touch := TouchArea {
-                                clicked => {
-                                    root.toggle-core(core.id);
-                                }
-                            }
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                spacing: 8px;
-                                Text {
-                                    text: core.checked ? "☑" : "☐";
-                                    color: core.checked ? Theme.accent : Theme.muted;
-                                    font-size: 14px;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: core.name;
-                                    color: Theme.text;
-                                    font-size: 12px;
-                                    font-weight: core.checked ? 600 : 400;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                            }
+                    content-height: root.grid-rows * 38px + 16px;
+                    for header in root.headers : Text {
+                        x: 8px;
+                        y: 8px + header.row * 38px;
+                        height: 34px;
+                        text: header.label;
+                        color: Theme.muted;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    for core in root.cores : Rectangle {
+                        x: 8px + core.col * 56px;
+                        y: 8px + core.row * 38px;
+                        width: 52px;
+                        height: 34px;
+                        border-radius: 4px;
+                        background: core.checked ? Theme.accent.with-alpha(0.9) : (core-touch.has-hover ? Theme.text.with-alpha(0.1) : Theme.text.with-alpha(0.04));
+                        border-width: 1px;
+                        border-color: core.checked ? Theme.accent : Theme.card-border;
+                        core-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-core(core.id); }
+                        }
+                        Text {
+                            text: core.name;
+                            color: core.checked ? #ffffff : Theme.text;
+                            font-size: 12px;
+                            font-weight: core.checked ? 600 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        // Marks the second hardware thread of a core.
+                        if core.smt : Text {
+                            x: parent.width - self.width - 4px;
+                            y: 1px;
+                            text: "T";
+                            font-size: 8px;
+                            color: core.checked ? #ffffffcc : Theme.muted;
                         }
                     }
                 }

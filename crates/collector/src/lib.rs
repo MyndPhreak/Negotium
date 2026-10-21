@@ -7,6 +7,7 @@ pub mod net;
 pub mod netetw;
 pub mod pdh;
 pub mod processes;
+pub mod cpulayout;
 pub mod sysinfo;
 
 pub use identity::{Identity, IdentityCache, VersionInfo, version_string};
