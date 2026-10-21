@@ -319,6 +319,8 @@ component RowMenu inherits Rectangle {
             MenuItem { title: "End task"; enabled: root.actionable; activated => { root.action("end-task"); } }
             MenuItem { title: "End process tree"; enabled: root.actionable; activated => { root.action("end-tree"); } }
             MenuItem { title: "Efficiency mode"; enabled: root.actionable; activated => { root.action("efficiency"); } }
+            MenuItem { title: "Suspend"; enabled: root.actionable; activated => { root.action("suspend"); } }
+            MenuItem { title: "Resume"; enabled: root.actionable; activated => { root.action("resume"); } }
             MenuSeparator { }
             MenuItem { title: "Set CPU affinity..."; enabled: root.actionable; activated => { root.action("set-affinity"); } }
             MenuItem { title: "Set CPU priority..."; enabled: root.actionable; activated => { root.action("set-priority"); } }

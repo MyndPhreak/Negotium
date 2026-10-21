@@ -1,7 +1,7 @@
 //! Turns a row action into a job (pure), and runs jobs on action threads.
 use crate::view::Target;
 use negotium_actions::{
-    ActionError, end_many, force_close, open_file_location, process_details, toggle_efficiency_mode,
+    ActionError, end_many, force_close, open_file_location, process_details, set_suspended, toggle_efficiency_mode,
 };
 use negotium_model::descendants_deepest_first;
 
@@ -10,6 +10,8 @@ pub enum JobKind {
     EndMany,
     ForceClose,
     Efficiency,
+    Suspend,
+    Resume,
     OpenLocation,
     Details,
 }
@@ -56,6 +58,8 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
             None => return Plan::Nothing,
         },
         "efficiency" => job(JobKind::Efficiency, t.procs.clone()),
+        "suspend" => job(JobKind::Suspend, t.procs.clone()),
+        "resume" => job(JobKind::Resume, t.procs.clone()),
         "open-location" if t.image_path.is_some() => job(JobKind::OpenLocation, vec![]),
         "details" => match first {
             Some(p) => job(JobKind::Details, vec![p]),
@@ -63,9 +67,10 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
         },
         _ => return Plan::Nothing,
     };
-    if t.critical && matches!(planned.kind, JobKind::EndMany | JobKind::ForceClose) {
+    if t.critical && matches!(planned.kind, JobKind::EndMany | JobKind::ForceClose | JobKind::Suspend) {
+        let verb = if planned.kind == JobKind::Suspend { "Suspending" } else { "Ending" };
         let text = format!(
-            "Ending {} will make Windows unusable or shut it down, and unsaved work in every app will be lost.",
+            "{verb} {} will make Windows unusable or shut it down, and unsaved work in every app will be lost.",
             t.name
         );
         return Plan::Confirm(text, planned);
@@ -114,6 +119,14 @@ pub fn run(job: Job, elevated: bool) -> String {
         JobKind::Efficiency => match toggle_efficiency_mode(&job.targets) {
             Ok(true) => format!("Efficiency mode on for {}.", job.name),
             Ok(false) => format!("Efficiency mode off for {}.", job.name),
+            Err(e) => fail(e),
+        },
+        JobKind::Suspend => match set_suspended(&job.targets, true) {
+            Ok(()) => format!("Suspended {}. Resume it from the same menu.", job.name),
+            Err(e) => fail(e),
+        },
+        JobKind::Resume => match set_suspended(&job.targets, false) {
+            Ok(()) => format!("Resumed {}.", job.name),
             Err(e) => fail(e),
         },
         JobKind::OpenLocation => match job.path.as_deref().map(open_file_location) {
@@ -181,9 +194,18 @@ mod tests {
         let mut t = target(true);
         t.group = true;
         t.root = None;
-        for action in ["end-task", "end-tree", "force-close", "efficiency", "open-location", "details"] {
+        for action in ["end-task", "end-tree", "force-close", "efficiency", "suspend", "resume", "open-location", "details"] {
             assert_eq!(plan(action, &t, ALL), Plan::Nothing, "{action}");
         }
+    }
+
+    #[test]
+    fn suspend_and_resume_cover_every_process_and_critical_suspend_asks_first() {
+        let Plan::Run(job) = plan("suspend", &target(false), ALL) else { panic!() };
+        assert_eq!((job.kind, job.targets.len()), (JobKind::Suspend, 3));
+        let Plan::Run(job) = plan("resume", &target(true), ALL) else { panic!() };
+        assert_eq!(job.kind, JobKind::Resume);
+        assert!(matches!(plan("suspend", &target(true), ALL), Plan::Confirm(_, job) if job.kind == JobKind::Suspend));
     }
 
     #[test]

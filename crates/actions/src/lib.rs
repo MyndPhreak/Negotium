@@ -11,6 +11,7 @@ mod priority;
 pub mod runtask;
 pub mod services;
 pub mod startup;
+mod suspend;
 mod terminate;
 
 pub use affinity::{get_process_affinity, set_process_affinity, set_process_cpu_sets};
@@ -23,6 +24,7 @@ pub use elevation::{
 };
 pub use location::open_file_location;
 pub use priority::{PriorityClass, get_priority_class, set_priority_class};
+pub use suspend::{resume_process, set_suspended, suspend_process};
 pub use terminate::{end_many, end_process};
 
 use std::ffi::c_void;
