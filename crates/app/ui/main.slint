@@ -213,6 +213,8 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-smooth-graphs: true;
     in-out property <bool> settings-group-by-type: true;
     in-out property <bool> settings-tray-cpu: true;
+    in-out property <bool> settings-picker-shortcut;
+    in-out property <bool> settings-shortcut-taken;
     in-out property <bool> settings-gpu-rendering: true;
     in-out property <bool> settings-gpu-fallback;
     in property <bool> settings-gpu-running: true;
@@ -227,6 +229,7 @@ export component MainWindow inherits Window {
     callback smooth-graphs-toggled(bool);
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
+    callback picker-shortcut-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // Installed copy, integration and updates (crate::install, crate::settingspage::show_install).
     // Admin mode: 0 off, 1 on, 2 needs repair, 3 not available on this account.
@@ -478,6 +481,8 @@ export component MainWindow inherits Window {
                         smooth-graphs: root.settings-smooth-graphs;
                         group-by-type: root.settings-group-by-type;
                         tray-cpu: root.settings-tray-cpu;
+                        picker-shortcut: root.settings-picker-shortcut;
+                        shortcut-taken: root.settings-shortcut-taken;
                         gpu-rendering: root.settings-gpu-rendering;
                         gpu-fallback: root.settings-gpu-fallback;
                         gpu-running: root.settings-gpu-running;
@@ -501,6 +506,7 @@ export component MainWindow inherits Window {
                         smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
                         group-by-type-toggled(on) => { root.group-by-type-toggled(on); }
                         tray-cpu-toggled(on) => { root.tray-cpu-toggled(on); }
+                        picker-shortcut-toggled(on) => { root.picker-shortcut-toggled(on); }
                         gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
                         admin-mode-toggled(on) => { root.admin-mode-toggled(on); }
                         hotkey-toggled(on) => { root.hotkey-toggled(on); }

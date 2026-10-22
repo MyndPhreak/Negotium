@@ -12,8 +12,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GW_OWNER, GetClassNameW, GetShellWindow, GetWindow, GetWindowRect,
-    GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
+    EnumWindows, FindWindowExW, FindWindowW, GWL_EXSTYLE, GetClassNameW, GetShellWindow, GetWindowRect,
+    GetWindowLongPtrW, GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, WS_EX_TRANSPARENT,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
@@ -30,8 +31,8 @@ pub struct Monitor {
     pub dpi: u32,
 }
 
-/// Unowned top-level windows, top of the z-order first. Visible, cloaked and minimised
-/// windows are all listed; `classify` filters them.
+/// Top-level windows, owned ones included, top of the z-order first. Visible, cloaked and
+/// minimised windows are all listed; `classify` filters them.
 pub fn top_level_windows() -> Vec<WindowInfo> {
     let mut out: Vec<WindowInfo> = Vec::with_capacity(64);
     // SAFETY: `out` outlives the synchronous EnumWindows call that receives its address.
@@ -50,19 +51,17 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
-/// Reads one window. `None` for owned windows and for a `Ghost` whose original is unknown.
+/// Reads one window, with its own process id (an owned window may belong to another process
+/// than its owner). `None` for a `Ghost` whose original is unknown.
 ///
 /// # Safety
 /// `hwnd` must be a window handle from EnumWindows. Every call below reads state cached by
 /// user32 or DWM: `InternalGetWindowText` (not `GetWindowText`), `GetClassNameW`,
-/// `IsHungAppWindow`, `IsIconic`, `DwmGetWindowAttribute`, `FindWindowExW`. None sends a
-/// window message, so none can block on a hung window, even one in this process.
+/// `IsHungAppWindow`, `IsIconic`, `DwmGetWindowAttribute`, `FindWindowExW`, `GetWindowLongPtrW`.
+/// None sends a window message, so none can block on a hung window, even one in this process.
 unsafe fn window_info(hwnd: HWND) -> Option<WindowInfo> {
     // SAFETY: see the function contract.
     unsafe {
-        if GetWindow(hwnd, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
-            return None;
-        }
         let class = class_name(hwnd);
         // A ghost is reported with the original window's pid and as hung; its frame is its own.
         let (mut source, hung) = if class == GHOST_CLASS {
@@ -96,6 +95,7 @@ unsafe fn window_info(hwnd: HWND) -> Option<WindowInfo> {
             minimized: IsIconic(hwnd).as_bool(),
             hung,
             uwp_unresolved,
+            click_through: GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0 != 0,
         })
     }
 }
@@ -282,13 +282,43 @@ mod tests {
     }
 
     #[test]
-    fn owned_windows_are_not_listed() {
+    fn owned_windows_are_listed_above_their_owner() {
         let owner = make(w!("negotium-picker-owner"), None, 100);
         let owned = make(w!("negotium-picker-owned"), Some(owner), 120);
         let list = top_level_windows();
         destroy(&[owned, owner]);
-        assert!(find(&list, owner).is_some());
-        assert!(find(&list, owned).is_none());
+        let owned_at = find(&list, owned).expect("owned listed");
+        assert!(owned_at < find(&list, owner).expect("owner listed"));
+        assert_eq!(list[owned_at].title, "negotium-picker-owned");
+        assert_eq!(list[owned_at].pid, std::process::id());
+    }
+
+    #[test]
+    fn a_click_through_window_is_marked() {
+        use windows::Win32::UI::WindowsAndMessaging::WS_EX_LAYERED;
+        // SAFETY: plain window creation with a system class; destroyed below.
+        let through = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                w!("STATIC"),
+                w!("negotium-picker-through"),
+                WS_OVERLAPPED | WS_VISIBLE,
+                100,
+                100,
+                200,
+                150,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("create test window");
+        let plain = make(w!("negotium-picker-plain"), None, 120);
+        let list = top_level_windows();
+        destroy(&[through, plain]);
+        assert!(list[find(&list, through).expect("listed")].click_through);
+        assert!(!list[find(&list, plain).expect("listed")].click_through);
     }
 
     #[test]

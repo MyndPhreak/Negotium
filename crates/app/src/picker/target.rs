@@ -38,6 +38,8 @@ pub struct WindowInfo {
     pub hung: bool,
     /// `ApplicationFrameWindow` with no `CoreWindow` child.
     pub uwp_unresolved: bool,
+    /// `WS_EX_TRANSPARENT`: mouse input goes through it (game, GPU and recording overlays).
+    pub click_through: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +47,11 @@ pub enum Pickable {
     App,
     ExplorerInShell,
     Shell,
-    Skip,
+    /// Looked through: an overlay, a click-through window, or a window that is not on screen.
+    PassThrough,
+    /// On screen but not a target (no title, Negotium's own, unresolved UWP frame): it hides
+    /// what is below it, so nothing is picked.
+    Block,
 }
 
 pub struct Env {
@@ -55,18 +61,15 @@ pub struct Env {
 }
 
 pub fn classify(w: &WindowInfo, env: &Env) -> Pickable {
-    if env.overlays.contains(&w.hwnd)
-        || !w.visible
-        || w.cloaked
-        || w.minimized
-        || w.title.is_empty()
-        || w.uwp_unresolved
-        || w.pid == env.own_pid
-    {
-        return Pickable::Skip;
+    if env.overlays.contains(&w.hwnd) || w.click_through || !w.visible || w.cloaked || w.minimized {
+        return Pickable::PassThrough;
     }
+    // Before the title rule: the taskbars have no title.
     if SHELL_CLASSES.contains(&w.class.as_str()) {
         return Pickable::Shell;
+    }
+    if w.title.is_empty() || w.uwp_unresolved || w.pid == env.own_pid {
+        return Pickable::Block;
     }
     if env.shell_pid == Some(w.pid) {
         return if w.class == FOLDER_CLASS { Pickable::ExplorerInShell } else { Pickable::Shell };
@@ -74,8 +77,9 @@ pub fn classify(w: &WindowInfo, env: &Env) -> Pickable {
     Pickable::App
 }
 
-/// `windows` in z-order, top first. Returns the first window whose frame contains `pt` and is
-/// not `Skip`; overlays are ignored.
+/// `windows` in z-order, top first. Looks through overlays and windows not on screen; the first
+/// other window whose frame contains `pt` decides: its kind, or `None` when it is `Block`.
+/// Never returns `PassThrough` or `Block`.
 pub fn pick_at<'a>(
     windows: &'a [WindowInfo],
     pt: (i32, i32),
@@ -85,7 +89,8 @@ pub fn pick_at<'a>(
         .iter()
         .filter(|w| w.frame.contains(pt))
         .map(|w| (w, classify(w, env)))
-        .find(|(_, p)| *p != Pickable::Skip)
+        .find(|(_, p)| *p != Pickable::PassThrough)
+        .filter(|(_, p)| *p != Pickable::Block)
 }
 
 #[cfg(test)]
@@ -109,6 +114,7 @@ mod tests {
             minimized: false,
             hung: false,
             uwp_unresolved: false,
+            click_through: false,
         }
     }
 
@@ -129,14 +135,15 @@ mod tests {
         let f = rect(0, 0, 10, 10);
         let base = || app(1, f);
         let rows: Vec<(&str, WindowInfo, Pickable)> = vec![
-            ("overlay", WindowInfo { hwnd: 99, ..base() }, Pickable::Skip),
-            ("invisible", WindowInfo { visible: false, ..base() }, Pickable::Skip),
-            ("cloaked", WindowInfo { cloaked: true, ..base() }, Pickable::Skip),
-            ("minimized", WindowInfo { minimized: true, ..base() }, Pickable::Skip),
-            ("empty title", WindowInfo { title: String::new(), ..base() }, Pickable::Skip),
-            ("uwp unresolved", WindowInfo { uwp_unresolved: true, ..base() }, Pickable::Skip),
-            ("own pid", WindowInfo { pid: OWN, ..base() }, Pickable::Skip),
+            ("overlay", WindowInfo { hwnd: 99, ..base() }, Pickable::PassThrough),
+            ("invisible", WindowInfo { visible: false, ..base() }, Pickable::PassThrough),
+            ("cloaked", WindowInfo { cloaked: true, ..base() }, Pickable::PassThrough),
+            ("minimized", WindowInfo { minimized: true, ..base() }, Pickable::PassThrough),
+            ("empty title", WindowInfo { title: String::new(), ..base() }, Pickable::Block),
+            ("uwp unresolved", WindowInfo { uwp_unresolved: true, ..base() }, Pickable::Block),
+            ("own pid", WindowInfo { pid: OWN, ..base() }, Pickable::Block),
             ("shell class", win(1, OTHER, "Shell_TrayWnd", f), Pickable::Shell),
+            ("untitled shell class", WindowInfo { title: String::new(), ..win(1, SHELL, "Shell_TrayWnd", f) }, Pickable::Shell),
             ("explorer in shell", win(1, SHELL, "CabinetWClass", f), Pickable::ExplorerInShell),
             ("other shell window", win(1, SHELL, "Notepad", f), Pickable::Shell),
             ("plain app", base(), Pickable::App),
@@ -158,7 +165,74 @@ mod tests {
     }
 
     #[test]
-    fn pick_at_ignores_skipped_windows_above() {
+    fn an_untitled_taskbar_above_an_app_is_the_shell() {
+        let mut taskbar = win(5, SHELL, "Shell_TrayWnd", rect(0, 0, 100, 100));
+        taskbar.title = String::new();
+        let mut second = win(6, SHELL, "Shell_SecondaryTrayWnd", rect(0, 0, 100, 100));
+        second.title = String::new();
+        for bar in [taskbar, second] {
+            let ws = [bar.clone(), app(2, rect(0, 0, 100, 100))];
+            let (w, p) = pick_at(&ws, (50, 50), &env()).unwrap();
+            assert_eq!((w.hwnd, p), (bar.hwnd, Pickable::Shell), "{}", bar.class);
+        }
+    }
+
+    #[test]
+    fn negotiums_own_window_above_an_app_picks_nothing() {
+        let own = win(3, OWN, "Window", rect(0, 0, 100, 100));
+        let ws = [own, app(2, rect(0, 0, 100, 100))];
+        assert!(pick_at(&ws, (50, 50), &env()).is_none());
+    }
+
+    #[test]
+    fn an_untitled_window_above_an_app_picks_nothing() {
+        let mut untitled = app(3, rect(0, 0, 100, 100));
+        untitled.title = String::new();
+        let ws = [untitled, app(2, rect(0, 0, 100, 100))];
+        assert!(pick_at(&ws, (50, 50), &env()).is_none());
+    }
+
+    #[test]
+    fn an_unresolved_uwp_frame_above_an_app_picks_nothing() {
+        let mut frame = win(3, OTHER, "ApplicationFrameWindow", rect(0, 0, 100, 100));
+        frame.uwp_unresolved = true;
+        let ws = [frame, app(2, rect(0, 0, 100, 100))];
+        assert!(pick_at(&ws, (50, 50), &env()).is_none());
+    }
+
+    #[test]
+    fn hidden_windows_and_overlays_above_an_app_are_looked_through() {
+        let f = rect(0, 0, 100, 100);
+        let above = [
+            WindowInfo { cloaked: true, ..app(3, f) },
+            WindowInfo { visible: false, ..app(3, f) },
+            WindowInfo { minimized: true, ..app(3, f) },
+            app(99, f),
+        ];
+        for a in above {
+            let ws = [a.clone(), app(2, f)];
+            let (w, p) = pick_at(&ws, (50, 50), &env()).unwrap();
+            assert_eq!((w.hwnd, p), (2, Pickable::App), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn a_click_through_window_above_an_app_is_looked_through() {
+        let overlay = WindowInfo { click_through: true, ..app(3, rect(0, 0, 100, 100)) };
+        let ws = [overlay, app(2, rect(0, 0, 100, 100))];
+        let (w, p) = pick_at(&ws, (50, 50), &env()).unwrap();
+        assert_eq!((w.hwnd, p), (2, Pickable::App));
+    }
+
+    #[test]
+    fn a_hidden_untitled_window_is_looked_through() {
+        let hidden = WindowInfo { visible: false, title: String::new(), ..app(3, rect(0, 0, 100, 100)) };
+        let ws = [hidden, app(2, rect(0, 0, 100, 100))];
+        assert_eq!(pick_at(&ws, (50, 50), &env()).unwrap().0.hwnd, 2);
+    }
+
+    #[test]
+    fn pick_at_looks_through_overlays_and_cloaked_windows() {
         let mut cloaked = app(1, rect(0, 0, 100, 100));
         cloaked.cloaked = true;
         let overlay = app(99, rect(0, 0, 100, 100));

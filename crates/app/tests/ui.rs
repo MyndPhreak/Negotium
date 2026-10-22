@@ -2044,6 +2044,48 @@ fn later_version_settings_are_shown_disabled() {
     assert_eq!(switch(&ui, "Always on top").computed_opacity(), 1.0, "an offered switch is not");
 }
 
+const PICKER_TITLE: &str = "Pick a window to end on Ctrl+Alt+Shift+Esc";
+const PICKER_TEXT: &str = "Press the keys, then click a window to end its app. Shift+click ends it with no question.";
+const PICKER_TAKEN: &str = "Another program uses Ctrl+Alt+Shift+Esc";
+
+#[test]
+fn picker_row_is_shown_in_a_dev_build() {
+    let ui = settings_window(1000, 1900);
+    negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "target\\release\\negotium.exe".into(), installed: false });
+    let s = switch(&ui, PICKER_TITLE);
+    assert_eq!(s.accessible_enabled(), Some(true), "no installed gate");
+    assert_eq!(s.accessible_checked(), Some(false), "off by default");
+    assert_eq!(s.accessible_description().as_deref(), Some(PICKER_TEXT));
+    ui.set_settings_picker_shortcut(true);
+    assert_eq!(switch(&ui, PICKER_TITLE).accessible_checked(), Some(true));
+}
+
+#[test]
+fn picker_row_shows_the_taken_text() {
+    let ui = settings_window(1000, 1900);
+    ui.set_settings_picker_shortcut(true);
+    ui.set_settings_shortcut_taken(true);
+    assert_eq!(switch(&ui, PICKER_TITLE).accessible_description().as_deref(), Some(PICKER_TAKEN));
+}
+
+#[test]
+fn the_picker_switch_saves_even_when_the_keys_are_taken() {
+    let dir = Scratch::new("pickershortcut");
+    let path = dir.0.join("settings.json");
+    SHORTCUT_TOLD.with(|t| t.borrow_mut().clear());
+    SHORTCUT_FREE.with(|f| f.set(false));
+    let (ui, _controls, settings) = settings_wired_with(&dir, Settings::default(), false, Renderer::Software);
+    ui.invoke_picker_shortcut_toggled(true);
+    assert!(settings.borrow().picker_shortcut, "the choice is kept (spec goal 4)");
+    saved(&path, "picker shortcut on", |s| s.picker_shortcut);
+    assert_eq!(SHORTCUT_TOLD.with(|t| t.borrow().clone()), vec![true]);
+    assert!(ui.get_settings_shortcut_taken(), "taken: on and not registered");
+    SHORTCUT_FREE.with(|f| f.set(true));
+    ui.invoke_picker_shortcut_toggled(false);
+    assert!(!ui.get_settings_shortcut_taken());
+    saved(&path, "picker shortcut off", |s| !s.picker_shortcut);
+}
+
 const INSTALL_ROWS: [&str; 4] = ["Admin mode", "Open on Ctrl+Shift+Esc", "Start with Windows", "Check for updates on startup"];
 
 #[test]
@@ -2198,6 +2240,12 @@ fn saved(path: &std::path::Path, what: &str, f: impl Fn(&Settings) -> bool) {
 }
 
 thread_local! {
+    /// What the Settings page told the picker shortcut, and whether its keys are free, per test thread.
+    static SHORTCUT_TOLD: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    static SHORTCUT_FREE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+thread_local! {
     /// What the Settings page told the tray (`SettingsWiring::tray_cpu_changed`), per test thread.
     static TRAY_TOLD: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
 }
@@ -2240,6 +2288,10 @@ fn settings_wired_integrated(
         fallback_recorded: fallback,
         running,
         tray_cpu_changed: Rc::new(|on| TRAY_TOLD.with(|t| t.borrow_mut().push(on))),
+        picker_shortcut_changed: Rc::new(|on| {
+            SHORTCUT_TOLD.with(|t| t.borrow_mut().push(on));
+            SHORTCUT_FREE.with(|f| f.get())
+        }),
         integration,
     }
     .install(&ui);
@@ -3180,7 +3232,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 16, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 17, "the titles are still drawn");
 }
 
 #[test]

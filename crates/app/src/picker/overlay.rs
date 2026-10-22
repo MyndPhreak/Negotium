@@ -22,16 +22,17 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Controls::{
     TASKDIALOG_BUTTON, TASKDIALOG_COMMON_BUTTON_FLAGS, TASKDIALOG_FLAGS, TASKDIALOGCONFIG, TD_WARNING_ICON,
-    TDCBF_CANCEL_BUTTON, TDCBF_CLOSE_BUTTON, TDF_POSITION_RELATIVE_TO_WINDOW,
+    TASKDIALOG_NOTIFICATIONS, TDCBF_CANCEL_BUTTON, TDN_CREATED, TDCBF_CLOSE_BUTTON, TDF_POSITION_RELATIVE_TO_WINDOW,
 };
 use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, IDC_CROSS, IDCANCEL, IDOK,
-    LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MESSAGEBOX_STYLE, MessageBoxW, RegisterClassExW,
-    SW_SHOWNA, SetCursor, SetForegroundWindow, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_ACTIVATEAPP,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, HWND_TOPMOST, IDC_CROSS,
+    IDCANCEL, IDOK, LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MB_TOPMOST,
+    MESSAGEBOX_STYLE, MessageBoxW, RegisterClassExW, SW_SHOWNA, SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetForegroundWindow,
+    SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_ACTIVATEAPP,
     WM_DISPLAYCHANGE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WNDCLASSEXW,
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -363,22 +364,60 @@ impl Drop for DpiGuard {
 pub fn confirm(owner: isize, title: &str, body: &str) -> bool {
     let end = wide("End");
     let buttons = [TASKDIALOG_BUTTON { nButtonID: IDOK.0, pszButtonText: PCWSTR(end.as_ptr()) }];
-    match task_dialog(Some(owner), title, body, &buttons, TDCBF_CANCEL_BUTTON, IDCANCEL.0, TD_WARNING_ICON) {
-        Some(pressed) => pressed == IDOK.0,
-        None => message_box(Some(owner), title, body, MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING) == IDOK.0,
+    let shown = task_dialog(Some(owner), title, body, &buttons, TDCBF_CANCEL_BUTTON, IDCANCEL.0, TD_WARNING_ICON);
+    or_message_box(shown, || {
+        message_box(Some(owner), title, body, message_box_style(Some(owner), MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING))
+    }) == Some(IDOK.0)
+}
+
+/// Shows `text` with a Close button only; above `owner` when given, else topmost and in the
+/// foreground (nothing of Negotium's may be on screen). Any thread.
+pub fn tell(owner: Option<isize>, text: &str) {
+    let shown = task_dialog(owner, "", text, &[], TDCBF_CLOSE_BUTTON, 0, PCWSTR::null());
+    let _ = or_message_box(shown, || message_box(owner, "", text, message_box_style(owner, MB_OK)));
+}
+
+/// What a task dialog call came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shown {
+    Pressed(i32),
+    /// Shown or not, it failed (for example its owner was destroyed): nothing more is shown.
+    Failed,
+    /// comctl32 v6 is not there: a message box is shown instead.
+    Unavailable,
+}
+
+/// The pressed button. A message box (`fallback`) stands in only when the task dialog is not
+/// available; a task dialog that failed shows nothing, so no stray "End …?" box opens.
+fn or_message_box(shown: Shown, fallback: impl FnOnce() -> i32) -> Option<i32> {
+    match shown {
+        Shown::Pressed(p) => Some(p),
+        Shown::Failed => None,
+        Shown::Unavailable => Some(fallback()),
     }
 }
 
-/// Shows `text` with a Close button only; above `owner` when given. Any thread.
-pub fn tell(owner: Option<isize>, text: &str) {
-    if task_dialog(owner, "", text, &[], TDCBF_CLOSE_BUTTON, 0, PCWSTR::null()).is_none() {
-        message_box(owner, "", text, MB_OK);
+/// `style`, plus topmost and foreground when there is no owner to show the box above.
+fn message_box_style(owner: Option<isize>, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_STYLE {
+    if owner.is_some() { style } else { style | MB_TOPMOST | MB_SETFOREGROUND }
+}
+
+/// Task dialog callback for a dialog with no owner: on creation, puts it on top of every window
+/// and in the foreground, so a result shown after the overlays close is not hidden.
+unsafe extern "system" fn to_front(hwnd: HWND, msg: TASKDIALOG_NOTIFICATIONS, _: WPARAM, _: LPARAM, _: isize) -> HRESULT {
+    if msg == TDN_CREATED {
+        // SAFETY: `hwnd` is the task dialog comctl32 just created. Both calls only ask; a refusal
+        // (another app holds the foreground lock) leaves the dialog topmost, which is enough to see it.
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
+    HRESULT(0)
 }
 
 type TaskDialogIndirectFn = unsafe extern "system" fn(*const TASKDIALOGCONFIG, *mut i32, *mut i32, *mut BOOL) -> HRESULT;
 
-/// The pressed button, or `None` when the task dialog is not available or failed.
 fn task_dialog(
     owner: Option<isize>,
     instruction: &str,
@@ -387,8 +426,8 @@ fn task_dialog(
     common: TASKDIALOG_COMMON_BUTTON_FLAGS,
     default: i32,
     icon: PCWSTR,
-) -> Option<i32> {
-    let (ctx, func) = comctl6()?;
+) -> Shown {
+    let Some((ctx, func)) = comctl6() else { return Shown::Unavailable };
     let (instruction, content) = (wide(instruction), wide(content));
     let mut config = TASKDIALOGCONFIG {
         cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
@@ -401,6 +440,7 @@ fn task_dialog(
         cButtons: buttons.len() as u32,
         pButtons: buttons.as_ptr(),
         nDefaultButton: default,
+        pfCallback: if owner.is_none() { Some(to_front) } else { None },
         ..Default::default()
     };
     config.Anonymous1.pszMainIcon = icon;
@@ -409,12 +449,13 @@ fn task_dialog(
     // SAFETY: `func` is comctl32 v6's TaskDialogIndirect, called inside the activation context it
     // was loaded from. Every string `config` points to outlives the call.
     unsafe {
+        // No v6 context means no task dialog at all, the same as comctl32 v6 missing.
         if !ActivateActCtx(ctx, &mut cookie).as_bool() {
-            return None;
+            return Shown::Unavailable;
         }
         let hr = func(&config, &mut pressed, std::ptr::null_mut(), std::ptr::null_mut());
         let _ = DeactivateActCtx(0, cookie);
-        hr.is_ok().then_some(pressed)
+        if hr.is_ok() { Shown::Pressed(pressed) } else { Shown::Failed }
     }
 }
 
@@ -510,6 +551,53 @@ mod tests {
         let px = unsafe { std::slice::from_raw_parts(o.bits, 64 * 48) };
         assert_eq!(px[2 * 64 + 2], 0x8C00_0000, "premultiplied 55% black");
         assert_eq!(px[20 * 64 + 20], 0x0100_0000, "alpha 1, so a click in the hole reaches the overlay");
+    }
+
+    #[test]
+    fn a_failed_task_dialog_shows_no_message_box() {
+        let mut boxes = 0;
+        assert_eq!(or_message_box(Shown::Failed, || { boxes += 1; IDOK.0 }), None);
+        assert_eq!(boxes, 0, "no stray box after a failed task dialog");
+        assert_eq!(or_message_box(Shown::Pressed(IDCANCEL.0), || { boxes += 1; IDOK.0 }), Some(IDCANCEL.0));
+        assert_eq!(boxes, 0);
+        assert_eq!(or_message_box(Shown::Unavailable, || { boxes += 1; IDOK.0 }), Some(IDOK.0));
+        assert_eq!(boxes, 1, "the box stands in when comctl32 v6 is missing");
+    }
+
+    #[test]
+    fn an_ownerless_message_box_is_topmost_and_in_the_foreground() {
+        assert_eq!(message_box_style(None, MB_OK), MB_OK | MB_TOPMOST | MB_SETFOREGROUND);
+        assert_eq!(message_box_style(Some(1), MB_OK), MB_OK);
+    }
+
+    #[test]
+    fn an_ownerless_task_dialog_is_made_topmost_when_created() {
+        use windows::Win32::UI::Controls::TDN_DESTROYED;
+        use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE, WS_OVERLAPPED, WS_VISIBLE};
+        let make = || {
+            // SAFETY: a small window of a system class, destroyed below (win.rs's tests show windows too).
+            unsafe {
+                let style = WS_OVERLAPPED | WS_VISIBLE;
+                CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("negotium-picker-front"), style, 0, 0, 10, 10, None, None, None, None)
+            }
+            .expect("create test window")
+        };
+        // SAFETY: valid window handles of this test.
+        let topmost = |h: HWND| unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
+        let (created, other) = (make(), make());
+        // SAFETY: called as comctl32 would, with live windows.
+        unsafe {
+            let _ = to_front(created, TDN_CREATED, WPARAM(0), LPARAM(0), 0);
+            let _ = to_front(other, TDN_DESTROYED, WPARAM(0), LPARAM(0), 0);
+        }
+        let (a, b) = (topmost(created), topmost(other));
+        // SAFETY: our own test windows.
+        unsafe {
+            let _ = DestroyWindow(created);
+            let _ = DestroyWindow(other);
+        }
+        assert!(a, "topmost after TDN_CREATED");
+        assert!(!b, "other notifications change nothing");
     }
 
     #[test]

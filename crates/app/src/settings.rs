@@ -49,6 +49,8 @@ pub struct Settings {
     pub smooth_graphs: bool,
     /// The tray icon draws the CPU graph (crate::tray).
     pub tray_cpu: bool,
+    /// Ctrl+Alt+Shift+Esc opens the window picker (crate::shortcut). Off by default: the flag.
+    pub picker_shortcut: bool,
     /// The Overview's sort column: "name", "cpu", "memory", "disk", "gpu" or "network" (an unknown
     /// one reads as the default, CPU). A string so the file stays readable and a newer column can't
     /// break an older version.
@@ -84,6 +86,7 @@ impl Default for Settings {
             gpu_rendering: true,
             smooth_graphs: true,
             tray_cpu: true,
+            picker_shortcut: false,
             sort_column: "cpu".to_string(),
             sort_descending: true,
             group_by_type: true,
@@ -247,6 +250,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(gpu_rendering);
     field!(smooth_graphs);
     field!(tray_cpu);
+    field!(picker_shortcut);
     field!(sort_column);
     // A well-formed string can still name a column this version doesn't have.
     if !SORT_NAMES.contains(&s.sort_column.as_str()) {
@@ -542,6 +546,34 @@ mod tests {
         let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["tray_cpu".to_string()]));
         assert!(s.tray_cpu && !s.keep_in_tray);
+    }
+
+    #[test]
+    fn picker_shortcut_defaults_off() {
+        assert!(!Settings::default().picker_shortcut);
+        let dir = TempDir::new("pickerdefault");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"keep_in_tray": false}"#).unwrap();
+        assert!(!load_with(&Writes::Plain, &p).0.picker_shortcut, "a file that predates the switch: off");
+    }
+
+    #[test]
+    fn picker_shortcut_round_trips() {
+        let dir = TempDir::new("pickerround");
+        let p = dir.file();
+        let s = Settings { picker_shortcut: true, ..Settings::default() };
+        save_with(&Writes::Plain, &p, &s).unwrap();
+        assert_eq!(load_with(&Writes::Plain, &p), (s, Loaded::File));
+    }
+
+    #[test]
+    fn a_bad_picker_shortcut_value_takes_the_default_and_keeps_the_rest() {
+        let dir = TempDir::new("pickerbad");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"picker_shortcut": "yes", "keep_in_tray": false}"#).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::Partial(vec!["picker_shortcut".to_string()]));
+        assert!(!s.picker_shortcut && !s.keep_in_tray);
     }
 
     #[test]

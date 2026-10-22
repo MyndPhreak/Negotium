@@ -37,6 +37,8 @@ thread_local! {
     static RESTART_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The active settings on the UI thread, accessible for exit and geometry sync.
     static CURRENT_SETTINGS: RefCell<Option<Rc<RefCell<settings::Settings>>>> = const { RefCell::new(None) };
+    /// A toast waiting for the main window to be shown (the picker shortcut was taken at start-up).
+    static PENDING_TOAST: RefCell<Option<&'static str>> = const { RefCell::new(None) };
 }
 
 fn save_window_geometry(geo: settings::WindowGeometry, saver: &settings::Saver) {
@@ -51,6 +53,9 @@ fn save_window_geometry(geo: settings::WindowGeometry, saver: &settings::Saver) 
 /// Shows the main window from the tray or a second launch: un-hides, restores, focuses.
 fn show_main(on_screen: &OnScreen, weak: &slint::Weak<MainWindow>) {
     if let Some(ui) = weak.upgrade() {
+        if let Some(toast) = PENDING_TOAST.with(|t| t.borrow_mut().take()) {
+            ui.set_toast(toast.into());
+        }
         platform::bring_to_front(&ui);
         let maximized = CURRENT_SETTINGS.with(|s| {
             s.borrow().as_ref().and_then(|s| s.borrow().window_geometry).is_some_and(|g| g.maximized)
@@ -483,6 +488,30 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     };
+    // Ctrl+Alt+Shift+Esc opens the picker, only while the setting is on (the flag). A message-only
+    // window that cannot be made reads as a taken shortcut.
+    let shortcut = {
+        let ctx = negotium::picker::PickerCtx { elevated };
+        let api: Box<dyn negotium::shortcut::HotkeyApi> =
+            match negotium::shortcut::Win32Hotkey::new(Box::new(move || negotium::picker::open(&ctx))) {
+                Ok(h) => Box::new(h),
+                Err(e) => {
+                    warn(&format!("picker shortcut window unavailable: {e}"));
+                    Box::new(negotium::shortcut::Unavailable)
+                }
+            };
+        Rc::new(RefCell::new(negotium::shortcut::Shortcut::new(api)))
+    };
+    shortcut.borrow_mut().apply(initial.picker_shortcut);
+    if shortcut.borrow().taken() {
+        ui.set_settings_shortcut_taken(true);
+        // Shown now when the window is up; from the tray, on the next `show_main`.
+        if in_tray {
+            PENDING_TOAST.with(|t| *t.borrow_mut() = Some(negotium::shortcut::TAKEN_TEXT));
+        } else {
+            ui.set_toast(negotium::shortcut::TAKEN_TEXT.into());
+        }
+    }
     let integrations = negotium::settingspage::SettingsWiring {
         settings: settings.clone(),
         saver: saver.clone(),
@@ -491,6 +520,13 @@ fn main() -> Result<(), slint::PlatformError> {
         fallback_recorded,
         running,
         tray_cpu_changed: Rc::new(negotium::tray::set_enabled),
+        picker_shortcut_changed: Rc::new(move |on| {
+            let registered = shortcut.borrow_mut().apply(on);
+            if !negotium::shortcut::keep_pending_taken_toast(on, registered) {
+                PENDING_TOAST.with(|t| *t.borrow_mut() = None);
+            }
+            registered
+        }),
         integration: negotium::settingspage::Integration {
             install,
             installed_exe: negotium::install::program_files().map(|pf| pf.join("Negotium").join("negotium.exe")),
