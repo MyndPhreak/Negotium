@@ -36,6 +36,8 @@ cargo build --release -p negotium
 .\target\release\negotium.exe
 ```
 
+To test a change, run `.\scripts\try.ps1`: it builds the release exe and copies it to `try\negotium.exe` (with `try\build.txt` naming the branch and commit). Run that copy, so the next build can replace `target\release\negotium.exe` while it is open.
+
 Run the tests with `cargo test --workspace`. A development build runs from anywhere; admin mode, Ctrl+Shift+Esc, Start with Windows and updates are only offered by the installed copy.
 
 ## License
