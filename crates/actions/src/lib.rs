@@ -104,7 +104,7 @@ pub(crate) struct OwnedHandle(pub(crate) HANDLE);
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
-        // SAFETY: the handle came from OpenProcess and is closed exactly once here.
+        // SAFETY: a handle this process owns (process or token) and nothing else closes; closed once here.
         unsafe {
             let _ = CloseHandle(self.0);
         }

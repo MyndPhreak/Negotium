@@ -1,4 +1,4 @@
-use negotium_actions::{ActionError, end_many, end_process};
+use negotium_actions::{ActionError, can_terminate, capture_shell_token, end_many, end_process};
 use negotium_collector::ProcessReader;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -196,8 +196,6 @@ fn direct_efficiency_and_power_throttling() {
     child.wait().ok();
 }
 
-use negotium_actions::{can_terminate, capture_shell_token};
-
 #[test]
 fn can_terminate_own_child() {
     let (mut child, ct) = spawn_ping();
@@ -232,5 +230,5 @@ fn capture_shell_token_is_none_when_not_elevated() {
         eprintln!("skipped: elevated Negotium captures a token");
         return;
     }
-    assert!(matches!(capture_shell_token(std::process::id()), Ok(None)));
+    assert!(matches!(capture_shell_token(std::process::id(), 0), Ok(None)));
 }

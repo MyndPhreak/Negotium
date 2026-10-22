@@ -7,7 +7,7 @@ use windows::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TokenPrimary,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessW, CreateProcessWithTokenW, OpenProcess, OpenProcessToken, PROCESS_INFORMATION,
+    CreateProcessW, CreateProcessWithTokenW, OpenProcessToken, PROCESS_INFORMATION,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, STARTUPINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
@@ -30,15 +30,13 @@ pub fn can_terminate(pid: u32, create_time: i64) -> bool {
 }
 
 /// Copies the shell's primary token; `Ok(None)` when Negotium is not elevated (a plain start
-/// then already runs with the user's rights).
-pub fn capture_shell_token(shell_pid: u32) -> Result<Option<ShellToken>, ActionError> {
+/// then already runs with the user's rights). The shell is checked by (pid, create_time), so a
+/// reused pid is never opened: an exited or reused pid is `AlreadyExited`.
+pub fn capture_shell_token(shell_pid: u32, create_time: i64) -> Result<Option<ShellToken>, ActionError> {
     if !is_elevated() {
         return Ok(None);
     }
-    // SAFETY: plain Win32 call; the handle is owned by OwnedHandle.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, shell_pid) }
-        .map(OwnedHandle)
-        .map_err(|e| ActionError::from_win(&e))?;
+    let process = open_verified(shell_pid, create_time, PROCESS_QUERY_LIMITED_INFORMATION)?;
     let mut token = HANDLE::default();
     // SAFETY: valid process handle; `token` is writable and wrapped in OwnedHandle below.
     unsafe { OpenProcessToken(process.0, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &mut token) }
@@ -61,7 +59,9 @@ pub fn capture_shell_token(shell_pid: u32) -> Result<Option<ShellToken>, ActionE
     Ok(Some(ShellToken(OwnedHandle(primary))))
 }
 
-/// Starts `<windows dir>\explorer.exe`, with `token` when given. Never searches PATH.
+/// Starts `<windows dir>\explorer.exe`, with `token` when given. Never searches PATH. When
+/// Negotium is elevated and `capture_shell_token` failed, do not call this with `None`: that
+/// would start an elevated shell.
 pub fn start_explorer(token: Option<&ShellToken>) -> Result<(), ActionError> {
     let path = std::path::Path::new(&negotium_collector::windows_dir()).join("explorer.exe");
     let app: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
@@ -109,7 +109,8 @@ pub fn start_explorer(token: Option<&ShellToken>) -> Result<(), ActionError> {
     Ok(())
 }
 
-/// Waits up to `timeout` for a `Shell_TrayWnd` window (polled every 100 ms).
+/// Waits up to `timeout` for a `Shell_TrayWnd` window (polled every 100 ms). It is `true` while
+/// the OLD taskbar still exists, so wait for the old shell process to exit first.
 pub fn wait_for_taskbar(timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
