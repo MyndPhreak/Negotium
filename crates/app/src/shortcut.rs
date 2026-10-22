@@ -19,6 +19,15 @@ const VK_ESCAPE: u32 = 0x1B;
 /// The one hotkey of the message-only window.
 const HOTKEY_ID: i32 = 1;
 
+/// What the user is told when another program holds the keys (toast and Settings row).
+pub const TAKEN_TEXT: &str = "Another program uses Ctrl+Alt+Shift+Esc";
+
+/// Whether a queued "taken" toast is still true after a toggle: only while the shortcut is wanted
+/// and not registered.
+pub fn keep_pending_taken_toast(on: bool, registered: bool) -> bool {
+    on && !registered
+}
+
 /// Registers and releases the shortcut with the system.
 pub trait HotkeyApi {
     /// Asks the system for the keys; `false` when another program already holds them.
@@ -88,7 +97,8 @@ pub struct Win32Hotkey {
 }
 
 impl Win32Hotkey {
-    /// `on_press` runs on the UI thread each time the keys are pressed. Create it on that thread.
+    /// `on_press` runs on the UI thread each time the keys are pressed. Create AND drop it on that
+    /// thread: `DestroyWindow` fails silently from another one.
     pub fn new(on_press: Box<dyn Fn()>) -> windows::core::Result<Self> {
         register_class()?;
         // SAFETY: the class is registered; the parent HWND_MESSAGE makes a message-only window.
@@ -204,6 +214,14 @@ mod tests {
         fn unregister(&self) {
             self.unregisters.set(self.unregisters.get() + 1);
         }
+    }
+
+    #[test]
+    fn a_queued_taken_toast_is_kept_only_while_still_taken() {
+        assert!(keep_pending_taken_toast(true, false));
+        assert!(!keep_pending_taken_toast(true, true), "a retry registered");
+        assert!(!keep_pending_taken_toast(false, false), "turned off");
+        assert!(!keep_pending_taken_toast(false, true));
     }
 
     #[test]

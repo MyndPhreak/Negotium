@@ -505,7 +505,12 @@ fn main() -> Result<(), slint::PlatformError> {
     shortcut.borrow_mut().apply(initial.picker_shortcut);
     if shortcut.borrow().taken() {
         ui.set_settings_shortcut_taken(true);
-        PENDING_TOAST.with(|t| *t.borrow_mut() = Some("Another program uses Ctrl+Alt+Shift+Esc"));
+        // Shown now when the window is up; from the tray, on the next `show_main`.
+        if in_tray {
+            PENDING_TOAST.with(|t| *t.borrow_mut() = Some(negotium::shortcut::TAKEN_TEXT));
+        } else {
+            ui.set_toast(negotium::shortcut::TAKEN_TEXT.into());
+        }
     }
     let integrations = negotium::settingspage::SettingsWiring {
         settings: settings.clone(),
@@ -515,7 +520,13 @@ fn main() -> Result<(), slint::PlatformError> {
         fallback_recorded,
         running,
         tray_cpu_changed: Rc::new(negotium::tray::set_enabled),
-        picker_shortcut_changed: Rc::new(move |on| shortcut.borrow_mut().apply(on)),
+        picker_shortcut_changed: Rc::new(move |on| {
+            let registered = shortcut.borrow_mut().apply(on);
+            if !negotium::shortcut::keep_pending_taken_toast(on, registered) {
+                PENDING_TOAST.with(|t| *t.borrow_mut() = None);
+            }
+            registered
+        }),
         integration: negotium::settingspage::Integration {
             install,
             installed_exe: negotium::install::program_files().map(|pf| pf.join("Negotium").join("negotium.exe")),
