@@ -2,11 +2,10 @@
 //! Direct2D into a DIB and shown with `UpdateLayeredWindow`; window messages turned into
 //! `Input` for the session (`super::on_input`); mouse capture; and the task dialogs.
 use std::ffi::c_void;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{
-    COLORREF, D2DERR_RECREATE_TARGET, HANDLE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT};
 use windows::Win32::Graphics::Direct2D::{
@@ -19,24 +18,25 @@ use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC, CreateDIBSection,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, HBITMAP, HDC, HGDIOBJ, SelectObject,
 };
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     TASKDIALOG_BUTTON, TASKDIALOG_COMMON_BUTTON_FLAGS, TASKDIALOG_FLAGS, TASKDIALOGCONFIG, TD_WARNING_ICON,
     TASKDIALOG_NOTIFICATIONS, TDCBF_CANCEL_BUTTON, TDN_CREATED, TDCBF_CLOSE_BUTTON, TDF_POSITION_RELATIVE_TO_WINDOW,
+    TaskDialogIndirect,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, HWND_TOPMOST, IDC_CROSS,
-    IDCANCEL, IDOK, LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MB_TOPMOST,
-    MESSAGEBOX_STYLE, MessageBoxW, RegisterClassExW, SW_SHOWNA, SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetForegroundWindow,
+    IDCANCEL, IDOK, LoadCursorW, RegisterClassExW, SW_SHOWNA, SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetForegroundWindow,
     SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_ACTIVATEAPP,
     WM_DISPLAYCHANGE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WNDCLASSEXW,
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
-use windows::core::{BOOL, HRESULT, PCWSTR, s, w};
+use windows::core::{HRESULT, PCWSTR, w};
 
 use super::scene::{Scene, render};
 use super::win::Monitor;
@@ -304,7 +304,6 @@ pub fn cursor() -> (i32, i32) {
 
 /// Brings `hwnd` to the foreground (so Esc reaches it) and captures the mouse to it.
 pub fn grab(hwnd: isize) {
-    windows::core::link!("user32.dll" "system" fn SetCapture(hwnd: HWND) -> HWND);
     let hwnd = HWND(hwnd as *mut c_void);
     // SAFETY: `hwnd` is an overlay of this thread. The crosshair is set at once rather than on
     // the next WM_SETCURSOR, which a captured mouse does not send.
@@ -318,7 +317,6 @@ pub fn grab(hwnd: isize) {
 }
 
 pub fn release() {
-    windows::core::link!("user32.dll" "system" fn ReleaseCapture() -> BOOL);
     // SAFETY: no arguments; releasing when nothing is captured is harmless.
     unsafe {
         let _ = ReleaseCapture();
@@ -364,42 +362,13 @@ impl Drop for DpiGuard {
 pub fn confirm(owner: isize, title: &str, body: &str) -> bool {
     let end = wide("End");
     let buttons = [TASKDIALOG_BUTTON { nButtonID: IDOK.0, pszButtonText: PCWSTR(end.as_ptr()) }];
-    let shown = task_dialog(Some(owner), title, body, &buttons, TDCBF_CANCEL_BUTTON, IDCANCEL.0, TD_WARNING_ICON);
-    or_message_box(shown, || {
-        message_box(Some(owner), title, body, message_box_style(Some(owner), MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING))
-    }) == Some(IDOK.0)
+    task_dialog(Some(owner), title, body, &buttons, TDCBF_CANCEL_BUTTON, IDCANCEL.0, TD_WARNING_ICON) == Some(IDOK.0)
 }
 
 /// Shows `text` with a Close button only; above `owner` when given, else topmost and in the
 /// foreground (nothing of Negotium's may be on screen). Any thread.
 pub fn tell(owner: Option<isize>, text: &str) {
-    let shown = task_dialog(owner, "", text, &[], TDCBF_CLOSE_BUTTON, 0, PCWSTR::null());
-    let _ = or_message_box(shown, || message_box(owner, "", text, message_box_style(owner, MB_OK)));
-}
-
-/// What a task dialog call came to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shown {
-    Pressed(i32),
-    /// Shown or not, it failed (for example its owner was destroyed): nothing more is shown.
-    Failed,
-    /// comctl32 v6 is not there: a message box is shown instead.
-    Unavailable,
-}
-
-/// The pressed button. A message box (`fallback`) stands in only when the task dialog is not
-/// available; a task dialog that failed shows nothing, so no stray "End …?" box opens.
-fn or_message_box(shown: Shown, fallback: impl FnOnce() -> i32) -> Option<i32> {
-    match shown {
-        Shown::Pressed(p) => Some(p),
-        Shown::Failed => None,
-        Shown::Unavailable => Some(fallback()),
-    }
-}
-
-/// `style`, plus topmost and foreground when there is no owner to show the box above.
-fn message_box_style(owner: Option<isize>, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_STYLE {
-    if owner.is_some() { style } else { style | MB_TOPMOST | MB_SETFOREGROUND }
+    let _ = task_dialog(owner, "", text, &[], TDCBF_CLOSE_BUTTON, 0, PCWSTR::null());
 }
 
 /// Task dialog callback for a dialog with no owner: on creation, puts it on top of every window
@@ -416,8 +385,11 @@ unsafe extern "system" fn to_front(hwnd: HWND, msg: TASKDIALOG_NOTIFICATIONS, _:
     HRESULT(0)
 }
 
-type TaskDialogIndirectFn = unsafe extern "system" fn(*const TASKDIALOGCONFIG, *mut i32, *mut i32, *mut BOOL) -> HRESULT;
-
+/// The pressed button, or `None` when the dialog failed (for example its owner was destroyed);
+/// nothing else is shown then, so no stray "End …?" box opens.
+///
+/// The exe's manifest (assets/negotium.exe.manifest) binds comctl32 v6, which has the task
+/// dialog; the build embeds it in the test executables too, so they bind the same comctl32.
 fn task_dialog(
     owner: Option<isize>,
     instruction: &str,
@@ -426,8 +398,7 @@ fn task_dialog(
     common: TASKDIALOG_COMMON_BUTTON_FLAGS,
     default: i32,
     icon: PCWSTR,
-) -> Shown {
-    let Some((ctx, func)) = comctl6() else { return Shown::Unavailable };
+) -> Option<i32> {
     let (instruction, content) = (wide(instruction), wide(content));
     let mut config = TASKDIALOGCONFIG {
         cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
@@ -445,92 +416,12 @@ fn task_dialog(
     };
     config.Anonymous1.pszMainIcon = icon;
     let mut pressed = 0i32;
-    let mut cookie = 0usize;
-    // SAFETY: `func` is comctl32 v6's TaskDialogIndirect, called inside the activation context it
-    // was loaded from. Every string `config` points to outlives the call.
-    unsafe {
-        // No v6 context means no task dialog at all, the same as comctl32 v6 missing.
-        if !ActivateActCtx(ctx, &mut cookie).as_bool() {
-            return Shown::Unavailable;
-        }
-        let hr = func(&config, &mut pressed, std::ptr::null_mut(), std::ptr::null_mut());
-        let _ = DeactivateActCtx(0, cookie);
-        if hr.is_ok() { Shown::Pressed(pressed) } else { Shown::Failed }
-    }
-}
-
-fn message_box(owner: Option<isize>, instruction: &str, content: &str, style: MESSAGEBOX_STYLE) -> i32 {
-    let text = if instruction.is_empty() { wide(content) } else { wide(&format!("{instruction}\n\n{content}")) };
-    // SAFETY: `text` outlives the call; TITLE is static.
-    unsafe { MessageBoxW(owner.map(|h| HWND(h as *mut c_void)), PCWSTR(text.as_ptr()), TITLE, style).0 }
+    // SAFETY: every string `config` points to outlives the call.
+    unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) }.ok().map(|()| pressed)
 }
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
-}
-
-#[repr(C)]
-struct ActCtxW {
-    size: u32,
-    flags: u32,
-    source: PCWSTR,
-    processor_architecture: u16,
-    lang_id: u16,
-    assembly_directory: PCWSTR,
-    resource_name: PCWSTR,
-    application_name: PCWSTR,
-    module: HMODULE,
-}
-
-windows::core::link!("kernel32.dll" "system" fn CreateActCtxW(actctx: *const ActCtxW) -> HANDLE);
-windows::core::link!("kernel32.dll" "system" fn ActivateActCtx(actctx: HANDLE, cookie: *mut usize) -> BOOL);
-windows::core::link!("kernel32.dll" "system" fn DeactivateActCtx(flags: u32, cookie: usize) -> BOOL);
-
-/// `ACTCTX_FLAG_RESOURCE_NAME_VALID`.
-const RESOURCE_NAME_VALID: u32 = 0x8;
-/// shell32.dll's manifest resource, which asks for Common Controls 6.
-const SHELL32_COMCTL6_MANIFEST: usize = 124;
-
-/// comctl32 v6's `TaskDialogIndirect` and the activation context to call it in.
-///
-/// negotium.exe has no manifest asking for Common Controls 6, so a plain import binds comctl32
-/// v5, which has no task dialog (a static import would stop the exe from starting). The
-/// activation context made from shell32.dll's own manifest loads v6. Kept for the process's life.
-fn comctl6() -> Option<(HANDLE, TaskDialogIndirectFn)> {
-    static LOADED: OnceLock<Option<(usize, usize)>> = OnceLock::new();
-    let (ctx, func) = (*LOADED.get_or_init(load_comctl6))?;
-    // SAFETY: `func` is the non-null address of TaskDialogIndirect, whose module is never freed.
-    Some((HANDLE(ctx as *mut c_void), unsafe { std::mem::transmute::<usize, TaskDialogIndirectFn>(func) }))
-}
-
-fn load_comctl6() -> Option<(usize, usize)> {
-    let shell32 = wide(&format!("{}\\System32\\shell32.dll", negotium_collector::windows_dir()));
-    let actctx = ActCtxW {
-        size: size_of::<ActCtxW>() as u32,
-        flags: RESOURCE_NAME_VALID,
-        source: PCWSTR(shell32.as_ptr()),
-        processor_architecture: 0,
-        lang_id: 0,
-        assembly_directory: PCWSTR::null(),
-        resource_name: PCWSTR(SHELL32_COMCTL6_MANIFEST as *const u16),
-        application_name: PCWSTR::null(),
-        module: HMODULE::default(),
-    };
-    let mut cookie = 0usize;
-    // SAFETY: `actctx` and `shell32` outlive the calls; the context is deactivated before
-    // returning and kept (never released) for later calls. The module is never freed.
-    unsafe {
-        let ctx = CreateActCtxW(&actctx);
-        if ctx.is_invalid() {
-            return None;
-        }
-        if !ActivateActCtx(ctx, &mut cookie).as_bool() {
-            return None;
-        }
-        let func = LoadLibraryW(w!("comctl32.dll")).ok().and_then(|m| GetProcAddress(m, s!("TaskDialogIndirect")));
-        let _ = DeactivateActCtx(0, cookie);
-        func.map(|f| (ctx.0 as usize, f as usize))
-    }
 }
 
 #[cfg(test)]
@@ -551,23 +442,6 @@ mod tests {
         let px = unsafe { std::slice::from_raw_parts(o.bits, 64 * 48) };
         assert_eq!(px[2 * 64 + 2], 0x8C00_0000, "premultiplied 55% black");
         assert_eq!(px[20 * 64 + 20], 0x0100_0000, "alpha 1, so a click in the hole reaches the overlay");
-    }
-
-    #[test]
-    fn a_failed_task_dialog_shows_no_message_box() {
-        let mut boxes = 0;
-        assert_eq!(or_message_box(Shown::Failed, || { boxes += 1; IDOK.0 }), None);
-        assert_eq!(boxes, 0, "no stray box after a failed task dialog");
-        assert_eq!(or_message_box(Shown::Pressed(IDCANCEL.0), || { boxes += 1; IDOK.0 }), Some(IDCANCEL.0));
-        assert_eq!(boxes, 0);
-        assert_eq!(or_message_box(Shown::Unavailable, || { boxes += 1; IDOK.0 }), Some(IDOK.0));
-        assert_eq!(boxes, 1, "the box stands in when comctl32 v6 is missing");
-    }
-
-    #[test]
-    fn an_ownerless_message_box_is_topmost_and_in_the_foreground() {
-        assert_eq!(message_box_style(None, MB_OK), MB_OK | MB_TOPMOST | MB_SETFOREGROUND);
-        assert_eq!(message_box_style(Some(1), MB_OK), MB_OK);
     }
 
     #[test]
@@ -598,11 +472,5 @@ mod tests {
         }
         assert!(a, "topmost after TDN_CREATED");
         assert!(!b, "other notifications change nothing");
-    }
-
-    #[test]
-    fn the_task_dialog_is_found_without_an_exe_manifest() {
-        // The test exe, like negotium.exe, has no Common Controls 6 manifest.
-        assert!(comctl6().is_some());
     }
 }

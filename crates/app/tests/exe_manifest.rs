@@ -17,7 +17,8 @@ fn exe_manifest() -> Option<String> {
     unsafe {
         let module =
             LoadLibraryExW(&exe, None, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE).expect("map negotium.exe");
-        let found = FindResourceW(Some(module), PCWSTR(1 as *const u16), RT_MANIFEST);
+        // MAKEINTRESOURCE(1): the id, not a string.
+        let found = FindResourceW(Some(module), PCWSTR(std::ptr::without_provenance(1)), RT_MANIFEST);
         let text = (!found.is_invalid()).then(|| {
             let data = LoadResource(Some(module), found).expect("load the manifest");
             let bytes = std::slice::from_raw_parts(LockResource(data) as *const u8, SizeofResource(Some(module), found) as usize);

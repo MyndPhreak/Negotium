@@ -1,2 +1,5 @@
 // The exe's own icon: Task Manager, Explorer and shortcuts read it from here.
 1 ICON "negotium.ico"
+
+// The application manifest (RT_MANIFEST = 24, id 1 for an exe): Common Controls 6 and Windows 10/11.
+1 24 "negotium.exe.manifest"
