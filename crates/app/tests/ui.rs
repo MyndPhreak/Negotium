@@ -4788,3 +4788,19 @@ fn cpu_affinity_and_priority_modals_toggle_and_report() {
     ui.set_priority_visible(false);
     assert!(!ui.get_modal_open());
 }
+
+/// `NegotiumTray` is a `SystemTrayIcon`, not a window: the testing backend gives no
+/// `ComponentHandle` for it, so its menu cannot be searched. The menu is checked in the source,
+/// as tests/wix.rs reads main.wxs.
+#[test]
+fn tray_menu_offers_end_a_window() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/tray.slint");
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    assert!(src.contains("callback pick-window();"), "tray declares pick-window");
+    let item = "MenuItem { title: \"End a window\u{2026}\"; activated => { root.pick-window(); } }";
+    let at = src.find(item).expect("an End a window\u{2026} item that calls pick-window");
+    let open = src.find("MenuItem { title: \"Open\";").expect("the Open item");
+    assert!(open < at, "End a window\u{2026} comes after Open");
+    let between = &src[open..at];
+    assert_eq!(between.matches("MenuItem").count(), 1, "End a window\u{2026} comes right after Open");
+}

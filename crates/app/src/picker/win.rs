@@ -7,13 +7,15 @@ use negotium_collector::original_of_ghost;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
-use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, GW_OWNER, GetClassNameW, GetShellWindow, GetWindow, GetWindowRect,
-    GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindowVisible,
+    EnumWindows, FindWindowExW, FindWindowW, GW_OWNER, GetClassNameW, GetShellWindow, GetWindow, GetWindowRect,
+    GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
 };
-use windows::core::{BOOL, w};
+use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 use super::target::{Rect, WindowInfo};
 
@@ -155,6 +157,46 @@ pub fn shell_pid() -> Option<(u32, i64)> {
         pid
     };
     (pid != 0).then(|| (pid, create_time(pid)))
+}
+
+/// The file name of the process's image (`notepad.exe`); "" when it cannot be opened.
+pub fn image_name(pid: u32) -> String {
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: the handle is used for the one query below and then closed; `buf` and `len`
+    // describe a valid writable buffer.
+    let ok = unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(h);
+        ok
+    };
+    if !ok {
+        return String::new();
+    }
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    path.rsplit('\\').next().unwrap_or_default().to_string()
+}
+
+/// The primary taskbar window, if there is one.
+pub fn taskbar() -> Option<isize> {
+    // SAFETY: plain Win32 call with a static class name.
+    unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }.ok().map(|h| h.0 as isize)
+}
+
+/// Waits up to `timeout` (polled every 100 ms) for `hwnd` to be destroyed.
+pub fn wait_window_gone(hwnd: isize, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    // SAFETY: IsWindow accepts any value; a destroyed or reused handle only changes the answer.
+    while unsafe { IsWindow(Some(HWND(hwnd as *mut c_void))) }.as_bool() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    true
 }
 
 pub fn monitors() -> Vec<Monitor> {

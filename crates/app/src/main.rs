@@ -102,6 +102,8 @@ struct TrayWiring {
     integrations: Rc<Integrations>,
     taskmgr_shown: Rc<Cell<bool>>,
     settings: Rc<RefCell<settings::Settings>>,
+    /// Whether this process runs as admin (the picker's admin checks and Explorer restart).
+    elevated: bool,
 }
 
 fn make_tray(
@@ -115,6 +117,10 @@ fn make_tray(
     {
         let (on_screen, weak) = (on_screen.clone(), weak.clone());
         tray.on_open(move || show_main(&on_screen, &weak));
+    }
+    {
+        let ctx = negotium::picker::PickerCtx { elevated: wiring.elevated };
+        tray.on_pick_window(move || negotium::picker::open(&ctx));
     }
     tray.set_taskmgr_shown(wiring.taskmgr_shown.get());
     {
@@ -551,7 +557,7 @@ fn main() -> Result<(), slint::PlatformError> {
             log: Box::new(warn),
         },
     );
-    let tray_wiring = Rc::new(TrayWiring { saver: saver.clone(), integrations, taskmgr_shown, settings: settings.clone() });
+    let tray_wiring = Rc::new(TrayWiring { saver: saver.clone(), integrations, taskmgr_shown, settings: settings.clone(), elevated });
     let bridge = Bridge::install(&ui, controls.clone());
     // Program icons: extracted on the loader's own thread (shell and GDI calls, never in a frame);
     // each result comes back to the bridge's cache on the UI thread, which re-pushes the rows
