@@ -57,7 +57,7 @@ pub fn layout(m: &Monitor, target: Option<(Rect, &Label)>, cursor_here: bool) ->
     };
 
     let hint = cursor_here.then(|| {
-        let (hw, hh) = (px(560.0), px(32.0));
+        let (hw, hh) = (px(560.0).min(w - px(16.0)).max(0), px(32.0));
         let left = (w - hw) / 2;
         let top = px(10.0);
         Rect { left, top, right: left + hw, bottom: top + hh }
@@ -82,6 +82,8 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
+/// Draws `scene` in physical pixels. `layout` already applied the DPI scale, so this resets the
+/// target to 96 DPI; otherwise Direct2D would scale every coordinate a second time.
 pub fn render(rt: &ID2D1RenderTarget, text: &IDWriteFactory, scene: &Scene) -> windows::core::Result<()> {
     let s = scene.scale;
     let (w, h) = (scene.size.0 as i32, scene.size.1 as i32);
@@ -89,6 +91,7 @@ pub fn render(rt: &ID2D1RenderTarget, text: &IDWriteFactory, scene: &Scene) -> w
     // point to locals that outlive the call. `EndDraw` runs even if a drawing step fails, so the
     // target is never left mid-draw.
     unsafe {
+        rt.SetDpi(96.0, 96.0);
         rt.BeginDraw();
         let drawn = draw(rt, text, scene, s, w, h);
         let ended = rt.EndDraw(None, None);
@@ -118,7 +121,9 @@ unsafe fn draw(rt: &ID2D1RenderTarget, text: &IDWriteFactory, scene: &Scene, s: 
             rt.FillRectangle(&rf(d), &dim);
         }
 
-        if let (Some(o), Some(colour)) = (scene.hole, outline_colour(scene.outline)) {
+        let wide_enough = |o: Rect| (o.right - o.left) as f32 >= 3.0 * s && (o.bottom - o.top) as f32 >= 3.0 * s;
+        // A hole thinner than the stroke would give an inverted inset rect, so it gets no outline.
+        if let (Some(o), Some(colour)) = (scene.hole.filter(|o| wide_enough(*o)), outline_colour(scene.outline)) {
             let factory = rt.GetFactory()?;
             let style = factory.CreateStrokeStyle(
                 &D2D1_STROKE_STYLE_PROPERTIES {
@@ -311,6 +316,10 @@ mod tests {
     }
 
     fn offscreen(w: u32, h: u32) -> Offscreen {
+        offscreen_dpi(w, h, 96.0)
+    }
+
+    fn offscreen_dpi(w: u32, h: u32, dpi: f32) -> Offscreen {
         // SAFETY: plain COM calls on live objects; the created objects are owned by the returned struct.
         unsafe {
             // S_FALSE / RPC_E_CHANGED_MODE only mean COM is already initialised on this thread.
@@ -321,8 +330,8 @@ mod tests {
             let props = D2D1_RENDER_TARGET_PROPERTIES {
                 r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
                 pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                dpiX: 96.0,
-                dpiY: 96.0,
+                dpiX: dpi,
+                dpiY: dpi,
                 usage: D2D1_RENDER_TARGET_USAGE_NONE,
                 minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
             };
@@ -372,5 +381,58 @@ mod tests {
         let row: Vec<[u8; 4]> = (60..140).map(|x| pixel(&px, 200, x, 21)).collect();
         assert!(row.contains(&[0x23, 0x11, 0xE8, 0xFF]), "no opaque red: {row:?}");
         assert!(row.iter().any(|p| p[3] == 0), "no gap in the dashes");
+    }
+
+    #[test]
+    fn render_does_not_scale_twice_on_a_high_dpi_target() {
+        let m = mon(r(0, 0, 300, 150), 144);
+        let l = lbl(Outline::None);
+        let sc = layout(&m, Some((r(75, 30, 225, 120), &l)), false);
+        let hole = sc.hole.unwrap();
+        assert_eq!(hole, r(75, 30, 225, 120));
+        let o = offscreen_dpi(300, 150, 144.0);
+        render(&o.rt, &o.text, &Scene { label: None, ..sc }).unwrap();
+        let px = pixels(&o, 300, 150);
+        // Just outside and just inside each hole edge, in physical pixels.
+        assert_eq!(pixel(&px, 300, 74, 75)[3], 0x8C);
+        assert_eq!(pixel(&px, 300, 75, 75)[3], 0);
+        assert_eq!(pixel(&px, 300, 224, 75)[3], 0);
+        assert_eq!(pixel(&px, 300, 225, 75)[3], 0x8C);
+        assert_eq!(pixel(&px, 300, 150, 29)[3], 0x8C);
+        assert_eq!(pixel(&px, 300, 150, 30)[3], 0);
+    }
+
+    #[test]
+    fn render_draws_the_label_card_and_the_hint_bar() {
+        let o = offscreen(600, 300);
+        let l = lbl(Outline::Accent);
+        let m = mon(r(0, 0, 600, 300), 96);
+        let sc = layout(&m, Some((r(0, 0, 600, 300), &l)), true);
+        let (card, _) = sc.label.clone().unwrap();
+        let bar = sc.hint.unwrap();
+        render(&o.rt, &o.text, &sc).unwrap();
+        let px = pixels(&o, 600, 300);
+        // The card's bottom-right corner area is clear of text and of the rounded corner.
+        let p = pixel(&px, 600, (card.right - 10) as u32, (card.bottom - 10) as u32);
+        assert_eq!(p, [0x20, 0x20, 0x20, 0xFF]);
+        // The hole covers the monitor, so the bar is not over the dim. Its left padding is clear of the text.
+        let a = pixel(&px, 600, (bar.left + 10) as u32, (bar.top + 16) as u32)[3];
+        assert!(a.abs_diff(0xE6) <= 1, "hint alpha {a:#x}");
+    }
+
+    #[test]
+    fn hint_bar_is_clamped_into_a_narrow_monitor() {
+        let m = mon(r(0, 0, 400, 300), 96);
+        let h = layout(&m, None, true).hint.unwrap();
+        assert_eq!(h, r(8, 10, 392, 42));
+    }
+
+    #[test]
+    fn a_hole_thinner_than_the_stroke_gets_no_outline() {
+        let o = offscreen(200, 100);
+        let sc = Scene { hole: Some(r(50, 20, 52, 80)), ..scene(Outline::Red) };
+        render(&o.rt, &o.text, &sc).unwrap();
+        let px = pixels(&o, 200, 100);
+        assert!((0..100).all(|y| pixel(&px, 200, 51, y)[3] != 0xFF));
     }
 }
