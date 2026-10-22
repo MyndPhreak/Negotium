@@ -2975,6 +2975,24 @@ fn a_choice_applies_at_once_shows_and_is_saved() {
     });
 }
 
+#[test]
+fn the_backdrop_choice_shows_and_is_saved() {
+    use negotium::settings::BackdropChoice;
+    let dir = Scratch::new("backdrop");
+    let path = dir.0.join("settings.json");
+    let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    assert_eq!(radio(&ui, "Mica").accessible_checked(), Some(true), "Mica by default");
+
+    radio(&ui, "Acrylic").invoke_accessible_default_action();
+    assert_eq!(radio(&ui, "Acrylic").accessible_checked(), Some(true));
+    saved(&path, "backdrop acrylic", |s| s.backdrop == BackdropChoice::Acrylic);
+
+    negotium::settingspage::apply_settings(&ui, &Settings::default());
+    assert_eq!(ui.get_settings_backdrop(), 0, "apply_settings shows the saved backdrop");
+    negotium::settingspage::apply_settings(&ui, &Settings { backdrop: BackdropChoice::Acrylic, ..Settings::default() });
+    assert_eq!(ui.get_settings_backdrop(), 1);
+}
+
 const FALLBACK_NOTE: &str =
     "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
 const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";

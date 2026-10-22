@@ -3,7 +3,7 @@
 //! accent changes); the main-window hooks for tray re-creation and
 //! activation; and the single-instance lock.
 use crate::renderer::Renderer;
-use crate::settings::{ThemeChoice, effective_dark};
+use crate::settings::{BackdropChoice, ThemeChoice, effective_dark};
 use crate::{MainWindow, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::ComponentHandle;
@@ -16,6 +16,8 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WAIT_ABANDONED,
     WAIT_OBJECT_0, WPARAM,
 };
+#[cfg(test)]
+use windows::Win32::Graphics::Dwm::DWMSBT_TRANSIENTWINDOW;
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWMSBT_TABBEDWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
@@ -174,11 +176,11 @@ fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
     }
 }
 
-/// The system backdrop behind a window drawn by `renderer`, or none. Mica Alt only behind the
-/// GPU renderer: FemtoVG presents an alpha channel that DWM composites over the backdrop. The
+/// The system backdrop behind a window drawn by `renderer`, or none. Only behind the GPU
+/// renderer: FemtoVG presents an alpha channel that DWM composites over the backdrop. The
 /// software renderer's buffer is opaque (and `SLINT_BACKEND` may name it), so that window keeps
 /// the solid `Theme.window-bg`; the translucent cards then blend over that colour instead.
-pub fn backdrop_for(renderer: Renderer) -> Option<DWM_SYSTEMBACKDROP_TYPE> {
+pub fn backdrop_for(renderer: Renderer, _choice: BackdropChoice) -> Option<DWM_SYSTEMBACKDROP_TYPE> {
     (renderer == Renderer::Gpu).then_some(DWMSBT_TABBEDWINDOW)
 }
 
@@ -192,6 +194,9 @@ thread_local! {
 pub fn set_renderer(renderer: Renderer) {
     RENDERER.with(|r| r.set(Some(renderer)));
 }
+
+/// Records the chosen backdrop and re-applies the window chrome with it. UI thread only.
+pub fn set_backdrop(_ui: &MainWindow, _choice: BackdropChoice) {}
 
 /// Applies the dark/light title bar (from `Theme.dark`) and the backdrop (`backdrop_for`).
 /// `Theme.mica` follows the backdrop call alone: a failed dark-mode call leaves the title bar's
@@ -215,7 +220,7 @@ pub fn apply_window_chrome(ui: &MainWindow) -> bool {
     let _ = unsafe {
         SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
     };
-    let Some(backdrop) = RENDERER.with(|r| r.get()).and_then(backdrop_for) else {
+    let Some(backdrop) = RENDERER.with(|r| r.get()).and_then(|r| backdrop_for(r, BackdropChoice::Mica)) else {
         ui.global::<Theme>().set_mica(false);
         return dark_ok;
     };
@@ -993,12 +998,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_gpu_renderer_gets_the_mica_alt_backdrop() {
-        assert_eq!(backdrop_for(Renderer::Gpu), Some(DWMSBT_TABBEDWINDOW));
-        // Its buffer is opaque: a transparent window background would not show the backdrop.
-        assert_eq!(backdrop_for(Renderer::Software), None);
-        // SLINT_BACKEND may name the software renderer.
-        assert_eq!(backdrop_for(Renderer::FromEnv), None);
+    fn only_the_gpu_renderer_gets_the_chosen_backdrop() {
+        assert_eq!(backdrop_for(Renderer::Gpu, BackdropChoice::Mica), Some(DWMSBT_TABBEDWINDOW));
+        assert_eq!(backdrop_for(Renderer::Gpu, BackdropChoice::Acrylic), Some(DWMSBT_TRANSIENTWINDOW));
+        for choice in BackdropChoice::ALL {
+            // Its buffer is opaque: a transparent window background would not show the backdrop.
+            assert_eq!(backdrop_for(Renderer::Software, choice), None);
+            // SLINT_BACKEND may name the software renderer.
+            assert_eq!(backdrop_for(Renderer::FromEnv, choice), None);
+        }
     }
 
     #[test]
