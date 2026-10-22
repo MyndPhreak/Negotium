@@ -2999,7 +2999,7 @@ fn the_backdrop_choice_shows_and_is_saved() {
 }
 
 #[test]
-fn acrylic_is_tinted_with_the_window_colour_and_mica_is_not() {
+fn acrylic_is_tinted_and_mica_is_not() {
     use negotium::settings::BackdropChoice;
     let ui = window();
     let theme = ui.global::<negotium::Theme>();
@@ -3008,6 +3008,11 @@ fn acrylic_is_tinted_with_the_window_colour_and_mica_is_not() {
     theme.set_mica(true); // what apply_window_chrome sets once the backdrop is on
     let tint = theme.get_window_bg().color();
     assert!(tint.alpha() > 0 && tint.alpha() < 255, "part-opaque over Acrylic: {tint:?}");
+    ui.invoke_set_dark(true);
+    let tint = theme.get_window_bg().color();
+    assert_eq!((tint.red(), tint.green(), tint.blue()), (0, 0, 0), "dark mode darkens with black: {tint:?}");
+    assert!(tint.alpha() > 0 && tint.alpha() < 255, "and stays part-opaque: {tint:?}");
+    ui.invoke_set_dark(false);
     negotium::platform::set_backdrop(&ui, BackdropChoice::Mica);
     assert!(!theme.get_acrylic());
     assert_eq!(theme.get_window_bg().color().alpha(), 0, "Mica shows through untouched");
