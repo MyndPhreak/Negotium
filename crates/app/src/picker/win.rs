@@ -12,7 +12,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GW_OWNER, GetClassNameW, GetShellWindow, GetWindow, GetWindowRect,
+    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
     GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
@@ -30,8 +30,8 @@ pub struct Monitor {
     pub dpi: u32,
 }
 
-/// Unowned top-level windows, top of the z-order first. Visible, cloaked and minimised
-/// windows are all listed; `classify` filters them.
+/// Top-level windows, owned ones included, top of the z-order first. Visible, cloaked and
+/// minimised windows are all listed; `classify` filters them.
 pub fn top_level_windows() -> Vec<WindowInfo> {
     let mut out: Vec<WindowInfo> = Vec::with_capacity(64);
     // SAFETY: `out` outlives the synchronous EnumWindows call that receives its address.
@@ -50,7 +50,8 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
-/// Reads one window. `None` for owned windows and for a `Ghost` whose original is unknown.
+/// Reads one window, with its own process id (an owned window may belong to another process
+/// than its owner). `None` for a `Ghost` whose original is unknown.
 ///
 /// # Safety
 /// `hwnd` must be a window handle from EnumWindows. Every call below reads state cached by
@@ -60,9 +61,6 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
 unsafe fn window_info(hwnd: HWND) -> Option<WindowInfo> {
     // SAFETY: see the function contract.
     unsafe {
-        if GetWindow(hwnd, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
-            return None;
-        }
         let class = class_name(hwnd);
         // A ghost is reported with the original window's pid and as hung; its frame is its own.
         let (mut source, hung) = if class == GHOST_CLASS {

@@ -39,7 +39,9 @@ pub fn decide(pressed: &Pressed, shift: bool, all_procs: &[(u32, i64, u32)]) -> 
     let title = format!("End {}?", info.target.name);
     match planned {
         Plan::Nothing => Outcome::Ignore,
-        Plan::Confirm(body, job) => Outcome::Confirm { title, body, job, restart_shell: false },
+        Plan::Confirm(body, job) => {
+            Outcome::Confirm { title, body, job, restart_shell: pressed.kind == Pickable::ExplorerInShell }
+        }
         Plan::Run(job) => {
             let restart_shell = pressed.kind == Pickable::ExplorerInShell;
             if restart_shell {

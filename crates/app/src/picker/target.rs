@@ -59,18 +59,15 @@ pub struct Env {
 }
 
 pub fn classify(w: &WindowInfo, env: &Env) -> Pickable {
-    if env.overlays.contains(&w.hwnd)
-        || !w.visible
-        || w.cloaked
-        || w.minimized
-        || w.title.is_empty()
-        || w.uwp_unresolved
-        || w.pid == env.own_pid
-    {
+    if env.overlays.contains(&w.hwnd) || !w.visible || w.cloaked || w.minimized {
         return Pickable::PassThrough;
     }
+    // Before the title rule: the taskbars have no title.
     if SHELL_CLASSES.contains(&w.class.as_str()) {
         return Pickable::Shell;
+    }
+    if w.title.is_empty() || w.uwp_unresolved || w.pid == env.own_pid {
+        return Pickable::Block;
     }
     if env.shell_pid == Some(w.pid) {
         return if w.class == FOLDER_CLASS { Pickable::ExplorerInShell } else { Pickable::Shell };
@@ -78,8 +75,9 @@ pub fn classify(w: &WindowInfo, env: &Env) -> Pickable {
     Pickable::App
 }
 
-/// `windows` in z-order, top first. Returns the first window whose frame contains `pt` and is
-/// not `Skip`; overlays are ignored.
+/// `windows` in z-order, top first. Looks through overlays and windows not on screen; the first
+/// other window whose frame contains `pt` decides: its kind, or `None` when it is `Block`.
+/// Never returns `PassThrough` or `Block`.
 pub fn pick_at<'a>(
     windows: &'a [WindowInfo],
     pt: (i32, i32),
@@ -90,6 +88,7 @@ pub fn pick_at<'a>(
         .filter(|w| w.frame.contains(pt))
         .map(|w| (w, classify(w, env)))
         .find(|(_, p)| *p != Pickable::PassThrough)
+        .filter(|(_, p)| *p != Pickable::Block)
 }
 
 #[cfg(test)]

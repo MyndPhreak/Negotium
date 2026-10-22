@@ -22,16 +22,17 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Controls::{
     TASKDIALOG_BUTTON, TASKDIALOG_COMMON_BUTTON_FLAGS, TASKDIALOG_FLAGS, TASKDIALOGCONFIG, TD_WARNING_ICON,
-    TASKDIALOG_NOTIFICATIONS, TDCBF_CANCEL_BUTTON, TDCBF_CLOSE_BUTTON, TDF_POSITION_RELATIVE_TO_WINDOW,
+    TASKDIALOG_NOTIFICATIONS, TDCBF_CANCEL_BUTTON, TDN_CREATED, TDCBF_CLOSE_BUTTON, TDF_POSITION_RELATIVE_TO_WINDOW,
 };
 use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, IDC_CROSS, IDCANCEL, IDOK,
-    LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MESSAGEBOX_STYLE, MessageBoxW, RegisterClassExW,
-    SW_SHOWNA, SetCursor, SetForegroundWindow, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_ACTIVATEAPP,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, HWND_TOPMOST, IDC_CROSS,
+    IDCANCEL, IDOK, LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MB_TOPMOST,
+    MESSAGEBOX_STYLE, MessageBoxW, RegisterClassExW, SW_SHOWNA, SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetForegroundWindow,
+    SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_ACTIVATEAPP,
     WM_DISPLAYCHANGE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WNDCLASSEXW,
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -391,20 +392,27 @@ enum Shown {
 fn or_message_box(shown: Shown, fallback: impl FnOnce() -> i32) -> Option<i32> {
     match shown {
         Shown::Pressed(p) => Some(p),
-        Shown::Failed | Shown::Unavailable => Some(fallback()),
+        Shown::Failed => None,
+        Shown::Unavailable => Some(fallback()),
     }
 }
 
 /// `style`, plus topmost and foreground when there is no owner to show the box above.
 fn message_box_style(owner: Option<isize>, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_STYLE {
-    let _ = owner;
-    style
+    if owner.is_some() { style } else { style | MB_TOPMOST | MB_SETFOREGROUND }
 }
 
 /// Task dialog callback for a dialog with no owner: on creation, puts it on top of every window
 /// and in the foreground, so a result shown after the overlays close is not hidden.
 unsafe extern "system" fn to_front(hwnd: HWND, msg: TASKDIALOG_NOTIFICATIONS, _: WPARAM, _: LPARAM, _: isize) -> HRESULT {
-    let _ = (hwnd, msg);
+    if msg == TDN_CREATED {
+        // SAFETY: `hwnd` is the task dialog comctl32 just created. Both calls only ask; a refusal
+        // (another app holds the foreground lock) leaves the dialog topmost, which is enough to see it.
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
     HRESULT(0)
 }
 
@@ -558,19 +566,21 @@ mod tests {
 
     #[test]
     fn an_ownerless_message_box_is_topmost_and_in_the_foreground() {
-        use windows::Win32::UI::WindowsAndMessaging::{MB_SETFOREGROUND, MB_TOPMOST};
         assert_eq!(message_box_style(None, MB_OK), MB_OK | MB_TOPMOST | MB_SETFOREGROUND);
         assert_eq!(message_box_style(Some(1), MB_OK), MB_OK);
     }
 
     #[test]
     fn an_ownerless_task_dialog_is_made_topmost_when_created() {
-        use windows::Win32::UI::Controls::{TDN_CREATED, TDN_DESTROYED};
-        use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE, WS_OVERLAPPED};
+        use windows::Win32::UI::Controls::TDN_DESTROYED;
+        use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE, WS_OVERLAPPED, WS_VISIBLE};
         let make = || {
-            // SAFETY: a hidden window of a system class, destroyed below.
-            unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("negotium-picker-front"), WS_OVERLAPPED, 0, 0, 10, 10, None, None, None, None) }
-                .expect("create test window")
+            // SAFETY: a small window of a system class, destroyed below (win.rs's tests show windows too).
+            unsafe {
+                let style = WS_OVERLAPPED | WS_VISIBLE;
+                CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("negotium-picker-front"), style, 0, 0, 10, 10, None, None, None, None)
+            }
+            .expect("create test window")
         };
         // SAFETY: valid window handles of this test.
         let topmost = |h: HWND| unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;

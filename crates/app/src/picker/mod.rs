@@ -273,10 +273,9 @@ impl Session {
                 }
             }
             Input::Down => {
-                self.pressed = self.hover.as_ref().map(|h| Pressed {
-                    kind: h.kind,
-                    info: self.info(h),
-                    needs_admin: h.needs_admin,
+                self.pressed = self.hover.as_ref().map(|h| {
+                    let info = self.info(h);
+                    Pressed { kind: shown_kind(h.kind, info.as_ref()), info, needs_admin: h.needs_admin }
                 });
                 Step::Nothing
             }
@@ -343,11 +342,13 @@ impl Session {
 
     fn paint(&mut self) -> windows::core::Result<()> {
         let target = self.hover.as_ref().map(|h| {
-            let l = match self.info(h) {
-                Some(info) => label(h.kind, Info::Ready(&info), h.needs_admin, h.window.hung || info.hung),
-                None => label(h.kind, Info::Loading { exe: &h.exe }, h.needs_admin, h.window.hung),
+            let info = self.info(h);
+            let kind = shown_kind(h.kind, info.as_ref());
+            let l = match info {
+                Some(info) => label(kind, Info::Ready(&info), h.needs_admin, h.window.hung || info.hung),
+                None => label(kind, Info::Loading { exe: &h.exe }, h.needs_admin, h.window.hung),
             };
-            (h.window.frame, l, h.kind == Pickable::Shell)
+            (h.window.frame, l, kind == Pickable::Shell)
         });
         for (i, (m, o)) in self.monitors.iter().zip(self.overlays.iter_mut()).enumerate() {
             let mut sc = scene::layout(m, target.as_ref().map(|(r, l, _)| (*r, l)), self.cursor_monitor == Some(i));
@@ -364,8 +365,7 @@ impl Session {
 /// How the hovered window is shown and clicked once its app is known: a window of the Windows
 /// group is treated as the shell (dimmed, shell label, click ignored), since no action may end it.
 fn shown_kind(kind: Pickable, info: Option<&AppInfo>) -> Pickable {
-    let _ = info;
-    kind
+    if info.is_some_and(|i| i.target.group) { Pickable::Shell } else { kind }
 }
 
 fn inside(r: Rect, (x, y): (i32, i32)) -> bool {
