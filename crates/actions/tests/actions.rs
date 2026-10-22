@@ -195,3 +195,42 @@ fn direct_efficiency_and_power_throttling() {
     child.kill().ok();
     child.wait().ok();
 }
+
+use negotium_actions::{can_terminate, capture_shell_token};
+
+#[test]
+fn can_terminate_own_child() {
+    let (mut child, ct) = spawn_ping();
+    assert!(can_terminate(child.id(), ct));
+    child.kill().ok();
+    child.wait().ok();
+}
+
+#[test]
+fn can_terminate_an_exited_process_is_true() {
+    let (mut child, ct) = spawn_ping();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(can_terminate(child.id(), ct), "nothing to warn about for a process that is gone");
+}
+
+#[test]
+fn cannot_terminate_a_protected_process_when_not_elevated() {
+    if is_elevated() {
+        eprintln!("skipped: elevated Negotium can open System");
+        return;
+    }
+    // System's real create time: a made-up one would read as "exited" (and so `true`).
+    let procs = ProcessReader::new().read().unwrap();
+    let system = procs.iter().find(|p| p.pid == 4).expect("System (pid 4) is always listed");
+    assert!(!can_terminate(system.pid, system.create_time));
+}
+
+#[test]
+fn capture_shell_token_is_none_when_not_elevated() {
+    if is_elevated() {
+        eprintln!("skipped: elevated Negotium captures a token");
+        return;
+    }
+    assert!(matches!(capture_shell_token(std::process::id()), Ok(None)));
+}
