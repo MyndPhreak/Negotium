@@ -3,19 +3,16 @@
 //! Not the Ctrl+Shift+Esc Task Manager redirect (`crate::integrate`).
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HWND_MESSAGE, RegisterClassExW,
     SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_HOTKEY, WNDCLASSEXW,
 };
-use windows::core::{BOOL, HRESULT, w};
+use windows::core::{HRESULT, w};
 
-// `Win32_UI_Input_KeyboardAndMouse` is not enabled for this crate, so the two calls are declared.
-windows::core::link!("user32.dll" "system" fn RegisterHotKey(hwnd: HWND, id: i32, modifiers: u32, vk: u32) -> BOOL);
-windows::core::link!("user32.dll" "system" fn UnregisterHotKey(hwnd: HWND, id: i32) -> BOOL);
-
-/// `MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT`.
-const MODIFIERS: u32 = 0x1 | 0x2 | 0x4 | 0x4000;
-const VK_ESCAPE: u32 = 0x1B;
+const MODIFIERS: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_CONTROL.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0);
 /// The one hotkey of the message-only window.
 const HOTKEY_ID: i32 = 1;
 
@@ -128,12 +125,12 @@ impl Win32Hotkey {
 impl HotkeyApi for Win32Hotkey {
     fn register(&self) -> bool {
         // SAFETY: `hwnd` is this thread's live window.
-        unsafe { RegisterHotKey(self.hwnd, HOTKEY_ID, MODIFIERS, VK_ESCAPE) }.as_bool()
+        unsafe { RegisterHotKey(Some(self.hwnd), HOTKEY_ID, MODIFIERS, VK_ESCAPE.0 as u32) }.is_ok()
     }
 
     fn unregister(&self) {
         // SAFETY: as `register`; unregistering a key that is not held fails harmlessly.
-        let _ = unsafe { UnregisterHotKey(self.hwnd, HOTKEY_ID) };
+        let _ = unsafe { UnregisterHotKey(Some(self.hwnd), HOTKEY_ID) };
     }
 }
 
