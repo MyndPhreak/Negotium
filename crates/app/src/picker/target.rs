@@ -47,7 +47,7 @@ pub enum Pickable {
     App,
     ExplorerInShell,
     Shell,
-    /// Looked through: an overlay, or a window that is not on screen.
+    /// Looked through: an overlay, a click-through window, or a window that is not on screen.
     PassThrough,
     /// On screen but not a target (no title, Negotium's own, unresolved UWP frame): it hides
     /// what is below it, so nothing is picked.
@@ -61,7 +61,7 @@ pub struct Env {
 }
 
 pub fn classify(w: &WindowInfo, env: &Env) -> Pickable {
-    if env.overlays.contains(&w.hwnd) || !w.visible || w.cloaked || w.minimized {
+    if env.overlays.contains(&w.hwnd) || w.click_through || !w.visible || w.cloaked || w.minimized {
         return Pickable::PassThrough;
     }
     // Before the title rule: the taskbars have no title.

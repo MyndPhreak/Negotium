@@ -12,8 +12,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
-    GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
+    EnumWindows, FindWindowExW, FindWindowW, GWL_EXSTYLE, GetClassNameW, GetShellWindow, GetWindowRect,
+    GetWindowLongPtrW, GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, WS_EX_TRANSPARENT,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
@@ -56,8 +57,8 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
 /// # Safety
 /// `hwnd` must be a window handle from EnumWindows. Every call below reads state cached by
 /// user32 or DWM: `InternalGetWindowText` (not `GetWindowText`), `GetClassNameW`,
-/// `IsHungAppWindow`, `IsIconic`, `DwmGetWindowAttribute`, `FindWindowExW`. None sends a
-/// window message, so none can block on a hung window, even one in this process.
+/// `IsHungAppWindow`, `IsIconic`, `DwmGetWindowAttribute`, `FindWindowExW`, `GetWindowLongPtrW`.
+/// None sends a window message, so none can block on a hung window, even one in this process.
 unsafe fn window_info(hwnd: HWND) -> Option<WindowInfo> {
     // SAFETY: see the function contract.
     unsafe {
@@ -94,7 +95,7 @@ unsafe fn window_info(hwnd: HWND) -> Option<WindowInfo> {
             minimized: IsIconic(hwnd).as_bool(),
             hung,
             uwp_unresolved,
-            click_through: false,
+            click_through: GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0 != 0,
         })
     }
 }
@@ -294,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_click_through_window_is_marked() {
-        use windows::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, WS_EX_TRANSPARENT};
+        use windows::Win32::UI::WindowsAndMessaging::WS_EX_LAYERED;
         // SAFETY: plain window creation with a system class; destroyed below.
         let through = unsafe {
             CreateWindowExW(
