@@ -2998,6 +2998,23 @@ fn the_backdrop_choice_shows_and_is_saved() {
     assert_eq!(ui.get_settings_backdrop(), 1);
 }
 
+#[test]
+fn acrylic_is_tinted_with_the_window_colour_and_mica_is_not() {
+    use negotium::settings::BackdropChoice;
+    let ui = window();
+    let theme = ui.global::<negotium::Theme>();
+    negotium::platform::set_backdrop(&ui, BackdropChoice::Acrylic);
+    assert!(theme.get_acrylic());
+    theme.set_mica(true); // what apply_window_chrome sets once the backdrop is on
+    let tint = theme.get_window_bg().color();
+    assert!(tint.alpha() > 0 && tint.alpha() < 255, "part-opaque over Acrylic: {tint:?}");
+    negotium::platform::set_backdrop(&ui, BackdropChoice::Mica);
+    assert!(!theme.get_acrylic());
+    assert_eq!(theme.get_window_bg().color().alpha(), 0, "Mica shows through untouched");
+    theme.set_mica(false);
+    assert_eq!(theme.get_window_bg().color().alpha(), 255, "no backdrop: solid");
+}
+
 const FALLBACK_NOTE: &str =
     "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
 const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";
