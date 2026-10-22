@@ -1,7 +1,25 @@
 //! Win32 side of the picker: lists top-level windows in z-order as plain `WindowInfo`
 //! records, finds the shell process and lists monitors. Nothing here sends a window message,
 //! so a hung window can never block the picker.
+use std::ffi::c_void;
+
+use negotium_collector::original_of_ghost;
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, FindWindowExW, GW_OWNER, GetClassNameW, GetShellWindow, GetWindow, GetWindowRect,
+    GetWindowThreadProcessId, InternalGetWindowText, IsHungAppWindow, IsIconic, IsWindowVisible,
+};
+use windows::core::{BOOL, w};
+
 use super::target::{Rect, WindowInfo};
+
+const UWP_FRAME_CLASS: &str = "ApplicationFrameWindow";
+/// Window class DWM gives the stand-in of a hung window.
+const GHOST_CLASS: &str = "Ghost";
 
 /// One display: its rectangle in virtual-screen pixels and its effective DPI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,16 +31,153 @@ pub struct Monitor {
 /// Unowned top-level windows, top of the z-order first. Visible, cloaked and minimised
 /// windows are all listed; `classify` filters them.
 pub fn top_level_windows() -> Vec<WindowInfo> {
-    todo!()
+    let mut out: Vec<WindowInfo> = Vec::with_capacity(64);
+    // SAFETY: `out` outlives the synchronous EnumWindows call that receives its address.
+    // A failed enumeration leaves whatever was collected, which is the best answer available.
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut out as *mut Vec<WindowInfo> as isize)) };
+    out
+}
+
+unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam is the `&mut Vec<WindowInfo>` passed by top_level_windows.
+    let out = unsafe { &mut *(lparam.0 as *mut Vec<WindowInfo>) };
+    // SAFETY: hwnd comes from EnumWindows; window_info sends no window message.
+    if let Some(info) = unsafe { window_info(hwnd) } {
+        out.push(info);
+    }
+    true.into()
+}
+
+/// Reads one window. `None` for owned windows and for a `Ghost` whose original is unknown.
+///
+/// # Safety
+/// `hwnd` must be a window handle from EnumWindows. Every call below reads state cached by
+/// user32 or DWM: `InternalGetWindowText` (not `GetWindowText`), `GetClassNameW`,
+/// `IsHungAppWindow`, `IsIconic`, `DwmGetWindowAttribute`, `FindWindowExW`. None sends a
+/// window message, so none can block on a hung window, even one in this process.
+unsafe fn window_info(hwnd: HWND) -> Option<WindowInfo> {
+    // SAFETY: see the function contract.
+    unsafe {
+        if GetWindow(hwnd, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
+            return None;
+        }
+        let class = class_name(hwnd);
+        // A ghost is reported with the original window's pid and as hung; its frame is its own.
+        let (mut source, hung) = if class == GHOST_CLASS {
+            (original_of_ghost(hwnd)?, true)
+        } else {
+            (hwnd, IsHungAppWindow(hwnd).as_bool())
+        };
+        let mut uwp_unresolved = false;
+        if class == UWP_FRAME_CLASS {
+            match FindWindowExW(Some(hwnd), None, w!("Windows.UI.Core.CoreWindow"), None) {
+                Ok(core) if !core.is_invalid() => source = core,
+                _ => uwp_unresolved = true,
+            }
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(source, Some(&mut pid));
+        let mut buf = [0u16; 512];
+        let copied = InternalGetWindowText(hwnd, &mut buf).max(0) as usize;
+        let mut cloak = 0u32;
+        let cloaked =
+            DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, (&mut cloak as *mut u32).cast(), size_of::<u32>() as u32).is_ok() && cloak != 0;
+        Some(WindowInfo {
+            hwnd: hwnd.0 as isize,
+            pid,
+            create_time: create_time(pid),
+            class,
+            title: String::from_utf16_lossy(&buf[..copied]),
+            frame: frame(hwnd),
+            visible: IsWindowVisible(hwnd).as_bool(),
+            cloaked,
+            minimized: IsIconic(hwnd).as_bool(),
+            hung,
+            uwp_unresolved,
+        })
+    }
+}
+
+/// # Safety
+/// `hwnd` must be a window handle. `GetClassNameW` reads the class atom; it sends no message.
+unsafe fn class_name(hwnd: HWND) -> String {
+    let mut class = [0u16; 256];
+    // SAFETY: `class` is a valid writable buffer; its length is passed with the slice.
+    let len = unsafe { GetClassNameW(hwnd, &mut class) }.max(0) as usize;
+    String::from_utf16_lossy(&class[..len])
+}
+
+/// The visible frame (without the invisible resize border), falling back to the window rect.
+///
+/// # Safety
+/// `hwnd` must be a window handle.
+unsafe fn frame(hwnd: HWND) -> Rect {
+    let mut r = RECT::default();
+    // SAFETY: `r` is a valid RECT and its size is passed.
+    let dwm = unsafe {
+        DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, (&mut r as *mut RECT).cast::<c_void>(), size_of::<RECT>() as u32)
+    };
+    // SAFETY: valid window handle and out pointer.
+    if dwm.is_err() && unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        r = RECT::default();
+    }
+    Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
+/// Process create time as FILETIME 100 ns units; 0 when the process cannot be opened.
+fn create_time(pid: u32) -> i64 {
+    if pid == 0 {
+        return 0;
+    }
+    // SAFETY: the handle is used for the one GetProcessTimes call below and then closed.
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return 0;
+        };
+        let (mut created, mut exit, mut kernel, mut user) =
+            (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let ok = GetProcessTimes(h, &mut created, &mut exit, &mut kernel, &mut user).is_ok();
+        let _ = CloseHandle(h);
+        if ok { (i64::from(created.dwHighDateTime) << 32) | i64::from(created.dwLowDateTime) } else { 0 }
+    }
 }
 
 /// Process id and create time (FILETIME, 100 ns units) of the shell window's process.
 pub fn shell_pid() -> Option<(u32, i64)> {
-    todo!()
+    // SAFETY: GetShellWindow returns the shell's HWND or NULL; the pid out pointer is valid.
+    let pid = unsafe {
+        let shell = GetShellWindow();
+        if shell.is_invalid() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(shell, Some(&mut pid));
+        pid
+    };
+    (pid != 0).then(|| (pid, create_time(pid)))
 }
 
 pub fn monitors() -> Vec<Monitor> {
-    todo!()
+    let mut out: Vec<Monitor> = Vec::new();
+    // SAFETY: `out` outlives the synchronous EnumDisplayMonitors call that receives its address.
+    let _ = unsafe { EnumDisplayMonitors(None, None, Some(visit_monitor), LPARAM(&mut out as *mut Vec<Monitor> as isize)) };
+    out
+}
+
+unsafe extern "system" fn visit_monitor(monitor: HMONITOR, _dc: HDC, _rect: *mut RECT, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam is the `&mut Vec<Monitor>` passed by monitors().
+    let out = unsafe { &mut *(lparam.0 as *mut Vec<Monitor>) };
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: `info` has cbSize set; the DPI out pointers are valid stack u32s.
+    unsafe {
+        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            let (mut dx, mut dy) = (96u32, 96u32);
+            let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+            let r = info.rcMonitor;
+            out.push(Monitor { rect: Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, dpi: dx });
+        }
+    }
+    true.into()
 }
 
 #[cfg(test)]
