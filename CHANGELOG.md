@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.0](https://github.com/MyndPhreak/Negotium/compare/v0.7.0...v0.8.0) (2026-10-22)
+
+
+### Features
+
+* **app:** Ctrl+Alt+Shift+Esc picker shortcut and review fixes ([#25](https://github.com/MyndPhreak/Negotium/issues/25)) ([840f2d1](https://github.com/MyndPhreak/Negotium/commit/840f2d100237e4dfccb91fdbd5f0a9b3be49852d))
+* **app:** End a window… from the tray ([#24](https://github.com/MyndPhreak/Negotium/issues/24)) ([d23f246](https://github.com/MyndPhreak/Negotium/commit/d23f246070b0e3e624f18fd746d29aac99b75a7b))
+* **app:** show a Mica Alt backdrop behind the GPU renderer ([#19](https://github.com/MyndPhreak/Negotium/issues/19)) ([54babaf](https://github.com/MyndPhreak/Negotium/commit/54babaf557528e4f0c3383309c30a3429218b098))
+* **app:** window picker core — pick a window's app and decide a click ([#22](https://github.com/MyndPhreak/Negotium/issues/22)) ([6346c0f](https://github.com/MyndPhreak/Negotium/commit/6346c0f3eb004fc5ef88ab05d3673e3a85fddf7c))
+* **app:** window picker Win32 building blocks ([#23](https://github.com/MyndPhreak/Negotium/issues/23)) ([518cbb6](https://github.com/MyndPhreak/Negotium/commit/518cbb6729d98c8d62671d910cd83fc5642b1b3a))
+
+
+### Bug Fixes
+
+* **app:** embed a Common Controls 6 manifest and drop the picker's workarounds ([#26](https://github.com/MyndPhreak/Negotium/issues/26)) ([0fae9fd](https://github.com/MyndPhreak/Negotium/commit/0fae9fd5260171a17a158cebef4593dc2607da61))
+* **app:** embed the icon in negotium.exe ([#21](https://github.com/MyndPhreak/Negotium/issues/21)) ([74cf027](https://github.com/MyndPhreak/Negotium/commit/74cf02762d9879a4cd69ea76da08f1cbe6d2be26))
+
+
+### Continuous Integration
+
+* run PR checks once and skip the release build on PRs ([#27](https://github.com/MyndPhreak/Negotium/issues/27)) ([d215c88](https://github.com/MyndPhreak/Negotium/commit/d215c88ba0f9aabf3a407625a9aba815a0ef4455))
+
 ## [0.7.0](https://github.com/MyndPhreak/Negotium/compare/v0.6.0...v0.7.0) (2026-10-20)
 
 
