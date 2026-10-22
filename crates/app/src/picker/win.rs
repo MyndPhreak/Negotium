@@ -94,6 +94,7 @@ unsafe fn window_info(hwnd: HWND) -> Option<WindowInfo> {
             minimized: IsIconic(hwnd).as_bool(),
             hung,
             uwp_unresolved,
+            click_through: false,
         })
     }
 }
@@ -289,6 +290,34 @@ mod tests {
         assert!(owned_at < find(&list, owner).expect("owner listed"));
         assert_eq!(list[owned_at].title, "negotium-picker-owned");
         assert_eq!(list[owned_at].pid, std::process::id());
+    }
+
+    #[test]
+    fn a_click_through_window_is_marked() {
+        use windows::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, WS_EX_TRANSPARENT};
+        // SAFETY: plain window creation with a system class; destroyed below.
+        let through = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                w!("STATIC"),
+                w!("negotium-picker-through"),
+                WS_OVERLAPPED | WS_VISIBLE,
+                100,
+                100,
+                200,
+                150,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("create test window");
+        let plain = make(w!("negotium-picker-plain"), None, 120);
+        let list = top_level_windows();
+        destroy(&[through, plain]);
+        assert!(list[find(&list, through).expect("listed")].click_through);
+        assert!(!list[find(&list, plain).expect("listed")].click_through);
     }
 
     #[test]

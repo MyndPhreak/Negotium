@@ -38,6 +38,8 @@ pub struct WindowInfo {
     pub hung: bool,
     /// `ApplicationFrameWindow` with no `CoreWindow` child.
     pub uwp_unresolved: bool,
+    /// `WS_EX_TRANSPARENT`: mouse input goes through it (game, GPU and recording overlays).
+    pub click_through: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +114,7 @@ mod tests {
             minimized: false,
             hung: false,
             uwp_unresolved: false,
+            click_through: false,
         }
     }
 
@@ -211,6 +214,14 @@ mod tests {
             let (w, p) = pick_at(&ws, (50, 50), &env()).unwrap();
             assert_eq!((w.hwnd, p), (2, Pickable::App), "{a:?}");
         }
+    }
+
+    #[test]
+    fn a_click_through_window_above_an_app_is_looked_through() {
+        let overlay = WindowInfo { click_through: true, ..app(3, rect(0, 0, 100, 100)) };
+        let ws = [overlay, app(2, rect(0, 0, 100, 100))];
+        let (w, p) = pick_at(&ws, (50, 50), &env()).unwrap();
+        assert_eq!((w.hwnd, p), (2, Pickable::App));
     }
 
     #[test]
