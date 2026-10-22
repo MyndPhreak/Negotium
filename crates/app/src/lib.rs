@@ -12,6 +12,7 @@ pub mod framestats;
 pub mod log;
 pub mod nav;
 pub mod perf;
+pub mod picker;
 pub mod platform;
 pub mod renderer;
 pub mod scrub;
