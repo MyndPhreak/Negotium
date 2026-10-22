@@ -25,9 +25,39 @@ const NEEDS_ADMIN: &str = "Needs admin \u{2014} restart Negotium as admin";
 const EXPLORER_BODY: &str = "This also restarts the taskbar and the desktop. All File Explorer windows close.";
 
 pub fn decide(pressed: &Pressed, shift: bool, all_procs: &[(u32, i64, u32)]) -> Outcome {
-    let _ = (pressed, shift, all_procs, NEEDS_ADMIN, EXPLORER_BODY, plan as fn(_, _, _) -> Plan);
-    let _: Option<Job> = None;
-    todo!()
+    if matches!(pressed.kind, Pickable::Shell | Pickable::Skip) {
+        return Outcome::Ignore;
+    }
+    let Some(info) = &pressed.info else { return Outcome::Ignore };
+    let planned = plan("end-task", &info.target, all_procs);
+    if planned == Plan::Nothing {
+        return Outcome::Ignore;
+    }
+    if pressed.needs_admin {
+        return if shift { Outcome::Ignore } else { Outcome::Tell(NEEDS_ADMIN.to_string()) };
+    }
+    let title = format!("End {}?", info.target.name);
+    match planned {
+        Plan::Nothing => Outcome::Ignore,
+        Plan::Confirm(body, job) => Outcome::Confirm { title, body, job, restart_shell: false },
+        Plan::Run(job) => {
+            let restart_shell = pressed.kind == Pickable::ExplorerInShell;
+            if restart_shell {
+                let body = format!("{} {EXPLORER_BODY}", closes(job.targets.len()));
+                Outcome::Confirm { title, body, job, restart_shell }
+            } else if shift {
+                Outcome::Run { job, restart_shell }
+            } else {
+                let body = closes(job.targets.len());
+                Outcome::Confirm { title, body, job, restart_shell }
+            }
+        }
+    }
+}
+
+fn closes(n: usize) -> String {
+    let noun = if n == 1 { "process" } else { "processes" };
+    format!("This closes {n} {noun}. You lose unsaved work.")
 }
 
 #[cfg(test)]
