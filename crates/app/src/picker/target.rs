@@ -18,7 +18,7 @@ pub struct Rect {
 
 impl Rect {
     fn contains(&self, (x, y): (i32, i32)) -> bool {
-        todo!()
+        self.left <= x && x < self.right && self.top <= y && y < self.bottom
     }
 }
 
@@ -55,7 +55,23 @@ pub struct Env {
 }
 
 pub fn classify(w: &WindowInfo, env: &Env) -> Pickable {
-    todo!()
+    if env.overlays.contains(&w.hwnd)
+        || !w.visible
+        || w.cloaked
+        || w.minimized
+        || w.title.is_empty()
+        || w.uwp_unresolved
+        || w.pid == env.own_pid
+    {
+        return Pickable::Skip;
+    }
+    if SHELL_CLASSES.contains(&w.class.as_str()) {
+        return Pickable::Shell;
+    }
+    if env.shell_pid == Some(w.pid) {
+        return if w.class == FOLDER_CLASS { Pickable::ExplorerInShell } else { Pickable::Shell };
+    }
+    Pickable::App
 }
 
 /// `windows` in z-order, top first. Returns the first window whose frame contains `pt` and is
@@ -65,7 +81,11 @@ pub fn pick_at<'a>(
     pt: (i32, i32),
     env: &Env,
 ) -> Option<(&'a WindowInfo, Pickable)> {
-    todo!()
+    windows
+        .iter()
+        .filter(|w| w.frame.contains(pt))
+        .map(|w| (w, classify(w, env)))
+        .find(|(_, p)| *p != Pickable::Skip)
 }
 
 #[cfg(test)]
