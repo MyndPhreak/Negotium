@@ -2,6 +2,7 @@
 //! theme, the colour scheme and the user's accent colour (re-applied when the system theme or
 //! accent changes); the main-window hooks for tray re-creation and
 //! activation; and the single-instance lock.
+use crate::renderer::Renderer;
 use crate::settings::{ThemeChoice, effective_dark};
 use crate::{MainWindow, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -16,7 +17,8 @@ use windows::Win32::Foundation::{
     WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
-    DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_TABBEDWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
 };
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::Threading::{
@@ -169,6 +171,11 @@ fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
         RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as *mut c_void)),
         _ => None,
     }
+}
+
+/// The system backdrop behind a window drawn by `renderer`, or none.
+pub fn backdrop_for(_renderer: Renderer) -> Option<DWM_SYSTEMBACKDROP_TYPE> {
+    Some(DWMSBT_MAINWINDOW)
 }
 
 /// Applies the dark/light title bar (from `Theme.dark`) and the Mica backdrop. `Theme.mica`
@@ -961,6 +968,15 @@ pub fn remove_env_var(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_gpu_renderer_gets_the_mica_alt_backdrop() {
+        assert_eq!(backdrop_for(Renderer::Gpu), Some(DWMSBT_TABBEDWINDOW));
+        // Its buffer is opaque: a transparent window background would not show the backdrop.
+        assert_eq!(backdrop_for(Renderer::Software), None);
+        // SLINT_BACKEND may name the software renderer.
+        assert_eq!(backdrop_for(Renderer::FromEnv), None);
+    }
 
     #[test]
     fn elevated_every_slint_and_negotium_variable_is_dropped() {
