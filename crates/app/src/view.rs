@@ -110,6 +110,12 @@ pub struct Target {
     pub group: bool,
 }
 
+/// Builds the action target for an app row; the Overview and the window picker share it.
+pub fn target_of(r: &AppRow, hung_pids: &HashSet<u32>, image_of: &HashMap<(u32, i64), String>) -> Target {
+    let _ = (r, hung_pids, image_of);
+    todo!()
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Frame {
     pub meters: Vec<MeterView>,
