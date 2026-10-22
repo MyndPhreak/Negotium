@@ -1,0 +1,2 @@
+// The exe's own icon: Task Manager, Explorer and shortcuts read it from here.
+1 ICON "negotium.ico"
