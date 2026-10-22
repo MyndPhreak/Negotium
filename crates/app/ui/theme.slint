@@ -7,9 +7,11 @@ export global Theme {
     in-out property <bool> acrylic: false;
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     property <color> solid-bg: dark ? #202020 : #f3f3f3;
-    // Acrylic alone shows too much of the windows behind: a part-opaque layer of the solid colour
-    // softens it. Mica only tints from the wallpaper and is shown as it is.
-    out property <brush> window-bg: mica ? (acrylic ? solid-bg.with-alpha(0.45) : transparent) : solid-bg;
+    // Acrylic alone shows too much of the windows behind: a part-opaque layer softens it, black in
+    // dark mode and the solid colour in light. Mica only tints from the wallpaper and is shown as
+    // it is.
+    property <color> acrylic-tint: dark ? #000000.with-alpha(0.45) : solid-bg.with-alpha(0.45);
+    out property <brush> window-bg: mica ? (acrylic ? acrylic-tint : transparent) : solid-bg;
     out property <color> card: dark ? #ffffff0f : #ffffffb3;
     out property <color> card-border: dark ? #ffffff14 : #0000000f;
     // A hovered card: a step lighter than `card`.
