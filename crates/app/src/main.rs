@@ -491,6 +491,8 @@ fn main() -> Result<(), slint::PlatformError> {
         fallback_recorded,
         running,
         tray_cpu_changed: Rc::new(negotium::tray::set_enabled),
+        // Nothing to register yet (the shortcut arrives with `crate::shortcut`).
+        picker_shortcut_changed: Rc::new(|_| true),
         integration: negotium::settingspage::Integration {
             install,
             installed_exe: negotium::install::program_files().map(|pf| pf.join("Negotium").join("negotium.exe")),

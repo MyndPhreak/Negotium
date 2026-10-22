@@ -32,6 +32,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
     ui.set_settings_tray_cpu(s.tray_cpu);
+    ui.set_settings_picker_shortcut(s.picker_shortcut);
     ui.set_settings_group_by_type(s.group_by_type);
     ui.set_settings_check_updates(s.check_updates);
     ui.set_settings_start_with_windows(s.start_with_windows);
@@ -69,6 +70,9 @@ pub struct SettingsWiring {
     pub running: Renderer,
     /// The tray shows the CPU graph or the app icon (`crate::tray::set_enabled` in the app).
     pub tray_cpu_changed: Rc<dyn Fn(bool)>,
+    /// Registers or unregisters the picker shortcut (`crate::shortcut`); returns whether it is now
+    /// registered. The saved choice does not depend on the answer.
+    pub picker_shortcut_changed: Rc<dyn Fn(bool) -> bool>,
     /// This copy, and what the Ctrl+Shift+Esc and admin mode switches and "Open Windows Task
     /// Manager" act on.
     pub integration: Integration,

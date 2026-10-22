@@ -183,6 +183,10 @@ export component SettingsPage inherits VerticalLayout {
     in property <bool> group-by-type;
     // The tray icon draws the CPU graph (crate::tray).
     in property <bool> tray-cpu;
+    // Ctrl+Alt+Shift+Esc opens the window picker (crate::shortcut); whether another program
+    // already holds the keys.
+    in property <bool> picker-shortcut;
+    in property <bool> shortcut-taken;
     // The saved GPU choice; whether an automatic fallback to the CPU is recorded; whether this
     // instance draws with the GPU; whether SLINT_BACKEND chose the renderer (crate::settingspage).
     in property <bool> gpu-rendering;
@@ -210,6 +214,7 @@ export component SettingsPage inherits VerticalLayout {
     callback smooth-graphs-toggled(bool);
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
+    callback picker-shortcut-toggled(bool);
     callback gpu-rendering-toggled(bool);
     callback admin-mode-toggled(bool);
     callback hotkey-toggled(bool);
