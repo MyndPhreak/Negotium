@@ -1,7 +1,9 @@
 name: CI
 
+# A PR branch runs once, through pull_request; push runs only for main (after a merge).
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -24,7 +26,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # Only main saves the cache: every branch can restore main's, and PR branches neither pay
+      # for the upload nor push main's cache out of the repository's 10 GB limit.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       # Tests marked #[ignore] need an elevated terminal and are not run here.
@@ -34,8 +40,12 @@ jobs:
       - name: Test
         run: cargo test --workspace --no-fail-fast -- --skip busy_child_reports_one_core_of_cpu
       # The MSI ships only negotium.exe: it must not need the Visual C++ Redistributable.
+      # Checked on main only (a release build takes minutes); release-please.yml checks again
+      # before it builds the MSI, so an installer can never ship with the runtime import.
       - name: Build release
+        if: github.event_name == 'push'
         run: cargo build --release -p negotium
       - name: Check the release exe imports no Visual C++ runtime
+        if: github.event_name == 'push'
         shell: pwsh
         run: ./.github/scripts/check-imports.ps1 target/release/negotium.exe
