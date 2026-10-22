@@ -23,8 +23,37 @@ pub enum Info<'a> {
 }
 
 pub fn label(kind: Pickable, info: Info, needs_admin: bool, hung: bool) -> Label {
-    let _ = (kind, info, needs_admin, hung);
-    todo!()
+    let outline = match kind {
+        Pickable::Skip => return Label { title: String::new(), detail: String::new(), outline: Outline::None },
+        Pickable::Shell => {
+            return Label {
+                title: "Windows needs this — you cannot end it here".to_string(),
+                detail: String::new(),
+                outline: Outline::None,
+            };
+        }
+        Pickable::App | Pickable::ExplorerInShell if hung => Outline::Red,
+        Pickable::App | Pickable::ExplorerInShell => Outline::Accent,
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let title = match info {
+        Info::Loading { exe } => exe.to_string(),
+        Info::Ready(a) => {
+            parts.push(if a.process_count == 1 { "1 process".to_string() } else { format!("{} processes", a.process_count) });
+            parts.push(crate::format::bytes(a.private_bytes as f64));
+            a.target.name.clone()
+        }
+    };
+    if hung {
+        parts.push("Not responding".to_string());
+    }
+    if needs_admin {
+        parts.push("Needs admin — restart Negotium as admin".to_string());
+    }
+    if kind == Pickable::ExplorerInShell {
+        parts.push("File Explorer — restarts the taskbar".to_string());
+    }
+    Label { title, detail: parts.join(" · "), outline }
 }
 
 #[cfg(test)]
