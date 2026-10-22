@@ -1,6 +1,23 @@
 //! The window picker's global shortcut, Ctrl+Alt+Shift+Esc. `Shortcut` holds the logic (the
 //! setting is the flag: off never calls the API); `Win32Hotkey` is the `RegisterHotKey` side.
 //! Not the Ctrl+Shift+Esc Task Manager redirect (`crate::integrate`).
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HWND_MESSAGE, RegisterClassExW,
+    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_HOTKEY, WNDCLASSEXW,
+};
+use windows::core::{BOOL, HRESULT, w};
+
+// `Win32_UI_Input_KeyboardAndMouse` is not enabled for this crate, so the two calls are declared.
+windows::core::link!("user32.dll" "system" fn RegisterHotKey(hwnd: HWND, id: i32, modifiers: u32, vk: u32) -> BOOL);
+windows::core::link!("user32.dll" "system" fn UnregisterHotKey(hwnd: HWND, id: i32) -> BOOL);
+
+/// `MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT`.
+const MODIFIERS: u32 = 0x1 | 0x2 | 0x4 | 0x4000;
+const VK_ESCAPE: u32 = 0x1B;
+/// The one hotkey of the message-only window.
+const HOTKEY_ID: i32 = 1;
 
 /// Registers and releases the shortcut with the system.
 pub trait HotkeyApi {
@@ -24,35 +41,138 @@ impl<A: HotkeyApi> Shortcut<A> {
     /// Registers or unregisters; returns `registered`. Never touches the saved setting. A taken
     /// shortcut is asked for again on the next `apply(true)`.
     pub fn apply(&mut self, wanted: bool) -> bool {
-        let _ = wanted;
-        todo!()
+        self.wanted = wanted;
+        if wanted && !self.registered {
+            self.registered = self.api.register();
+        } else if !wanted && self.registered {
+            self.api.unregister();
+            self.registered = false;
+        }
+        self.registered
     }
 
     /// Wanted, but another program holds the keys.
     pub fn taken(&self) -> bool {
-        todo!()
+        self.wanted && !self.registered
     }
 }
 
-/// The real keys on a message-only window of the UI thread.
-pub struct Win32Hotkey {}
+/// A hotkey that cannot be registered: stands in when the message-only window could not be made,
+/// so the setting reads as "taken" instead of the shortcut silently doing nothing.
+pub struct Unavailable;
+
+impl HotkeyApi for Unavailable {
+    fn register(&self) -> bool {
+        false
+    }
+
+    fn unregister(&self) {}
+}
+
+impl HotkeyApi for Box<dyn HotkeyApi> {
+    fn register(&self) -> bool {
+        (**self).register()
+    }
+
+    fn unregister(&self) {
+        (**self).unregister()
+    }
+}
+
+/// The real keys on a message-only window of the UI thread. The window gets WM_HOTKEY from the
+/// thread's message loop (Slint's). Destroying it releases the keys.
+pub struct Win32Hotkey {
+    hwnd: HWND,
+    /// Owned by the window (its user data); freed after the window is destroyed.
+    on_press: *mut Box<dyn Fn()>,
+}
 
 impl Win32Hotkey {
-    /// `on_press` runs on the UI thread each time the keys are pressed.
+    /// `on_press` runs on the UI thread each time the keys are pressed. Create it on that thread.
     pub fn new(on_press: Box<dyn Fn()>) -> windows::core::Result<Self> {
-        let _ = on_press;
-        todo!()
+        register_class()?;
+        // SAFETY: the class is registered; the parent HWND_MESSAGE makes a message-only window.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                CLASS,
+                w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(GetModuleHandleW(None)?.into()),
+                None,
+            )?
+        };
+        let on_press = Box::into_raw(Box::new(on_press));
+        // SAFETY: `hwnd` is ours; the pointer stays valid until `drop` destroys the window first.
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, on_press as isize) };
+        Ok(Self { hwnd, on_press })
     }
 }
 
 impl HotkeyApi for Win32Hotkey {
     fn register(&self) -> bool {
-        todo!()
+        // SAFETY: `hwnd` is this thread's live window.
+        unsafe { RegisterHotKey(self.hwnd, HOTKEY_ID, MODIFIERS, VK_ESCAPE) }.as_bool()
     }
 
     fn unregister(&self) {
-        todo!()
+        // SAFETY: as `register`; unregistering a key that is not held fails harmlessly.
+        let _ = unsafe { UnregisterHotKey(self.hwnd, HOTKEY_ID) };
     }
+}
+
+impl Drop for Win32Hotkey {
+    fn drop(&mut self) {
+        // SAFETY: the window is destroyed (no more messages reach `wndproc`) before the callback
+        // it points to is freed.
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+            drop(Box::from_raw(self.on_press));
+        }
+    }
+}
+
+const CLASS: windows::core::PCWSTR = w!("NegotiumShortcutWindow");
+
+fn register_class() -> windows::core::Result<()> {
+    // SAFETY: the class struct is a local; the class name is static.
+    unsafe {
+        let class = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: GetModuleHandleW(None)?.into(),
+            lpszClassName: CLASS,
+            ..Default::default()
+        };
+        if RegisterClassExW(&class) == 0 {
+            let e = windows::core::Error::from_thread();
+            // ERROR_CLASS_ALREADY_EXISTS: registered before; nothing to do.
+            if e.code() != HRESULT::from_win32(1410) {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_HOTKEY && wparam.0 == HOTKEY_ID as usize {
+        // SAFETY: the user data is the callback `Win32Hotkey::new` stored; it outlives the window.
+        let on_press = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Box<dyn Fn()>;
+        if !on_press.is_null() {
+            // SAFETY: as above, non-null.
+            unsafe { (*on_press)() };
+        }
+        return LRESULT(0);
+    }
+    // SAFETY: the arguments are the ones this window procedure received.
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 #[cfg(test)]
