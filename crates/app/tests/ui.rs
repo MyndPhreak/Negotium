@@ -3006,8 +3006,12 @@ fn acrylic_is_tinted_and_mica_is_not() {
     negotium::platform::set_backdrop(&ui, BackdropChoice::Acrylic);
     assert!(theme.get_acrylic());
     theme.set_mica(true); // what apply_window_chrome sets once the backdrop is on
+    ui.invoke_set_dark(false);
     let tint = theme.get_window_bg().color();
     assert!(tint.alpha() > 0 && tint.alpha() < 255, "part-opaque over Acrylic: {tint:?}");
+    // Grey text on the backdrop can only be as dark as this layer lets it: below ~75% the labels
+    // break up over a busy background (seen in light mode at 45%).
+    assert!(tint.alpha() >= 191, "light mode keeps grey text readable: {tint:?}");
     ui.invoke_set_dark(true);
     let tint = theme.get_window_bg().color();
     assert_eq!((tint.red(), tint.green(), tint.blue()), (0, 0, 0), "dark mode darkens with black: {tint:?}");
