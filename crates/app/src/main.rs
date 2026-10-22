@@ -415,6 +415,7 @@ fn main() -> Result<(), slint::PlatformError> {
         move || watchdog.as_ref().is_none_or(|w| w.resolved())
     };
     let ui = MainWindow::new()?;
+    platform::set_renderer(running);
     platform::apply_accent(&ui);
     // Settings in effect for this run; the Settings page changes them and saves to `settings_path`.
     let settings = Rc::new(RefCell::new(settings));

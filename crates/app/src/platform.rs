@@ -2,6 +2,7 @@
 //! theme, the colour scheme and the user's accent colour (re-applied when the system theme or
 //! accent changes); the main-window hooks for tray re-creation and
 //! activation; and the single-instance lock.
+use crate::renderer::Renderer;
 use crate::settings::{ThemeChoice, effective_dark};
 use crate::{MainWindow, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -16,8 +17,10 @@ use windows::Win32::Foundation::{
     WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
-    DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_TABBEDWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -171,13 +174,31 @@ fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
     }
 }
 
-/// Applies the dark/light title bar (from `Theme.dark`) and the Mica backdrop. `Theme.mica`
-/// follows the backdrop call alone: a failed dark-mode call leaves the title bar's colour wrong,
-/// not the content's background. Returns true only if both DWM calls succeed.
+/// The system backdrop behind a window drawn by `renderer`, or none. Mica Alt only behind the
+/// GPU renderer: FemtoVG presents an alpha channel that DWM composites over the backdrop. The
+/// software renderer's buffer is opaque (and `SLINT_BACKEND` may name it), so that window keeps
+/// the solid `Theme.window-bg`; the translucent cards then blend over that colour instead.
+pub fn backdrop_for(renderer: Renderer) -> Option<DWM_SYSTEMBACKDROP_TYPE> {
+    (renderer == Renderer::Gpu).then_some(DWMSBT_TABBEDWINDOW)
+}
+
+thread_local! {
+    /// The renderer this instance draws with, set once by `main` before the window is themed.
+    /// Unset (tests, or before `main` sets it): no backdrop.
+    static RENDERER: std::cell::Cell<Option<Renderer>> = const { std::cell::Cell::new(None) };
+}
+
+/// Records the renderer in use, which decides the backdrop (`backdrop_for`). UI thread only.
+pub fn set_renderer(renderer: Renderer) {
+    RENDERER.with(|r| r.set(Some(renderer)));
+}
+
+/// Applies the dark/light title bar (from `Theme.dark`) and the backdrop (`backdrop_for`).
+/// `Theme.mica` follows the backdrop call alone: a failed dark-mode call leaves the title bar's
+/// colour wrong, not the content's background. Returns true only if every DWM call made succeeds.
 pub fn apply_window_chrome(ui: &MainWindow) -> bool {
     let Some(hwnd) = hwnd_of(ui) else { return false };
     let dark = BOOL::from(ui.global::<Theme>().get_dark());
-    let backdrop = DWMSBT_MAINWINDOW;
     // SAFETY: valid HWND of our own window; attribute payloads match their documented sizes.
     let dark_ok = unsafe {
         DwmSetWindowAttribute(
@@ -194,7 +215,11 @@ pub fn apply_window_chrome(ui: &MainWindow) -> bool {
     let _ = unsafe {
         SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
     };
-    // SAFETY: as above; DWMSBT_MAINWINDOW is a DWM_SYSTEMBACKDROP_TYPE (i32).
+    let Some(backdrop) = RENDERER.with(|r| r.get()).and_then(backdrop_for) else {
+        ui.global::<Theme>().set_mica(false);
+        return dark_ok;
+    };
+    // SAFETY: as above; the payload is a DWM_SYSTEMBACKDROP_TYPE (i32).
     let mica_ok = unsafe {
         DwmSetWindowAttribute(
             hwnd,
@@ -204,8 +229,13 @@ pub fn apply_window_chrome(ui: &MainWindow) -> bool {
         )
     }
     .is_ok();
-    ui.global::<Theme>().set_mica(mica_ok);
-    dark_ok && mica_ok
+    // DWM draws the backdrop behind the client area only where the frame extends into it; without
+    // this a transparent background shows the windows behind, not the backdrop.
+    let margins = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+    // SAFETY: plain call on our own window handle.
+    let extended = mica_ok && unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) }.is_ok();
+    ui.global::<Theme>().set_mica(extended);
+    dark_ok && extended
 }
 
 /// The main window's native handle, once it exists.
@@ -961,6 +991,15 @@ pub fn remove_env_var(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_gpu_renderer_gets_the_mica_alt_backdrop() {
+        assert_eq!(backdrop_for(Renderer::Gpu), Some(DWMSBT_TABBEDWINDOW));
+        // Its buffer is opaque: a transparent window background would not show the backdrop.
+        assert_eq!(backdrop_for(Renderer::Software), None);
+        // SLINT_BACKEND may name the software renderer.
+        assert_eq!(backdrop_for(Renderer::FromEnv), None);
+    }
 
     #[test]
     fn elevated_every_slint_and_negotium_variable_is_dropped() {
