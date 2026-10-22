@@ -689,6 +689,15 @@ impl SettingsWiring {
             });
         }
         {
+            let (change, told) = (change.clone(), self.picker_shortcut_changed.clone());
+            ui.on_picker_shortcut_toggled(move |on| {
+                // Saved even when another program holds the keys: the choice stays on.
+                change.apply(|s| s.picker_shortcut = on);
+                let registered = told(on);
+                change.weak.upgrade().inspect(|ui| ui.set_settings_shortcut_taken(on && !registered));
+            });
+        }
+        {
             let marker = self.gpu_marker;
             ui.on_gpu_rendering_toggled(move |on| {
                 change.apply(|s| s.gpu_rendering = on);

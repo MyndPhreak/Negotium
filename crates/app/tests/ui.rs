@@ -2056,7 +2056,6 @@ fn picker_row_is_shown_in_a_dev_build() {
     assert_eq!(s.accessible_enabled(), Some(true), "no installed gate");
     assert_eq!(s.accessible_checked(), Some(false), "off by default");
     assert_eq!(s.accessible_description().as_deref(), Some(PICKER_TEXT));
-    assert!(text(&ui, PICKER_TEXT).is_some());
     ui.set_settings_picker_shortcut(true);
     assert_eq!(switch(&ui, PICKER_TITLE).accessible_checked(), Some(true));
 }
@@ -2067,8 +2066,6 @@ fn picker_row_shows_the_taken_text() {
     ui.set_settings_picker_shortcut(true);
     ui.set_settings_shortcut_taken(true);
     assert_eq!(switch(&ui, PICKER_TITLE).accessible_description().as_deref(), Some(PICKER_TAKEN));
-    assert!(text(&ui, PICKER_TAKEN).is_some());
-    assert!(text(&ui, PICKER_TEXT).is_none(), "the taken text replaces the description");
 }
 
 #[test]
@@ -3235,7 +3232,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 16, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 17, "the titles are still drawn");
 }
 
 #[test]

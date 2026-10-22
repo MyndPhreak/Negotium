@@ -250,6 +250,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(gpu_rendering);
     field!(smooth_graphs);
     field!(tray_cpu);
+    field!(picker_shortcut);
     field!(sort_column);
     // A well-formed string can still name a column this version doesn't have.
     if !SORT_NAMES.contains(&s.sort_column.as_str()) {
