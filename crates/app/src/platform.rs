@@ -202,6 +202,7 @@ pub fn set_renderer(renderer: Renderer) {
 /// Records the chosen backdrop and re-applies the window chrome with it. UI thread only.
 pub fn set_backdrop(ui: &MainWindow, choice: BackdropChoice) {
     BACKDROP.with(|b| b.set(choice));
+    ui.global::<Theme>().set_acrylic(choice == BackdropChoice::Acrylic);
     apply_window_chrome(ui);
 }
 
