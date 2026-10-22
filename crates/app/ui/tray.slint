@@ -10,6 +10,8 @@ export component NegotiumTray inherits SystemTrayIcon {
     in property <bool> taskmgr-shown;
     in property <bool> aequilibrium-enabled: true;
     callback open();
+    // crate::picker: dim every monitor and end the app of the window the user clicks.
+    callback pick-window();
     callback open-task-manager();
     callback toggle-aequilibrium();
     callback exit();
@@ -17,6 +19,7 @@ export component NegotiumTray inherits SystemTrayIcon {
     clicked => { root.open(); }
     Menu {
         MenuItem { title: "Open"; activated => { root.open(); } }
+        MenuItem { title: "End a window…"; activated => { root.pick-window(); } }
         if root.taskmgr-shown: MenuItem { title: "Open Windows Task Manager"; activated => { root.open-task-manager(); } }
         MenuItem {
             title: root.aequilibrium-enabled ? "Disable Aequilibrium" : "Enable Aequilibrium";
