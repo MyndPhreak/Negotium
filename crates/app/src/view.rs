@@ -111,9 +111,28 @@ pub struct Target {
 }
 
 /// Builds the action target for an app row; the Overview and the window picker share it.
-pub fn target_of(r: &AppRow, hung_pids: &HashSet<u32>, image_of: &HashMap<(u32, i64), String>) -> Target {
-    let _ = (r, hung_pids, image_of);
-    todo!()
+pub fn target_of<S: AsRef<str>>(r: &AppRow, hung_pids: &HashSet<u32>, image_of: &HashMap<(u32, i64), S>) -> Target {
+    let root = match r.key {
+        AppKey::Window { pid, create_time } | AppKey::Background { pid, create_time } => Some((pid, create_time)),
+        _ => None,
+    };
+    let procs: Vec<(u32, i64)> = r.processes.iter().map(|p| (p.pid, p.create_time)).collect();
+    let hung_pid = r.processes.iter().find(|p| hung_pids.contains(&p.pid)).map(|p| (p.pid, p.create_time));
+    let primary_key = root.or(procs.first().copied());
+    let image_path = primary_key.and_then(|k| image_of.get(&k).map(|s| s.as_ref().to_string()));
+    let primary_proc = primary_key
+        .and_then(|k| r.processes.iter().find(|p| (p.pid, p.create_time) == k))
+        .or_else(|| r.processes.first());
+    Target {
+        name: r.name.clone(),
+        process_name: primary_proc.map_or_else(|| r.name.clone(), |p| p.name.clone()),
+        root,
+        procs,
+        hung_pid,
+        image_path,
+        critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
+        group: r.key == AppKey::Windows,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -396,27 +415,14 @@ pub fn build_frame(
         };
         let r = &rows[i];
         let id = ids.id(RowKey::App(r.key.clone()), &mut seen);
-        let root = match r.key {
-            AppKey::Window { pid, create_time } | AppKey::Background { pid, create_time } => Some((pid, create_time)),
-            _ => None,
-        };
-        let procs: Vec<(u32, i64)> = r.processes.iter().map(|p| (p.pid, p.create_time)).collect();
-        let hung_pid = r.processes.iter().find(|p| hung_pids.contains(&p.pid)).map(|p| (p.pid, p.create_time));
-        let primary_key = root.or(procs.first().copied());
-        let image_path = primary_key.and_then(|k| image_of.get(&k).map(|s| s.to_string()));
+        let target = target_of(r, &hung_pids, &image_of);
+        let procs = target.procs.clone();
+        let image_path = target.image_path.clone();
+        let primary_key = target.root.or(procs.first().copied());
         let primary_proc = primary_key
             .and_then(|k| r.processes.iter().find(|p| (p.pid, p.create_time) == k))
             .or_else(|| r.processes.first());
-        targets.insert(id, Target {
-            name: r.name.clone(),
-            process_name: primary_proc.map_or_else(|| r.name.clone(), |p| p.name.clone()),
-            root,
-            procs: procs.clone(),
-            hung_pid,
-            image_path: image_path.clone(),
-            critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
-            group: r.key == AppKey::Windows,
-        });
+        targets.insert(id, target);
         let col_pid = if r.key == AppKey::Windows {
             "—".into()
         } else {

@@ -20,22 +20,45 @@ pub struct AppIndex {
 
 impl AppIndex {
     pub fn from_rows(rows: &[AppRow], hung_pids: &HashSet<u32>, image_of: &HashMap<(u32, i64), String>) -> Self {
-        let _ = (rows, hung_pids, image_of, target_of);
-        todo!()
+        let mut apps = Vec::with_capacity(rows.len());
+        let mut by_proc = HashMap::new();
+        for r in rows {
+            for p in &r.processes {
+                by_proc.insert((p.pid, p.create_time), apps.len());
+            }
+            apps.push(AppInfo {
+                target: target_of(r, hung_pids, image_of),
+                process_count: r.processes.len(),
+                private_bytes: r.private_bytes,
+                hung: r.hung_for_ms.is_some(),
+            });
+        }
+        Self { apps, by_proc }
     }
 
     /// The app holding this process; `None` for a pid the snapshot does not know, or one reused
     /// since (another create time).
     pub fn get(&self, pid: u32, create_time: i64) -> Option<&AppInfo> {
-        let _ = (&self.apps, &self.by_proc, pid, create_time);
-        todo!()
+        self.by_proc.get(&(pid, create_time)).map(|&i| &self.apps[i])
     }
 }
 
 /// Fallback for a pid the snapshot does not know: the process alone.
 pub fn single_process(pid: u32, create_time: i64, name: &str) -> AppInfo {
-    let _ = (pid, create_time, name);
-    todo!()
+    let key = (pid, create_time);
+    AppInfo {
+        target: Target {
+            name: name.to_string(),
+            process_name: name.to_string(),
+            root: Some(key),
+            procs: vec![key],
+            critical: negotium_actions::is_critical(name),
+            ..Target::default()
+        },
+        process_count: 1,
+        private_bytes: 0,
+        hung: false,
+    }
 }
 
 #[cfg(test)]
