@@ -32,7 +32,17 @@ fn exe_manifest() -> Option<String> {
 #[test]
 fn exe_manifest_asks_for_common_controls_6_on_windows_10() {
     let manifest = exe_manifest().expect("negotium.exe has no RT_MANIFEST resource with id 1");
-    for want in ["Microsoft.Windows.Common-Controls", "6.0.0.0", "{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"] {
+    for want in [
+        "Microsoft.Windows.Common-Controls",
+        "6.0.0.0",
+        r#"publicKeyToken="6595b64144ccf1df""#,
+        "{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}",
+    ] {
         assert!(manifest.contains(want), "the manifest has no {want}:\n{manifest}");
+    }
+    // winit sets DPI awareness at run time and admin mode is handled elsewhere: the manifest
+    // declares neither (`dpiAware` also matches `dpiAwareness`).
+    for unwanted in ["requestedExecutionLevel", "dpiAware"] {
+        assert!(!manifest.contains(unwanted), "the manifest has {unwanted}:\n{manifest}");
     }
 }

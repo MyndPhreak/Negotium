@@ -386,7 +386,7 @@ unsafe extern "system" fn to_front(hwnd: HWND, msg: TASKDIALOG_NOTIFICATIONS, _:
 }
 
 /// The pressed button, or `None` when the dialog failed (for example its owner was destroyed);
-/// nothing else is shown then, so no stray "End …?" box opens.
+/// nothing else is shown then, so no stray "End …?" box opens. The failure is logged.
 ///
 /// The exe's manifest (assets/negotium.exe.manifest) binds comctl32 v6, which has the task
 /// dialog; the build embeds it in the test executables too, so they bind the same comctl32.
@@ -417,7 +417,13 @@ fn task_dialog(
     config.Anonymous1.pszMainIcon = icon;
     let mut pressed = 0i32;
     // SAFETY: every string `config` points to outlives the call.
-    unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) }.ok().map(|()| pressed)
+    match unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) } {
+        Ok(()) => Some(pressed),
+        Err(e) => {
+            super::warn(&format!("picker: task dialog failed: {e}"));
+            None
+        }
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {

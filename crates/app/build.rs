@@ -9,6 +9,8 @@ fn main() {
     // resource compiler). Every executable of this package gets them, test executables
     // included: the lib imports TaskDialogIndirect, which only comctl32 v6 has, so without the
     // manifest's Common Controls 6 a test executable does not start (STATUS_ENTRYPOINT_NOT_FOUND).
+    // Link args reach only this package's executables: another crate whose test executables
+    // link the `negotium` lib must embed this manifest itself.
     println!("cargo:rerun-if-changed=assets/negotium.ico");
     println!("cargo:rerun-if-changed=assets/negotium.exe.manifest");
     embed_resource::compile_for_everything("assets/negotium.rc", embed_resource::NONE)
