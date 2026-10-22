@@ -282,13 +282,15 @@ mod tests {
     }
 
     #[test]
-    fn owned_windows_are_not_listed() {
+    fn owned_windows_are_listed_above_their_owner() {
         let owner = make(w!("negotium-picker-owner"), None, 100);
         let owned = make(w!("negotium-picker-owned"), Some(owner), 120);
         let list = top_level_windows();
         destroy(&[owned, owner]);
-        assert!(find(&list, owner).is_some());
-        assert!(find(&list, owned).is_none());
+        let owned_at = find(&list, owned).expect("owned listed");
+        assert!(owned_at < find(&list, owner).expect("owner listed"));
+        assert_eq!(list[owned_at].title, "negotium-picker-owned");
+        assert_eq!(list[owned_at].pid, std::process::id());
     }
 
     #[test]

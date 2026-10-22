@@ -24,7 +24,7 @@ pub enum Info<'a> {
 
 pub fn label(kind: Pickable, info: Info, needs_admin: bool, hung: bool) -> Label {
     let outline = match kind {
-        Pickable::Skip => return Label { title: String::new(), detail: String::new(), outline: Outline::None },
+        Pickable::PassThrough | Pickable::Block => return Label { title: String::new(), detail: String::new(), outline: Outline::None },
         Pickable::Shell => {
             return Label {
                 title: "Windows needs this — you cannot end it here".to_string(),

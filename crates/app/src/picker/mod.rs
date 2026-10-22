@@ -361,6 +361,13 @@ impl Session {
     }
 }
 
+/// How the hovered window is shown and clicked once its app is known: a window of the Windows
+/// group is treated as the shell (dimmed, shell label, click ignored), since no action may end it.
+fn shown_kind(kind: Pickable, info: Option<&AppInfo>) -> Pickable {
+    let _ = info;
+    kind
+}
+
 fn inside(r: Rect, (x, y): (i32, i32)) -> bool {
     r.left <= x && x < r.right && r.top <= y && y < r.bottom
 }
@@ -463,6 +470,18 @@ impl ShellRestart for LiveShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_of_the_windows_group_is_shown_as_the_shell() {
+        let mut windows = single_process(4, 1, "SearchHost.exe");
+        windows.target.group = true;
+        let app = single_process(10, 1, "notepad.exe");
+        assert_eq!(shown_kind(Pickable::App, Some(&windows)), Pickable::Shell);
+        assert_eq!(shown_kind(Pickable::ExplorerInShell, Some(&windows)), Pickable::Shell);
+        assert_eq!(shown_kind(Pickable::App, Some(&app)), Pickable::App);
+        assert_eq!(shown_kind(Pickable::App, None), Pickable::App);
+        assert_eq!(shown_kind(Pickable::Shell, Some(&app)), Pickable::Shell);
+    }
 
     /// Records each step; answers from its fields.
     #[derive(Default)]

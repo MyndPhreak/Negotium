@@ -13,7 +13,7 @@ pub struct Pressed {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    /// Shell / Skip / not ready / Windows group.
+    /// Shell / no target / not ready / Windows group.
     Ignore,
     /// Needs admin: a dialog with Close only.
     Tell(String),
@@ -25,7 +25,7 @@ const NEEDS_ADMIN: &str = "Needs admin \u{2014} restart Negotium as admin";
 const EXPLORER_BODY: &str = "This also restarts the taskbar and the desktop. All File Explorer windows close.";
 
 pub fn decide(pressed: &Pressed, shift: bool, all_procs: &[(u32, i64, u32)]) -> Outcome {
-    if matches!(pressed.kind, Pickable::Shell | Pickable::Skip) {
+    if matches!(pressed.kind, Pickable::Shell | Pickable::PassThrough | Pickable::Block) {
         return Outcome::Ignore;
     }
     let Some(info) = &pressed.info else { return Outcome::Ignore };
@@ -123,6 +123,15 @@ mod tests {
     }
 
     #[test]
+    fn critical_explorer_in_shell_still_restarts_the_shell() {
+        let mut i = info("explorer.exe", &[(7, 1)], Some((7, 1)));
+        i.target.critical = true;
+        let p = pressed(Pickable::ExplorerInShell, Some(i));
+        let Outcome::Confirm { restart_shell, .. } = decide(&p, true, &[]) else { panic!("expected Confirm") };
+        assert!(restart_shell);
+    }
+
+    #[test]
     fn explorer_in_shell_always_confirms_and_restarts_the_shell() {
         let p = pressed(Pickable::ExplorerInShell, Some(info("File Explorer", &[(7, 1)], Some((7, 1)))));
         for shift in [false, true] {
@@ -150,7 +159,8 @@ mod tests {
     fn shell_and_not_ready_are_ignored() {
         let i = Some(info("Taskbar", &[(1, 1)], Some((1, 1))));
         assert_eq!(decide(&pressed(Pickable::Shell, i.clone()), false, &[]), Outcome::Ignore);
-        assert_eq!(decide(&pressed(Pickable::Skip, i), false, &[]), Outcome::Ignore);
+        assert_eq!(decide(&pressed(Pickable::PassThrough, i.clone()), false, &[]), Outcome::Ignore);
+        assert_eq!(decide(&pressed(Pickable::Block, i), false, &[]), Outcome::Ignore);
         assert_eq!(decide(&pressed(Pickable::App, None), false, &[]), Outcome::Ignore);
         assert_eq!(decide(&pressed(Pickable::ExplorerInShell, None), true, &[]), Outcome::Ignore);
     }
@@ -172,9 +182,8 @@ mod tests {
     }
 
     #[test]
-    fn a_target_that_exited_ends_silently() {
-        // The picker relies on this: `end_many` counts AlreadyExited as Ok, so no failure reaches
-        // `end_summary`, and a full success is "". (Passes in the red commit: existing contract.)
+    fn a_full_success_summary_is_silent() {
+        // The picker shows a dialog only for a non-empty summary; a full success is "".
         assert_eq!(end_summary("Notepad", 2, &[], false), "");
     }
 
