@@ -270,6 +270,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     }
     field!(refresh_ms);
     field!(theme);
+    field!(backdrop);
     field!(always_on_top);
     field!(keep_in_tray);
     field!(gpu_rendering);

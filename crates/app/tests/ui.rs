@@ -1991,14 +1991,16 @@ fn row_texts(ui: &MainWindow, id: &str) -> Vec<Rect> {
 
 #[test]
 fn the_settings_page_reports_each_choice() {
-    let ui = shown_window();
-    ui.set_page(3);
+    // Tall enough for every row: the testing backend finds only what the page's view shows.
+    let ui = settings_window(1000, 1700);
     ui.set_settings_keep_in_tray(true);
     let log = Rc::new(RefCell::new(Vec::<String>::new()));
     let l = log.clone();
     ui.on_refresh_chosen(move |i| l.borrow_mut().push(format!("refresh {i}")));
     let l = log.clone();
     ui.on_theme_chosen(move |i| l.borrow_mut().push(format!("theme {i}")));
+    let l = log.clone();
+    ui.on_backdrop_chosen(move |i| l.borrow_mut().push(format!("backdrop {i}")));
     let l = log.clone();
     ui.on_always_on_top_toggled(move |on| l.borrow_mut().push(format!("top {on}")));
     let l = log.clone();
@@ -2007,10 +2009,11 @@ fn the_settings_page_reports_each_choice() {
     ui.on_gpu_rendering_toggled(move |on| l.borrow_mut().push(format!("gpu {on}")));
     radio(&ui, "2 s").invoke_accessible_default_action();
     radio(&ui, "Dark").invoke_accessible_default_action();
+    radio(&ui, "Acrylic").invoke_accessible_default_action();
     switch(&ui, "Always on top").invoke_accessible_default_action();
     switch(&ui, "Keep running in the tray when closed").invoke_accessible_default_action();
     switch(&ui, "Use GPU rendering").invoke_accessible_default_action();
-    assert_eq!(*log.borrow(), ["refresh 2", "theme 2", "top true", "tray false", "gpu false"]);
+    assert_eq!(*log.borrow(), ["refresh 2", "theme 2", "backdrop 1", "top true", "tray false", "gpu false"]);
     // The owner sets the state; a switch or choice never changes itself.
     assert_eq!(switch(&ui, "Keep running in the tray when closed").accessible_checked(), Some(true));
     assert_eq!(radio(&ui, "1 s").accessible_checked(), Some(true));
@@ -2272,6 +2275,8 @@ fn settings_wired_integrated(
     integration: negotium::settingspage::Integration,
 ) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>, Rc<negotium::settingspage::Integrations>) {
     let ui = shown_window();
+    // Tall enough for every row: the testing backend finds only what the page's view shows.
+    ui.window().set_size(PhysicalSize::new(1000, 1700));
     ui.set_page(3);
     let controls = Arc::new(Controls::default());
     let settings = Rc::new(RefCell::new(s));
@@ -3250,7 +3255,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 17, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 18, "the titles are still drawn");
 }
 
 #[test]

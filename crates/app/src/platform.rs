@@ -16,10 +16,8 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WAIT_ABANDONED,
     WAIT_OBJECT_0, WPARAM,
 };
-#[cfg(test)]
-use windows::Win32::Graphics::Dwm::DWMSBT_TRANSIENTWINDOW;
 use windows::Win32::Graphics::Dwm::{
-    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_TABBEDWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 use windows::Win32::UI::Controls::MARGINS;
@@ -180,14 +178,20 @@ fn hwnd_of(ui: &MainWindow) -> Option<HWND> {
 /// renderer: FemtoVG presents an alpha channel that DWM composites over the backdrop. The
 /// software renderer's buffer is opaque (and `SLINT_BACKEND` may name it), so that window keeps
 /// the solid `Theme.window-bg`; the translucent cards then blend over that colour instead.
-pub fn backdrop_for(renderer: Renderer, _choice: BackdropChoice) -> Option<DWM_SYSTEMBACKDROP_TYPE> {
-    (renderer == Renderer::Gpu).then_some(DWMSBT_TABBEDWINDOW)
+pub fn backdrop_for(renderer: Renderer, choice: BackdropChoice) -> Option<DWM_SYSTEMBACKDROP_TYPE> {
+    let backdrop = match choice {
+        BackdropChoice::Mica => DWMSBT_TABBEDWINDOW,
+        BackdropChoice::Acrylic => DWMSBT_TRANSIENTWINDOW,
+    };
+    (renderer == Renderer::Gpu).then_some(backdrop)
 }
 
 thread_local! {
     /// The renderer this instance draws with, set once by `main` before the window is themed.
     /// Unset (tests, or before `main` sets it): no backdrop.
     static RENDERER: std::cell::Cell<Option<Renderer>> = const { std::cell::Cell::new(None) };
+    /// The chosen backdrop (Settings > Backdrop), set by `set_backdrop`.
+    static BACKDROP: std::cell::Cell<BackdropChoice> = const { std::cell::Cell::new(BackdropChoice::Mica) };
 }
 
 /// Records the renderer in use, which decides the backdrop (`backdrop_for`). UI thread only.
@@ -196,7 +200,10 @@ pub fn set_renderer(renderer: Renderer) {
 }
 
 /// Records the chosen backdrop and re-applies the window chrome with it. UI thread only.
-pub fn set_backdrop(_ui: &MainWindow, _choice: BackdropChoice) {}
+pub fn set_backdrop(ui: &MainWindow, choice: BackdropChoice) {
+    BACKDROP.with(|b| b.set(choice));
+    apply_window_chrome(ui);
+}
 
 /// Applies the dark/light title bar (from `Theme.dark`) and the backdrop (`backdrop_for`).
 /// `Theme.mica` follows the backdrop call alone: a failed dark-mode call leaves the title bar's
@@ -220,7 +227,7 @@ pub fn apply_window_chrome(ui: &MainWindow) -> bool {
     let _ = unsafe {
         SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
     };
-    let Some(backdrop) = RENDERER.with(|r| r.get()).and_then(|r| backdrop_for(r, BackdropChoice::Mica)) else {
+    let Some(backdrop) = RENDERER.with(|r| r.get()).and_then(|r| backdrop_for(r, BACKDROP.with(|b| b.get()))) else {
         ui.global::<Theme>().set_mica(false);
         return dark_ok;
     };
