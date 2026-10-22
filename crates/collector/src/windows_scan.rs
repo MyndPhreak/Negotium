@@ -34,6 +34,15 @@ pub(crate) fn is_ghost_class(class: &[u16]) -> bool {
     class == GHOST_CLASS
 }
 
+/// The window a DWM `Ghost` stands in for, or `None` when user32 cannot resolve it.
+pub fn original_of_ghost(hwnd: HWND) -> Option<HWND> {
+    let f = hung_window_from_ghost_window()?;
+    // SAFETY: `f` is user32's HungWindowFromGhostWindow; it only reads user32's ghost table and
+    // sends no window message. An unknown handle yields NULL.
+    let original = unsafe { f(hwnd) };
+    (!original.is_invalid()).then_some(original)
+}
+
 /// Visible, unowned, titled top-level windows.
 pub fn scan_windows() -> Result<Vec<WindowSample>, String> {
     let mut out: Vec<WindowSample> = Vec::with_capacity(64);
@@ -66,13 +75,9 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let mut class = [0u16; 64];
         let class_len = GetClassNameW(hwnd, &mut class).max(0) as usize;
         let (source, hung) = if is_ghost_class(&class[..class_len]) {
-            let original = match hung_window_from_ghost_window() {
-                Some(f) => f(hwnd),
-                None => HWND::default(),
-            };
-            if original.is_invalid() {
+            let Some(original) = original_of_ghost(hwnd) else {
                 return true.into();
-            }
+            };
             (original, true)
         } else {
             (hwnd, IsHungAppWindow(hwnd).as_bool())

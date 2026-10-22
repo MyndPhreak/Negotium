@@ -10,6 +10,7 @@ mod location;
 mod priority;
 pub mod runtask;
 pub mod services;
+mod shell;
 pub mod startup;
 mod terminate;
 
@@ -23,6 +24,7 @@ pub use elevation::{
 };
 pub use location::open_file_location;
 pub use priority::{PriorityClass, get_priority_class, set_priority_class};
+pub use shell::{ShellToken, can_terminate, capture_shell_token, start_explorer, wait_for_taskbar};
 pub use terminate::{end_many, end_process};
 
 use std::ffi::c_void;
@@ -102,7 +104,7 @@ pub(crate) struct OwnedHandle(pub(crate) HANDLE);
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
-        // SAFETY: the handle came from OpenProcess and is closed exactly once here.
+        // SAFETY: a handle this process owns (process or token) and nothing else closes; closed once here.
         unsafe {
             let _ = CloseHandle(self.0);
         }
