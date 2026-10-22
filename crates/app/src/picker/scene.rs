@@ -1,7 +1,15 @@
 //! The overlay for one monitor: where the clear hole, outline, label card and hint bar go
 //! (`layout`, pure), and the Direct2D drawing of that (`render`).
-use windows::Win32::Graphics::Direct2D::ID2D1RenderTarget;
-use windows::Win32::Graphics::DirectWrite::IDWriteFactory;
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_FLAT, D2D1_DASH_STYLE_DASH,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_LINE_JOIN_MITER, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    IDWriteFactory, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_WORD_WRAPPING_NO_WRAP,
+};
 
 use super::label::{Label, Outline};
 use super::target::Rect;
@@ -21,13 +29,174 @@ pub struct Scene {
 
 /// All rects in monitor-local px. `cursor_here` puts the hint bar on this monitor.
 pub fn layout(m: &Monitor, target: Option<(Rect, &Label)>, cursor_here: bool) -> Scene {
-    let _ = (m, target, cursor_here);
-    todo!()
+    let scale = m.dpi as f32 / 96.0;
+    let px = |v: f32| (v * scale).round() as i32;
+    let (w, h) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
+
+    let hole = target.and_then(|(t, _)| {
+        let clipped = Rect {
+            left: (t.left - m.rect.left).max(0),
+            top: (t.top - m.rect.top).max(0),
+            right: (t.right - m.rect.left).min(w),
+            bottom: (t.bottom - m.rect.top).min(h),
+        };
+        (clipped.left < clipped.right && clipped.top < clipped.bottom).then_some(clipped)
+    });
+
+    let (outline, label) = match (hole, target) {
+        (Some(hole), Some((_, l))) => {
+            let (cw, ch, gap) = (px(420.0).min(w - px(16.0)).max(0), px(56.0), px(8.0));
+            // Below the target's bottom-left; inside its bottom edge when the screen ends first.
+            let below = hole.bottom + gap;
+            let top = if below + ch <= h { below } else { hole.bottom - gap - ch };
+            let left = hole.left.min(w - cw).max(0);
+            let top = top.min(h - ch).max(0);
+            (l.outline, Some((Rect { left, top, right: left + cw, bottom: top + ch }, l.clone())))
+        }
+        _ => (Outline::None, None),
+    };
+
+    let hint = cursor_here.then(|| {
+        let (hw, hh) = (px(560.0), px(32.0));
+        let left = (w - hw) / 2;
+        let top = px(10.0);
+        Rect { left, top, right: left + hw, bottom: top + hh }
+    });
+
+    Scene { size: (w.max(0) as u32, h.max(0) as u32), hole, outline, label, hint, scale }
+}
+
+const CARD: D2D1_COLOR_F = D2D1_COLOR_F { r: 0x20 as f32 / 255.0, g: 0x20 as f32 / 255.0, b: 0x20 as f32 / 255.0, a: 1.0 };
+const WHITE: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+const GREY: D2D1_COLOR_F = D2D1_COLOR_F { r: 0xBB as f32 / 255.0, g: 0xBB as f32 / 255.0, b: 0xBB as f32 / 255.0, a: 1.0 };
+
+fn rgb(r: u8, g: u8, b: u8) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
+}
+
+fn rf(r: Rect) -> D2D_RECT_F {
+    D2D_RECT_F { left: r.left as f32, top: r.top as f32, right: r.right as f32, bottom: r.bottom as f32 }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().collect()
 }
 
 pub fn render(rt: &ID2D1RenderTarget, text: &IDWriteFactory, scene: &Scene) -> windows::core::Result<()> {
-    let _ = (rt, text, scene);
-    todo!()
+    let s = scene.scale;
+    let (w, h) = (scene.size.0 as i32, scene.size.1 as i32);
+    // SAFETY: every call is on live COM objects borrowed for this function; all pointers passed
+    // point to locals that outlive the call. `EndDraw` runs even if a drawing step fails, so the
+    // target is never left mid-draw.
+    unsafe {
+        rt.BeginDraw();
+        let drawn = draw(rt, text, scene, s, w, h);
+        let ended = rt.EndDraw(None, None);
+        drawn.and(ended)
+    }
+}
+
+/// # Safety
+/// `rt` must be between `BeginDraw` and `EndDraw`.
+unsafe fn draw(rt: &ID2D1RenderTarget, text: &IDWriteFactory, scene: &Scene, s: f32, w: i32, h: i32) -> windows::core::Result<()> {
+    unsafe {
+        rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+
+        // Dim everything except the hole: four rects around it.
+        let dim = rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0x8C as f32 / 255.0 }, None)?;
+        let full = Rect { left: 0, top: 0, right: w, bottom: h };
+        let dims = match scene.hole {
+            None => vec![full],
+            Some(o) => vec![
+                Rect { bottom: o.top, ..full },
+                Rect { top: o.bottom, ..full },
+                Rect { top: o.top, bottom: o.bottom, right: o.left, ..full },
+                Rect { top: o.top, bottom: o.bottom, left: o.right, ..full },
+            ],
+        };
+        for d in dims.into_iter().filter(|d| d.left < d.right && d.top < d.bottom) {
+            rt.FillRectangle(&rf(d), &dim);
+        }
+
+        if let (Some(o), Some(colour)) = (scene.hole, outline_colour(scene.outline)) {
+            let factory = rt.GetFactory()?;
+            let style = factory.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES {
+                    startCap: D2D1_CAP_STYLE_FLAT,
+                    endCap: D2D1_CAP_STYLE_FLAT,
+                    dashCap: D2D1_CAP_STYLE_FLAT,
+                    lineJoin: D2D1_LINE_JOIN_MITER,
+                    miterLimit: 10.0,
+                    dashStyle: D2D1_DASH_STYLE_DASH,
+                    dashOffset: 0.0,
+                },
+                None,
+            )?;
+            let width = 3.0 * s;
+            // Stroke inside the hole so the whole line stays on the target.
+            let mut line = rf(o);
+            let inset = width / 2.0;
+            line.left += inset;
+            line.top += inset;
+            line.right -= inset;
+            line.bottom -= inset;
+            let brush = rt.CreateSolidColorBrush(&colour, None)?;
+            rt.DrawRectangle(&line, &brush, width, &style);
+        }
+
+        let radius = 6.0 * s;
+        let white = rt.CreateSolidColorBrush(&WHITE, None)?;
+        if let Some((card, label)) = &scene.label {
+            let brush = rt.CreateSolidColorBrush(&CARD, None)?;
+            rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rf(*card), radiusX: radius, radiusY: radius }, &brush);
+            let grey = rt.CreateSolidColorBrush(&GREY, None)?;
+            let pad = 12.0 * s;
+            let c = rf(*card);
+            let title = format(text, 14.0 * s)?;
+            let detail = format(text, 12.0 * s)?;
+            rt.PushAxisAlignedClip(&c, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            let t = D2D_RECT_F { left: c.left + pad, top: c.top + 8.0 * s, right: c.right - pad, bottom: c.top + 30.0 * s };
+            rt.DrawText(&wide(&label.title), &title, &t, &white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            let d = D2D_RECT_F { top: c.top + 30.0 * s, bottom: c.bottom - 6.0 * s, ..t };
+            rt.DrawText(&wide(&label.detail), &detail, &d, &grey, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            rt.PopAxisAlignedClip();
+        }
+
+        if let Some(bar) = scene.hint {
+            let brush = rt.CreateSolidColorBrush(&D2D1_COLOR_F { a: 0.9, ..CARD }, None)?;
+            rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rf(bar), radiusX: radius, radiusY: radius }, &brush);
+            let f = format(text, 13.0 * s)?;
+            f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            rt.DrawText(&wide(HINT), &f, &rf(bar), &white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+        Ok(())
+    }
+}
+
+fn outline_colour(o: Outline) -> Option<D2D1_COLOR_F> {
+    match o {
+        Outline::None => None,
+        Outline::Accent => Some(rgb(0x4C, 0xC2, 0xFF)),
+        Outline::Red => Some(rgb(0xE8, 0x11, 0x23)),
+    }
+}
+
+fn format(text: &IDWriteFactory, size: f32) -> windows::core::Result<windows::Win32::Graphics::DirectWrite::IDWriteTextFormat> {
+    // SAFETY: `text` is a live factory; the wide-string literal is NUL-terminated by `w!`.
+    unsafe {
+        let f = text.CreateTextFormat(
+            windows::core::w!("Segoe UI"),
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            windows::core::w!("en-us"),
+        )?;
+        f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok(f)
+    }
 }
 
 #[cfg(test)]
@@ -201,7 +370,7 @@ mod tests {
         let px = pixels(&o, 200, 100);
         // Row 21 is inside the 3 px stroke (rows 20..23), which is drawn inside the hole.
         let row: Vec<[u8; 4]> = (60..140).map(|x| pixel(&px, 200, x, 21)).collect();
-        assert!(row.iter().any(|p| *p == [0x23, 0x11, 0xE8, 0xFF]), "no opaque red: {row:?}");
+        assert!(row.contains(&[0x23, 0x11, 0xE8, 0xFF]), "no opaque red: {row:?}");
         assert!(row.iter().any(|p| p[3] == 0), "no gap in the dashes");
     }
 }
