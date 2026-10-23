@@ -256,6 +256,14 @@ export struct CoreItem {
     checked: bool,
 }
 
+// A CCD or core class (unnamed when the machine has neither) and its logical processors.
+export struct CoreGroup {
+    name: string,
+    detail: string,
+    checked: bool,
+    cores: [CoreItem],
+}
+
 export component CpuAffinityModal inherits Rectangle {
     in property <string> title: "Set CPU Affinity";
     in property <string> process-name: "";

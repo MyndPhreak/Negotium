@@ -3,7 +3,7 @@ import { Theme } from "theme.slint";
 import { MetersRow, MeterData } from "meters.slint";
 import { TopStrip, TileData } from "topstrip.slint";
 import { AppList, RowData } from "applist.slint";
-import { Banner, Toast, Modal, RunTaskModal, CpuAffinityModal, CpuPriorityModal, CoreItem } from "overlays.slint";
+import { Banner, Toast, Modal, RunTaskModal, CpuAffinityModal, CpuPriorityModal, CoreItem, CoreGroup } from "overlays.slint";
 import { Rail } from "rail.slint";
 import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
 import { SettingsPage } from "settingspage.slint";
@@ -110,6 +110,7 @@ export component MainWindow inherits Window {
     in-out property <string> affinity-title: "";
     in-out property <string> affinity-process-name: "";
     in-out property <[CoreItem]> affinity-cores: [];
+    in-out property <[CoreGroup]> affinity-groups: [];
     in-out property <bool> affinity-all-cores: true;
     in-out property <bool> affinity-can-apply: true;
     in-out property <bool> affinity-remember: false;
