@@ -25,6 +25,14 @@ embed-resource = "3.0.12"
 i-slint-backend-testing = "1.18.1"
 raw-window-handle = "0.6.2"
 
+# Debug builds keep file and line numbers (panics, backtraces) but not full variable info: each
+# stale libnegotium copy in target/debug was ~450 MB with full debug info.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

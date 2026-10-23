@@ -175,6 +175,8 @@ export component SettingRow inherits Rectangle {
 export component SettingsPage inherits VerticalLayout {
     in property <int> refresh;
     in property <int> theme;
+    // The system backdrop (crate::settings::BackdropChoice): 0 Mica, 1 Acrylic.
+    in property <int> backdrop;
     in property <bool> always-on-top;
     in property <bool> keep-in-tray;
     // Graphs scroll continuously between samples (crate::smooth).
@@ -209,6 +211,7 @@ export component SettingsPage inherits VerticalLayout {
     in property <length> bottom-inset;
     callback refresh-chosen(int);
     callback theme-chosen(int);
+    callback backdrop-chosen(int);
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
@@ -269,6 +272,19 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     chosen(i) => { root.theme-chosen(i); }
                     focus-gained => { sv.reveal(theme-row.absolute-position.y, theme-row.height); }
+                }
+            }
+            backdrop-row := SettingRow {
+                title: "Backdrop";
+                description: "Mica takes its colour from the desktop background. Acrylic blurs the windows behind Negotium. Needs GPU rendering.";
+                Choice {
+                    label: backdrop-row.title;
+                    description: backdrop-row.description;
+                    options: ["Mica", "Acrylic"];
+                    selected: root.backdrop;
+                    interactive: root.interactive;
+                    chosen(i) => { root.backdrop-chosen(i); }
+                    focus-gained => { sv.reveal(backdrop-row.absolute-position.y, backdrop-row.height); }
                 }
             }
             smooth-row := SettingRow {

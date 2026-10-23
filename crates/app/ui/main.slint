@@ -207,6 +207,7 @@ export component MainWindow inherits Window {
     // change takes effect on the next launch).
     in-out property <int> settings-refresh: 1;
     in-out property <int> settings-theme: 0;
+    in-out property <int> settings-backdrop: 0;
     in-out property <bool> on-top;
     always-on-top: root.on-top;
     in-out property <bool> settings-keep-in-tray: true;
@@ -224,6 +225,7 @@ export component MainWindow inherits Window {
     callback settings-aequilibrium-toggled(bool);
     callback refresh-chosen(int);
     callback theme-chosen(int);
+    callback backdrop-chosen(int);
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
@@ -476,6 +478,7 @@ export component MainWindow inherits Window {
                     SettingsPage {
                         refresh: root.settings-refresh;
                         theme: root.settings-theme;
+                        backdrop: root.settings-backdrop;
                         always-on-top: root.on-top;
                         keep-in-tray: root.settings-keep-in-tray;
                         smooth-graphs: root.settings-smooth-graphs;
@@ -501,6 +504,7 @@ export component MainWindow inherits Window {
                         interactive: !root.modal-open;
                         refresh-chosen(i) => { root.refresh-chosen(i); }
                         theme-chosen(i) => { root.theme-chosen(i); }
+                        backdrop-chosen(i) => { root.backdrop-chosen(i); }
                         always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
                         tray-toggled(on) => { root.tray-toggled(on); }
                         smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }

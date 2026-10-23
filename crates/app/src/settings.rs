@@ -33,12 +33,36 @@ impl ThemeChoice {
     }
 }
 
+/// The system backdrop behind the window (crate::platform::backdrop_for): Mica tints from the
+/// wallpaper only; Acrylic blurs the windows behind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackdropChoice {
+    #[default]
+    Mica,
+    Acrylic,
+}
+
+impl BackdropChoice {
+    pub const ALL: [BackdropChoice; 2] = [BackdropChoice::Mica, BackdropChoice::Acrylic];
+
+    pub fn index(self) -> i32 {
+        self as i32
+    }
+
+    pub fn from_index(i: i32) -> BackdropChoice {
+        Self::ALL[(i.max(0) as usize).min(Self::ALL.len() - 1)]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Refresh interval while the window is visible, one of REFRESH_CHOICES_MS.
     pub refresh_ms: u32,
     pub theme: ThemeChoice,
+    /// The backdrop behind the window; shown only with the GPU renderer.
+    pub backdrop: BackdropChoice,
     pub always_on_top: bool,
     /// Closing the window hides it to the tray (spec 5.5) instead of exiting.
     pub keep_in_tray: bool,
@@ -81,6 +105,7 @@ impl Default for Settings {
         Self {
             refresh_ms: 1000,
             theme: ThemeChoice::System,
+            backdrop: BackdropChoice::Mica,
             always_on_top: false,
             keep_in_tray: true,
             gpu_rendering: true,
@@ -245,6 +270,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     }
     field!(refresh_ms);
     field!(theme);
+    field!(backdrop);
     field!(always_on_top);
     field!(keep_in_tray);
     field!(gpu_rendering);
@@ -722,6 +748,24 @@ mod tests {
         let (s, how) = load_with(&Writes::Plain, &p);
         assert!(!s.gpu_rendering);
         assert_eq!(how, Loaded::Partial(vec!["theme".to_string(), "always_on_top".to_string()]));
+    }
+
+    #[test]
+    fn the_backdrop_defaults_to_mica_and_is_saved_and_loaded() {
+        assert_eq!(Settings::default().backdrop, BackdropChoice::Mica);
+        assert_eq!(BackdropChoice::from_index(1), BackdropChoice::Acrylic);
+        assert_eq!(BackdropChoice::from_index(9), BackdropChoice::Acrylic);
+        assert_eq!(BackdropChoice::from_index(-1), BackdropChoice::Mica);
+        let dir = TempDir::new("backdrop");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"backdrop": "acrylic"}"#).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::File);
+        assert_eq!(s, Settings { backdrop: BackdropChoice::Acrylic, ..Settings::default() });
+        std::fs::write(&p, r#"{"backdrop": "glass", "refresh_ms": 2000}"#).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::Partial(vec!["backdrop".to_string()]));
+        assert_eq!(s, Settings { refresh_ms: 2000, ..Settings::default() });
     }
 
     #[test]

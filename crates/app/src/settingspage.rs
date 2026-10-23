@@ -6,7 +6,7 @@ use negotium_model::{Metric, Sort, SortColumn};
 use crate::install::{self, Install};
 use crate::controls::Page;
 use crate::integrate::{Action, TaskState};
-use crate::settings::{Saver, Settings, ThemeChoice, refresh_from_index};
+use crate::settings::{BackdropChoice, Saver, Settings, ThemeChoice, refresh_from_index};
 use crate::renderer::{self, Renderer};
 use crate::{MainWindow, platform};
 use slint::ComponentHandle;
@@ -16,9 +16,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Applies `s` to the window: the theme (colours, title bar, Mica), always on top, and what the
-/// Settings page shows. The refresh rate lives in `Controls` (`Controls::set_refresh_ms`).
+/// Applies `s` to the window: the backdrop, the theme (colours, title bar, backdrop), always on
+/// top, and what the Settings page shows. The refresh rate lives in `Controls`
+/// (`Controls::set_refresh_ms`).
 pub fn apply_settings(ui: &MainWindow, s: &Settings) {
+    platform::set_backdrop(ui, s.backdrop);
     platform::apply_theme(ui, s.theme);
     show_settings(ui, s);
 }
@@ -28,6 +30,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_on_top(s.always_on_top);
     ui.set_settings_refresh(s.refresh_index());
     ui.set_settings_theme(s.theme.index());
+    ui.set_settings_backdrop(s.backdrop.index());
     ui.set_settings_keep_in_tray(s.keep_in_tray);
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
@@ -609,6 +612,15 @@ impl SettingsWiring {
                 let theme = ThemeChoice::from_index(i);
                 if let Some(ui) = change.apply(|s| s.theme = theme) {
                     platform::apply_theme(&ui, theme);
+                }
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_backdrop_chosen(move |i| {
+                let backdrop = BackdropChoice::from_index(i);
+                if let Some(ui) = change.apply(|s| s.backdrop = backdrop) {
+                    platform::set_backdrop(&ui, backdrop);
                 }
             });
         }

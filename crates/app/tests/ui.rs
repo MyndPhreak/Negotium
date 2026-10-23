@@ -1991,14 +1991,16 @@ fn row_texts(ui: &MainWindow, id: &str) -> Vec<Rect> {
 
 #[test]
 fn the_settings_page_reports_each_choice() {
-    let ui = shown_window();
-    ui.set_page(3);
+    // Tall enough for every row: the testing backend finds only what the page's view shows.
+    let ui = settings_window(1000, 1700);
     ui.set_settings_keep_in_tray(true);
     let log = Rc::new(RefCell::new(Vec::<String>::new()));
     let l = log.clone();
     ui.on_refresh_chosen(move |i| l.borrow_mut().push(format!("refresh {i}")));
     let l = log.clone();
     ui.on_theme_chosen(move |i| l.borrow_mut().push(format!("theme {i}")));
+    let l = log.clone();
+    ui.on_backdrop_chosen(move |i| l.borrow_mut().push(format!("backdrop {i}")));
     let l = log.clone();
     ui.on_always_on_top_toggled(move |on| l.borrow_mut().push(format!("top {on}")));
     let l = log.clone();
@@ -2007,10 +2009,11 @@ fn the_settings_page_reports_each_choice() {
     ui.on_gpu_rendering_toggled(move |on| l.borrow_mut().push(format!("gpu {on}")));
     radio(&ui, "2 s").invoke_accessible_default_action();
     radio(&ui, "Dark").invoke_accessible_default_action();
+    radio(&ui, "Acrylic").invoke_accessible_default_action();
     switch(&ui, "Always on top").invoke_accessible_default_action();
     switch(&ui, "Keep running in the tray when closed").invoke_accessible_default_action();
     switch(&ui, "Use GPU rendering").invoke_accessible_default_action();
-    assert_eq!(*log.borrow(), ["refresh 2", "theme 2", "top true", "tray false", "gpu false"]);
+    assert_eq!(*log.borrow(), ["refresh 2", "theme 2", "backdrop 1", "top true", "tray false", "gpu false"]);
     // The owner sets the state; a switch or choice never changes itself.
     assert_eq!(switch(&ui, "Keep running in the tray when closed").accessible_checked(), Some(true));
     assert_eq!(radio(&ui, "1 s").accessible_checked(), Some(true));
@@ -2272,6 +2275,8 @@ fn settings_wired_integrated(
     integration: negotium::settingspage::Integration,
 ) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>, Rc<negotium::settingspage::Integrations>) {
     let ui = shown_window();
+    // Tall enough for every row: the testing backend finds only what the page's view shows.
+    ui.window().set_size(PhysicalSize::new(1000, 1700));
     ui.set_page(3);
     let controls = Arc::new(Controls::default());
     let settings = Rc::new(RefCell::new(s));
@@ -2975,6 +2980,50 @@ fn a_choice_applies_at_once_shows_and_is_saved() {
     });
 }
 
+#[test]
+fn the_backdrop_choice_shows_and_is_saved() {
+    use negotium::settings::BackdropChoice;
+    let dir = Scratch::new("backdrop");
+    let path = dir.0.join("settings.json");
+    let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    assert_eq!(radio(&ui, "Mica").accessible_checked(), Some(true), "Mica by default");
+
+    radio(&ui, "Acrylic").invoke_accessible_default_action();
+    assert_eq!(radio(&ui, "Acrylic").accessible_checked(), Some(true));
+    saved(&path, "backdrop acrylic", |s| s.backdrop == BackdropChoice::Acrylic);
+
+    negotium::settingspage::apply_settings(&ui, &Settings::default());
+    assert_eq!(ui.get_settings_backdrop(), 0, "apply_settings shows the saved backdrop");
+    negotium::settingspage::apply_settings(&ui, &Settings { backdrop: BackdropChoice::Acrylic, ..Settings::default() });
+    assert_eq!(ui.get_settings_backdrop(), 1);
+}
+
+#[test]
+fn acrylic_is_tinted_and_mica_is_not() {
+    use negotium::settings::BackdropChoice;
+    let ui = window();
+    let theme = ui.global::<negotium::Theme>();
+    negotium::platform::set_backdrop(&ui, BackdropChoice::Acrylic);
+    assert!(theme.get_acrylic());
+    theme.set_mica(true); // what apply_window_chrome sets once the backdrop is on
+    ui.invoke_set_dark(false);
+    let tint = theme.get_window_bg().color();
+    assert!(tint.alpha() > 0 && tint.alpha() < 255, "part-opaque over Acrylic: {tint:?}");
+    // Grey text on the backdrop can only be as dark as this layer lets it: below ~75% the labels
+    // break up over a busy background (seen in light mode at 45%).
+    assert!(tint.alpha() >= 191, "light mode keeps grey text readable: {tint:?}");
+    ui.invoke_set_dark(true);
+    let tint = theme.get_window_bg().color();
+    assert_eq!((tint.red(), tint.green(), tint.blue()), (0, 0, 0), "dark mode darkens with black: {tint:?}");
+    assert!(tint.alpha() > 0 && tint.alpha() < 255, "and stays part-opaque: {tint:?}");
+    ui.invoke_set_dark(false);
+    negotium::platform::set_backdrop(&ui, BackdropChoice::Mica);
+    assert!(!theme.get_acrylic());
+    assert_eq!(theme.get_window_bg().color().alpha(), 0, "Mica shows through untouched");
+    theme.set_mica(false);
+    assert_eq!(theme.get_window_bg().color().alpha(), 255, "no backdrop: solid");
+}
+
 const FALLBACK_NOTE: &str =
     "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
 const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";
@@ -3232,7 +3281,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 17, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 18, "the titles are still drawn");
 }
 
 #[test]
