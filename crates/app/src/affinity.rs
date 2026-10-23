@@ -18,38 +18,101 @@ pub struct CoreSelection {
 impl CoreSelection {
     /// The processors in `sys_mask`, on where `proc_mask` has them, in the order of `groups`;
     /// processors no group covers go in a last group, "Other" (unnamed when there are no groups).
-    pub fn new(_proc_mask: u64, _sys_mask: u64, _groups: &[CpuGroup]) -> Self {
-        Self::default()
+    pub fn new(proc_mask: u64, sys_mask: u64, groups: &[CpuGroup]) -> Self {
+        let cores = |mask: u64| -> Vec<(u32, bool)> {
+            (0..64).filter(|i| mask & sys_mask & (1u64 << i) != 0).map(|i| (i, proc_mask & (1u64 << i) != 0)).collect()
+        };
+        let mut out: Vec<Group> = groups
+            .iter()
+            .map(|g| {
+                let cores = cores(g.mask);
+                let ids: Vec<u32> = cores.iter().map(|&(id, _)| id).collect();
+                let mut detail = format!("CPU {}", ranges(&ids));
+                if let Some(b) = g.l3_bytes {
+                    detail += &format!(" · {} L3", crate::format::bytes(b as f64));
+                }
+                Group { name: g.name.clone(), detail, cores }
+            })
+            .filter(|g| !g.cores.is_empty())
+            .collect();
+        let covered = groups.iter().fold(0, |m, g| m | g.mask);
+        let rest = cores(!covered);
+        if !rest.is_empty() {
+            let (name, detail) = if out.is_empty() {
+                (String::new(), String::new())
+            } else {
+                let ids: Vec<u32> = rest.iter().map(|&(id, _)| id).collect();
+                ("Other".to_string(), format!("CPU {}", ranges(&ids)))
+            };
+            out.push(Group { name, detail, cores: rest });
+        }
+        Self { groups: out }
     }
 
-    pub fn toggle_core(&mut self, _id: u32) {}
+    fn cores_mut(&mut self) -> impl Iterator<Item = &mut (u32, bool)> {
+        self.groups.iter_mut().flat_map(|g| g.cores.iter_mut())
+    }
+
+    fn cores(&self) -> impl Iterator<Item = &(u32, bool)> {
+        self.groups.iter().flat_map(|g| g.cores.iter())
+    }
+
+    pub fn toggle_core(&mut self, id: u32) {
+        if let Some(core) = self.cores_mut().find(|c| c.0 == id) {
+            core.1 = !core.1;
+        }
+    }
 
     /// Turns every processor in the group on, or off when all of them are already on.
-    pub fn toggle_group(&mut self, _index: usize) {}
+    pub fn toggle_group(&mut self, index: usize) {
+        if let Some(g) = self.groups.get_mut(index) {
+            let on = !g.cores.iter().all(|c| c.1);
+            g.cores.iter_mut().for_each(|c| c.1 = on);
+        }
+    }
 
-    pub fn set_all(&mut self, _on: bool) {}
+    pub fn set_all(&mut self, on: bool) {
+        self.cores_mut().for_each(|c| c.1 = on);
+    }
 
     pub fn mask(&self) -> u64 {
-        0
+        self.cores().filter(|c| c.1).fold(0, |m, c| m | 1u64 << c.0)
     }
 
     pub fn selected(&self) -> usize {
-        0
+        self.cores().filter(|c| c.1).count()
     }
 
     pub fn total(&self) -> usize {
-        0
+        self.cores().count()
     }
 
     /// The groups for the dialog.
     pub fn model(&self) -> Vec<crate::CoreGroup> {
-        Vec::new()
+        self.groups
+            .iter()
+            .map(|g| crate::CoreGroup {
+                name: g.name.as_str().into(),
+                detail: g.detail.as_str().into(),
+                checked: g.cores.iter().all(|c| c.1),
+                cores: slint::ModelRc::new(slint::VecModel::from(
+                    g.cores.iter().map(|&(id, checked)| crate::CoreItem { id: id as i32, checked }).collect::<Vec<_>>(),
+                )),
+            })
+            .collect()
     }
 }
 
 /// "0–15" or "0–7, 16–23" for sorted processor numbers.
-fn ranges(_ids: &[u32]) -> String {
-    String::new()
+fn ranges(ids: &[u32]) -> String {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for &id in ids {
+        match runs.last_mut() {
+            Some(run) if run.1 + 1 == id => run.1 = id,
+            _ => runs.push((id, id)),
+        }
+    }
+    runs.iter().map(|&(a, b)| if a == b { a.to_string() } else { format!("{a}–{b}") }).collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]

@@ -237,14 +237,69 @@ pub struct CpuGroup {
 
 /// The machine's CPU groups (see `group_cpus`), empty if Windows does not say.
 pub fn cpu_groups() -> Vec<CpuGroup> {
-    Vec::new()
+    let mut l3 = Vec::new();
+    for_each_record(RelationCache, |info| {
+        // SAFETY: `Relationship == RelationCache` selects the `Cache` union member.
+        let cache = unsafe { &info.Anonymous.Cache };
+        // SAFETY: `GroupMask` is the first entry of the record's `GroupMasks` array.
+        let mask = unsafe { cache.Anonymous.GroupMask };
+        if cache.Level == 3 && mask.Group == 0 {
+            l3.push((mask.Mask as u64, cache.CacheSize as u64));
+        }
+    });
+    let mut cores = Vec::new();
+    for_each_record(RelationProcessorCore, |info| {
+        // SAFETY: `Relationship == RelationProcessorCore` selects the `Processor` union member.
+        let core = unsafe { &info.Anonymous.Processor };
+        let mask = core.GroupMask[0];
+        if mask.Group == 0 {
+            cores.push((mask.Mask as u64, core.EfficiencyClass));
+        }
+    });
+    group_cpus(&l3, &cores)
+}
+
+/// Calls `f` with each record of relationship `rel`.
+fn for_each_record(rel: LOGICAL_PROCESSOR_RELATIONSHIP, mut f: impl FnMut(&SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)) {
+    let Some(buf) = raw_proc_info(rel) else { return };
+    let mut offset = 0usize;
+    while offset + size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>() <= buf.len() {
+        // SAFETY: as in `cpu_topology`: the loop bound keeps the whole struct in `buf`, copied out
+        // because a byte buffer is only 1-aligned.
+        let info = unsafe { (buf.as_ptr().add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX).read_unaligned() };
+        let size = info.Size as usize;
+        if size < 8 || offset + size > buf.len() {
+            break;
+        }
+        if info.Relationship == rel {
+            f(&info);
+        }
+        offset += size;
+    }
 }
 
 /// Groups logical processors by the L3 caches they share (`l3`: mask and size of each cache) when
 /// there are two or more, else by efficiency class (`cores`: mask and class of each physical
 /// core) when the classes differ, else not at all.
-pub fn group_cpus(_l3: &[(u64, u64)], _cores: &[(u64, u8)]) -> Vec<CpuGroup> {
-    Vec::new()
+pub fn group_cpus(l3: &[(u64, u64)], cores: &[(u64, u8)]) -> Vec<CpuGroup> {
+    let mut caches: Vec<_> = l3.iter().filter(|&&(mask, _)| mask != 0).collect();
+    if caches.len() >= 2 {
+        caches.sort_by_key(|&&(mask, _)| mask.trailing_zeros());
+        return caches
+            .iter()
+            .enumerate()
+            .map(|(i, &&(mask, bytes))| CpuGroup { name: format!("CCD {i}"), mask, l3_bytes: Some(bytes) })
+            .collect();
+    }
+    let Some(top) = cores.iter().map(|&(_, class)| class).max() else { return Vec::new() };
+    let (p, e) = cores.iter().fold((0, 0), |(p, e), &(mask, class)| if class == top { (p | mask, e) } else { (p, e | mask) });
+    if e == 0 {
+        return Vec::new();
+    }
+    vec![
+        CpuGroup { name: "P-cores".into(), mask: p, l3_bytes: None },
+        CpuGroup { name: "E-cores".into(), mask: e, l3_bytes: None },
+    ]
 }
 
 /// Reads display adapter class registry keys (`{4d36e968-e325-11ce-bfc1-08002be10318}\0000..0031`)
