@@ -1,0 +1,104 @@
+// Negotium's own caption, so it has the window's backdrop tint (crate::platform::caption_proc).
+// The window procedure answers the hit test for it: the drag area and the maximise button are
+// non-client (crate::platform::caption_hit), so only minimise and close get Slint's pointer input.
+import { Theme } from "theme.slint";
+
+// The Windows 11 caption, in logical px: crate::platform::CAPTION_HEIGHT and CAPTION_BUTTON_WIDTH.
+export global Caption {
+    out property <length> height: 32px;
+    out property <length> button-width: 46px;
+}
+
+component CaptionButton inherits Rectangle {
+    in property <string> label;
+    // The glyph: a 10 × 10 path, stroked.
+    in property <string> glyph;
+    in property <bool> active: true;
+    // Close: red under the pointer, as the native one.
+    in property <bool> close;
+    // The maximise button's state from the window procedure (crate::platform::MaxButton): 0 idle,
+    // 1 hover, 2 pressed. -1: the button's own pointer input.
+    in property <int> state: -1;
+    callback clicked();
+    property <bool> hovered: state >= 0 ? state >= 1 : touch.has-hover;
+    property <bool> pressed: state >= 0 ? state == 2 : touch.pressed;
+    width: Caption.button-width;
+    height: Caption.height;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    background: root.close && root.hovered
+        ? (root.pressed ? Theme.caption-close.with-alpha(0.9) : Theme.caption-close)
+        : (root.pressed ? Theme.caption-press : (root.hovered ? Theme.caption-hover : transparent));
+    touch := TouchArea {
+        enabled: root.state < 0;
+        clicked => { root.clicked(); }
+    }
+    Path {
+        width: 10px;
+        height: 10px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: root.glyph;
+        fill: transparent;
+        stroke: root.close && root.hovered ? Theme.on-danger : (root.active ? Theme.text : Theme.muted);
+        stroke-width: 1px;
+    }
+}
+
+export component TitleBar inherits Rectangle {
+    in property <string> title;
+    in property <image> icon;
+    in property <bool> maximised;
+    in property <bool> active: true;
+    // crate::platform::MaxButton, by index.
+    in property <int> max-button;
+    callback minimise();
+    callback maximise();
+    callback close();
+    height: Caption.height;
+    // No background: the window's own (the Acrylic tint, Mica or the solid colour) shows through.
+    HorizontalLayout {
+        padding-left: 16px;
+        spacing: 12px;
+        Image {
+            source: root.icon;
+            width: 16px;
+            height: 16px;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.title;
+            font-size: 12px;
+            color: root.active ? Theme.text : Theme.muted;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+            accessible-role: none;
+        }
+        HorizontalLayout {
+            CaptionButton {
+                label: "Minimise";
+                glyph: "M 0 5.5 L 10 5.5";
+                active: root.active;
+                clicked => { root.minimise(); }
+            }
+            CaptionButton {
+                label: root.maximised ? "Restore" : "Maximise";
+                glyph: root.maximised
+                    ? "M 0.5 2.5 L 7.5 2.5 L 7.5 9.5 L 0.5 9.5 Z M 2.5 2.5 L 2.5 0.5 L 9.5 0.5 L 9.5 7.5 L 7.5 7.5"
+                    : "M 0.5 0.5 L 9.5 0.5 L 9.5 9.5 L 0.5 9.5 Z";
+                active: root.active;
+                state: root.max-button;
+                clicked => { root.maximise(); }
+            }
+            CaptionButton {
+                label: "Close";
+                glyph: "M 0 0 L 10 10 M 10 0 L 0 10";
+                active: root.active;
+                close: true;
+                clicked => { root.close(); }
+            }
+        }
+    }
+}

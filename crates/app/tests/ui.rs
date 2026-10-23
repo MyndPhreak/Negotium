@@ -883,6 +883,8 @@ fn the_performance_page_lays_out_graph_cells_details_and_ranges() {
     // Stands in for looking at the page: every key element is on screen, inside the window, with
     // a sane size, and the cells sit in a grid in logical-processor order.
     let ui = shown_window();
+    // The page as tall as under a native caption: Negotium's caption takes the window's top rows.
+    ui.window().set_size(PhysicalSize::new(1000, 720 + negotium::platform::CAPTION_HEIGHT as u32));
     ui.set_page(1);
     ui.set_perf_devices(ModelRc::new(VecModel::from(vec![device("cpu", "CPU"), device("memory", "Memory")])));
     ui.set_perf_title("CPU".into());
@@ -4904,4 +4906,66 @@ fn tray_menu_offers_end_a_window() {
     assert!(open < at, "End a window\u{2026} comes after Open");
     let between = &src[open..at];
     assert_eq!(between.matches("MenuItem").count(), 1, "End a window\u{2026} comes right after Open");
+}
+
+/// The caption button labelled `label`, if shown.
+fn caption_button(ui: &MainWindow, label: &str) -> Option<El> {
+    El::find_by_accessible_label(ui, label).find(|e| e.accessible_role() == Some(AccessibleRole::Button))
+}
+
+#[test]
+fn the_title_bar_is_always_drawn() {
+    let ui = shown_window();
+    for label in ["Minimise", "Maximise", "Close"] {
+        assert!(caption_button(&ui, label).is_some(), "no {label} button");
+    }
+}
+
+#[test]
+fn the_settings_page_offers_no_title_bar_switch() {
+    let ui = settings_window(1000, 1700);
+    assert_eq!(El::find_by_accessible_label(&ui, "Use the Negotium title bar").count(), 0);
+}
+
+#[test]
+fn the_title_bar_buttons_ask_for_their_commands() {
+    let ui = shown_window();
+    let log = Rc::new(RefCell::new(Vec::<&str>::new()));
+    let l = log.clone();
+    ui.on_caption_minimise(move || l.borrow_mut().push("minimise"));
+    let l = log.clone();
+    ui.on_caption_maximise(move || l.borrow_mut().push("maximise"));
+    let l = log.clone();
+    ui.on_caption_close(move || l.borrow_mut().push("close"));
+    for label in ["Minimise", "Maximise", "Close"] {
+        caption_button(&ui, label).unwrap_or_else(|| panic!("no {label} button")).invoke_accessible_default_action();
+    }
+    assert_eq!(*log.borrow(), ["minimise", "maximise", "close"]);
+}
+
+#[test]
+fn a_maximised_window_offers_restore() {
+    let ui = shown_window();
+    ui.set_maximised(true);
+    assert!(caption_button(&ui, "Maximise").is_none());
+    assert!(caption_button(&ui, "Restore").is_some(), "the middle button restores");
+}
+
+#[test]
+fn the_title_bar_lies_over_the_top_of_the_window() {
+    let ui = shown_window();
+    let close = caption_button(&ui, "Close").expect("close button");
+    let (p, s) = (close.absolute_position(), close.size());
+    assert_eq!((p.y, s.height), (0.0, negotium::platform::CAPTION_HEIGHT));
+    assert_eq!(s.width, negotium::platform::CAPTION_BUTTON_WIDTH);
+    assert_eq!(p.x + s.width, 1000.0, "close is at the right edge");
+}
+
+#[test]
+fn the_slint_caption_geometry_is_the_hit_tests() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let caption = ui.global::<negotium::Caption>();
+    assert_eq!(caption.get_height(), negotium::platform::CAPTION_HEIGHT);
+    assert_eq!(caption.get_button_width(), negotium::platform::CAPTION_BUTTON_WIDTH);
 }

@@ -603,6 +603,16 @@ mod tests {
     }
 
     #[test]
+    fn a_file_with_the_old_title_bar_switch_still_loads_in_full() {
+        let dir = TempDir::new("captionold");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"custom_title_bar": true, "keep_in_tray": false}"#).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::File);
+        assert!(!s.keep_in_tray);
+    }
+
+    #[test]
     fn sort_and_grouping_default_and_load_tolerantly() {
         use negotium_model::{Metric, Sort, SortColumn};
         let dir = TempDir::new("sort");
