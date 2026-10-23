@@ -290,6 +290,18 @@ export component SettingsPage inherits VerticalLayout {
                     focus-gained => { sv.reveal(backdrop-row.absolute-position.y, backdrop-row.height); }
                 }
             }
+            caption-row := SettingRow {
+                title: "Use the Negotium title bar";
+                description: "Negotium draws the title bar. It then has the same tint as the window.";
+                Toggle {
+                    label: caption-row.title;
+                    description: caption-row.description;
+                    checked: root.custom-title-bar;
+                    interactive: root.interactive;
+                    toggled(on) => { root.custom-title-bar-toggled(on); }
+                    focus-gained => { sv.reveal(caption-row.absolute-position.y, caption-row.height); }
+                }
+            }
             smooth-row := SettingRow {
                 title: "Smooth graphs";
                 description: "Graphs scroll continuously between updates instead of stepping. Turn off to use a little less CPU.";

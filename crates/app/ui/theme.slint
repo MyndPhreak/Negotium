@@ -29,4 +29,9 @@ export global Theme {
     // Text drawn on an accent fill: dark on a light accent, white otherwise (perceived luminance).
     out property <color> on-accent: (accent.red * 0.299 + accent.green * 0.587 + accent.blue * 0.114) > 150 ? #000000 : #ffffff;
     out property <length> radius: 8px;
+    // Negotium's caption buttons (titlebar.slint): the Windows 11 caption's fills under the
+    // pointer and pressed, and close's red (the same in both modes).
+    out property <color> caption-hover: dark ? #ffffff0f : #0000000a;
+    out property <color> caption-press: dark ? #ffffff0a : #00000006;
+    out property <color> caption-close: #c42b1c;
 }

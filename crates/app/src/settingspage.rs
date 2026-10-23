@@ -21,6 +21,7 @@ use std::sync::Arc;
 /// (`Controls::set_refresh_ms`).
 pub fn apply_settings(ui: &MainWindow, s: &Settings) {
     platform::set_backdrop(ui, s.backdrop);
+    platform::set_custom_caption(ui, s.custom_title_bar);
     platform::apply_theme(ui, s.theme);
     show_settings(ui, s);
 }
@@ -36,6 +37,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_smooth_graphs(s.smooth_graphs);
     ui.set_settings_tray_cpu(s.tray_cpu);
     ui.set_settings_picker_shortcut(s.picker_shortcut);
+    ui.set_settings_custom_title_bar(s.custom_title_bar);
     ui.set_settings_group_by_type(s.group_by_type);
     ui.set_settings_check_updates(s.check_updates);
     ui.set_settings_start_with_windows(s.start_with_windows);
@@ -621,6 +623,14 @@ impl SettingsWiring {
                 let backdrop = BackdropChoice::from_index(i);
                 if let Some(ui) = change.apply(|s| s.backdrop = backdrop) {
                     platform::set_backdrop(&ui, backdrop);
+                }
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_custom_title_bar_toggled(move |on| {
+                if let Some(ui) = change.apply(|s| s.custom_title_bar = on) {
+                    platform::set_custom_caption(&ui, on);
                 }
             });
         }

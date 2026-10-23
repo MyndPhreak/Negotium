@@ -75,7 +75,7 @@ It is behind a new setting, **Use the Negotium title bar** (`custom_title_bar`),
 | `crates/app/src/settingspage.rs` | shows the setting; `custom-title-bar-toggled` saves it and calls `platform::set_custom_caption`; `apply_settings` applies it |
 | `crates/app/src/main.rs` | `platform::install_caption(&ui)`; handle `ShellEvent::MaxButton`, `ShellEvent::Active`; `MovedOrResized` also sets `maximised` |
 | `crates/app/ui/titlebar.slint` | new: `Caption` global, `TitleBar` component |
-| `crates/app/ui/main.slint` | caption properties and callbacks, spacer, `TitleBar` on top, `min-height` grows by the caption while on, passes the setting to the page; exports `Caption` |
+| `crates/app/ui/main.slint` | caption properties and callbacks, top padding, `TitleBar` on top, passes the setting to the page; exports `Caption` |
 | `crates/app/ui/settingspage.slint` | the toggle row |
 | `crates/app/Cargo.toml` | `windows` feature `Win32_UI_Input_KeyboardAndMouse` is already on (TrackMouseEvent); no change expected |
 | `crates/app/tests/ui.rs` | title bar tests |
@@ -158,11 +158,12 @@ an older version reading a newer file ignores the unknown field (`serde(default)
 
 `tests/ui.rs`
 
-- the title bar is not shown by default (no "Close" button found) and `min-height` is 440 px
+- the title bar is not shown by default (no "Close" button found)
 - with `custom-caption` on: "Minimise", "Maximise" and "Close" buttons exist and their default
   actions call `caption-minimise`, `caption-maximise` and `caption-close`
 - with `maximised` on, the middle button is labelled "Restore"
-- with `custom-caption` on, `min-height` is 440 px + `Caption.height`
+- with `custom-caption` on, the close button is at the top-right corner, `CAPTION_HEIGHT` high and
+  `CAPTION_BUTTON_WIDTH` wide
 - `Caption.height` and `Caption.button-width` equal `platform::CAPTION_HEIGHT` and
   `CAPTION_BUTTON_WIDTH`
 - the Settings toggle "Use the Negotium title bar" calls `custom-title-bar-toggled`
@@ -190,6 +191,19 @@ checked by hand on `try\negotium.exe` (`scripts/try.ps1`), setting on:
 - M12 Inactive window: title and glyphs dim; active again: they return.
 - M13 Narrator reads the three buttons by name and can press them.
 - M14 Setting off (default): the native caption is back, the window as before.
+
+## Deviations
+
+- `min-height` does not grow by the caption height while the setting is on. With the caption in
+  the client area, the window's smallest outer height is 32 px less than with the native caption.
+  The testing backend does not enforce or report `min-height`, so the growth could not be tested
+  first, and the difference is small. Replaced by a test of where the title bar lies.
+- The frame tests use a window class whose procedure is `DefWindowProcW`: a sent WM_NCCALCSIZE
+  to the system STATIC class gave no non-client area, so a test against it proved nothing.
+- The `screen_readers_hear_each_setting_once_with_its_description` test counts 19 Settings rows
+  now (one new row).
+- `Cargo.lock` is out of date on `main` (0.7.0 after the 0.8.0 release); cargo rewrites it on each
+  build. That change is not part of this work.
 
 ## Out of scope
 

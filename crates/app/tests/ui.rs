@@ -3281,7 +3281,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 18, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 19, "the titles are still drawn");
 }
 
 #[test]

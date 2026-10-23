@@ -427,6 +427,7 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     let ui = MainWindow::new()?;
     platform::set_renderer(running);
+    platform::install_caption(&ui);
     platform::apply_accent(&ui);
     // Settings in effect for this run; the Settings page changes them and saves to `settings_path`.
     let settings = Rc::new(RefCell::new(settings));
@@ -1495,8 +1496,18 @@ fn main() -> Result<(), slint::PlatformError> {
                             // The installer is about to replace the files.
                             ShellEvent::Exit => begin_exit(&controls, &weak, &tray_wiring.saver),
                             ShellEvent::Minimised(_) => {} // handled above
-                            ShellEvent::MaxButton(_) | ShellEvent::Active(_) => {}
+                            ShellEvent::MaxButton(state) => {
+                                weak.upgrade().inspect(|ui| ui.set_max_button(state.index()));
+                            }
+                            ShellEvent::Active(active) => {
+                                weak.upgrade().inspect(|ui| ui.set_active(active));
+                            }
                             ShellEvent::MovedOrResized => {
+                                if let Some(ui) = weak.upgrade()
+                                    && let Some(hwnd) = platform::main_hwnd(&ui)
+                                {
+                                    ui.set_maximised(platform::is_maximised(hwnd));
+                                }
                                 if let Some(ui) = weak.upgrade()
                                     && let Some(hwnd) = platform::main_hwnd(&ui)
                                     && let Some(geo) = platform::read_window_geometry(hwnd)
@@ -1531,6 +1542,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 on_screen.minimise(platform::is_minimised(hwnd));
                 on_screen.apply();
                 platform::mark_main_window(hwnd);
+                // The chrome above recomputed the frame before the subclass could take the
+                // caption: apply the choice again, now that it can.
+                platform::set_custom_caption(&ui, settings.borrow().custom_title_bar);
                 chromed = true;
                 // Started in the tray: the native window exists now (hooked and marked, so the tray
                 // and a second launch can show it), and goes out of sight as closing it to the

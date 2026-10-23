@@ -26,6 +26,9 @@ use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
+use windows::Win32::Foundation::{POINT, RECT};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -35,7 +38,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WM_EXITSIZEMOVE,
     WPF_RESTORETOMAXIMIZED,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
-    HTCLIENT, HTMAXBUTTON, WM_NCLBUTTONDOWN,
+    GetClientRect, HTCAPTION, HTCLIENT, HTMAXBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, SC_CLOSE, SC_MAXIMIZE,
+    SC_MINIMIZE, SC_RESTORE, SM_CXPADDEDBORDER, SM_CYFRAME, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
+    WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
@@ -461,15 +466,54 @@ pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 /// physical px from the client's top-left: the top `frame` px resize (not when maximised), the
 /// maximise button is `HTMAXBUTTON` (Windows 11 shows snap layouts over it), minimise, close and
 /// everything below the caption are the client's, and the rest of the caption drags.
-pub fn caption_hit(_x: i32, _y: i32, _width: i32, _scale: f32, _frame: i32, _maximised: bool) -> u32 {
-    HTCLIENT
+pub fn caption_hit(x: i32, y: i32, width: i32, scale: f32, frame: i32, maximised: bool) -> u32 {
+    let height = (CAPTION_HEIGHT * scale).round() as i32;
+    let button = (CAPTION_BUTTON_WIDTH * scale).round() as i32;
+    if y >= height {
+        return HTCLIENT;
+    }
+    if !maximised && y < frame {
+        return if x < frame {
+            HTTOPLEFT
+        } else if x >= width - frame {
+            HTTOPRIGHT
+        } else {
+            HTTOP
+        };
+    }
+    // From the right: close, maximise, minimise.
+    match (width - x - 1).max(0) / button {
+        1 => HTMAXBUTTON,
+        0 | 2 => HTCLIENT,
+        _ => HTCAPTION,
+    }
 }
 
 /// The client area's top after WM_NCCALCSIZE: the window's own top, so the caption is the
 /// client's. A maximised window reaches past the monitor by its frame, so its top moves down by
 /// that much.
-pub fn caption_client_top(window_top: i32, _maximised: bool, _frame: i32) -> i32 {
-    window_top
+pub fn caption_client_top(window_top: i32, maximised: bool, frame: i32) -> i32 {
+    if maximised { window_top + frame } else { window_top }
+}
+
+/// The top resize border of `hwnd` in physical px, at its DPI: what the caption takes over.
+fn frame_px(hwnd: HWND) -> i32 {
+    // SAFETY: plain queries; any handle value is safe (an invalid one reads the system DPI).
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+    }
+}
+
+/// The command the maximise button sends: restore a maximised window, else maximise it.
+fn max_command(hwnd: HWND) -> u32 {
+    if is_maximised(hwnd) { SC_RESTORE } else { SC_MAXIMIZE }
+}
+
+/// Whether `hwnd` is maximised now.
+pub fn is_maximised(hwnd: HWND) -> bool {
+    // SAFETY: a plain query; any handle value is safe to pass (an invalid one reads as false).
+    unsafe { IsZoomed(hwnd).as_bool() }
 }
 
 /// The maximise button's mouse state. Its input is non-client (`HTMAXBUTTON`), so the subclass
@@ -506,14 +550,47 @@ fn set_caption_flag(on: bool) {
     CUSTOM_CAPTION.with(|c| c.set(on));
 }
 
-/// Turns Negotium's caption on or off (Settings > Use the Negotium title bar). UI thread only.
-pub fn set_custom_caption(_ui: &MainWindow, _on: bool) {}
+/// Turns Negotium's caption on or off (Settings > Use the Negotium title bar) and has the frame
+/// recomputed, so the native caption goes or comes back at once. Before the window exists only
+/// the choice is kept; `main` calls this again once the subclass is in place. UI thread only.
+pub fn set_custom_caption(ui: &MainWindow, on: bool) {
+    set_caption_flag(on);
+    ui.set_custom_caption(on);
+    let Some(hwnd) = hwnd_of(ui) else { return };
+    ui.set_maximised(is_maximised(hwnd));
+    // SAFETY: plain call on our own window handle (no move, size, z-order or activation change).
+    let _ = unsafe {
+        SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+    };
+}
 
-/// Does what a caption button does, through the same WM_SYSCOMMAND the native caption sends.
-pub fn caption_command(_ui: &MainWindow, _button: CaptionButton) {}
+/// Does what a caption button does, through the same WM_SYSCOMMAND the native caption sends:
+/// close then takes winit's close request (and keep-in-tray), minimise keeps its animation.
+pub fn caption_command(ui: &MainWindow, button: CaptionButton) {
+    let Some(hwnd) = hwnd_of(ui) else { return };
+    let command = match button {
+        CaptionButton::Minimise => SC_MINIMIZE,
+        CaptionButton::MaximiseRestore => max_command(hwnd),
+        CaptionButton::Close => SC_CLOSE,
+    };
+    // SAFETY: posts a system command to our own window.
+    let _ = unsafe { PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(command as usize), LPARAM(0)) };
+}
 
 /// Wires the caption buttons' callbacks to `caption_command`.
-pub fn install_caption(_ui: &MainWindow) {}
+pub fn install_caption(ui: &MainWindow) {
+    let command = |button| {
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                caption_command(&ui, button);
+            }
+        }
+    };
+    ui.on_caption_minimise(command(CaptionButton::Minimise));
+    ui.on_caption_maximise(command(CaptionButton::MaximiseRestore));
+    ui.on_caption_close(command(CaptionButton::Close));
+}
 
 /// Messages the main window handles on top of what winit does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -627,8 +704,11 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
-    } else if msg == WM_NCLBUTTONDOWN && wparam.0 as u32 == HTMAXBUTTON && CUSTOM_CAPTION.with(|c| c.get()) {
-        return LRESULT(0);
+    } else if CUSTOM_CAPTION.with(|c| c.get())
+        // SAFETY: `hook` lives until WM_NCDESTROY; the arguments are this message's.
+        && let Some(answer) = unsafe { caption_proc(hwnd, msg, wparam, lparam, &*hook) }
+    {
+        return answer;
     } else if msg == WM_SIZE {
         // SAFETY: as above.
         let minimised = wparam.0 as u32 == SIZE_MINIMIZED;
@@ -645,6 +725,90 @@ unsafe extern "system" fn subclass_proc(
     }
     // SAFETY: forwards to the next procedure in the subclass chain.
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// The frame and maximise-button messages while Negotium draws the caption: `Some` answers the
+/// message, `None` lets the subclass go on (and pass it down the chain).
+///
+/// # Safety
+/// The arguments of a message to `hwnd`, delivered to its window procedure.
+unsafe fn caption_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, hook: &Hook) -> Option<LRESULT> {
+    let ht = wparam.0 as u32;
+    let report = |state: MaxButton| hook(ShellEvent::MaxButton(state));
+    match msg {
+        // The default procedure sizes the side and bottom borders; the top is the window's own.
+        WM_NCCALCSIZE => {
+            // lParam points at NCCALCSIZE_PARAMS (wParam TRUE) or a RECT (FALSE): both start with
+            // the proposed window rectangle, which the default procedure turns into the client's.
+            let rect = lparam.0 as *mut RECT;
+            // SAFETY: the system passes a valid, writable rectangle for this message.
+            let top = unsafe { (*rect).top };
+            // SAFETY: forwards to the next procedure in the subclass chain.
+            let answer = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+            // SAFETY: as above, still valid while the message is handled.
+            unsafe { (*rect).top = caption_client_top(top, is_maximised(hwnd), frame_px(hwnd)) };
+            Some(answer)
+        }
+        WM_NCHITTEST => {
+            // SAFETY: as above.
+            let answer = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+            if answer.0 as u32 != HTCLIENT {
+                return Some(answer); // the side and bottom borders and their corners
+            }
+            let mut point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
+            let mut client = RECT::default();
+            // SAFETY: plain calls on our own window with local out-parameters.
+            let read = unsafe { ScreenToClient(hwnd, &mut point).as_bool() && GetClientRect(hwnd, &mut client).is_ok() };
+            if !read {
+                return Some(answer);
+            }
+            // SAFETY: a plain query on our own window.
+            let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
+            let hit = caption_hit(point.x, point.y, client.right, scale, frame_px(hwnd), is_maximised(hwnd));
+            Some(LRESULT(hit as isize))
+        }
+        WM_NCMOUSEMOVE => {
+            if ht == HTMAXBUTTON {
+                report(if MAX_PRESSED.with(|p| p.get()) { MaxButton::Pressed } else { MaxButton::Hover });
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE | TME_NONCLIENT,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                // SAFETY: asks for WM_NCMOUSELEAVE on our own window; failure only keeps the hover.
+                let _ = unsafe { TrackMouseEvent(&mut track) };
+            } else {
+                MAX_PRESSED.with(|p| p.set(false));
+                report(MaxButton::Idle);
+            }
+            None
+        }
+        WM_NCMOUSELEAVE => {
+            MAX_PRESSED.with(|p| p.set(false));
+            report(MaxButton::Idle);
+            None
+        }
+        // Swallowed: the default procedure would draw a legacy button and track it itself.
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if ht == HTMAXBUTTON => {
+            MAX_PRESSED.with(|p| p.set(true));
+            report(MaxButton::Pressed);
+            Some(LRESULT(0))
+        }
+        WM_NCLBUTTONUP if ht == HTMAXBUTTON => {
+            if MAX_PRESSED.with(|p| p.replace(false)) {
+                // SAFETY: posts a system command to our own window.
+                let _ = unsafe { PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(max_command(hwnd) as usize), LPARAM(0)) };
+            }
+            report(MaxButton::Hover);
+            Some(LRESULT(0))
+        }
+        WM_NCACTIVATE => {
+            hook(ShellEvent::Active(wparam.0 != 0));
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Whether a WM_SETTINGCHANGE names the colour scheme ("ImmersiveColorSet"). It is broadcast
