@@ -11,8 +11,9 @@ import { StartupPage, StartupData } from "startuppage.slint";
 import { AppHistoryPage, AppHistoryData } from "apphistorypage.slint";
 import { ServicesPage, ServiceData } from "servicespage.slint";
 import { GraphData, ScrubRow, GraphClock } from "graph.slint";
+import { Caption, TitleBar } from "titlebar.slint";
 export { NegotiumTray } from "tray.slint";
-export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, GraphClock }
+export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, GraphClock, Caption }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -23,6 +24,16 @@ export component MainWindow inherits Window {
     min-height: 440px;
     default-font-family: "Segoe UI Variable Text";
     background: Theme.window-bg;
+
+    // Negotium draws the caption (crate::platform::set_custom_caption): the window's state and
+    // the maximise button's (crate::platform::MaxButton, by index), and what the buttons ask for.
+    in property <bool> custom-caption;
+    in property <bool> maximised;
+    in property <bool> active: true;
+    in property <int> max-button;
+    callback caption-minimise();
+    callback caption-maximise();
+    callback caption-close();
 
     // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings, 4 AppHistory, 5 Services (crate::controls::Page).
     in-out property <int> page: 0;
@@ -215,6 +226,7 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-group-by-type: true;
     in-out property <bool> settings-tray-cpu: true;
     in-out property <bool> settings-picker-shortcut;
+    in-out property <bool> settings-custom-title-bar;
     in-out property <bool> settings-shortcut-taken;
     in-out property <bool> settings-gpu-rendering: true;
     in-out property <bool> settings-gpu-fallback;
@@ -232,6 +244,7 @@ export component MainWindow inherits Window {
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback picker-shortcut-toggled(bool);
+    callback custom-title-bar-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // Installed copy, integration and updates (crate::install, crate::settingspage::show_install).
     // Admin mode: 0 off, 1 on, 2 needs repair, 3 not available on this account.

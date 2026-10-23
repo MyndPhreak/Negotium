@@ -1,0 +1,15 @@
+// Negotium's own caption (Settings > Use the Negotium title bar; crate::platform::set_custom_caption).
+// Stub: drawn in the next commit.
+export global Caption {
+    out property <length> height: 0px;
+    out property <length> button-width: 0px;
+}
+
+export component TitleBar inherits Rectangle {
+    in property <bool> maximised;
+    in property <bool> active: true;
+    in property <int> max-button;
+    callback minimise();
+    callback maximise();
+    callback close();
+}

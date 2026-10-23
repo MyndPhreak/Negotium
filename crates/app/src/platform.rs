@@ -35,6 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WM_EXITSIZEMOVE,
     WPF_RESTORETOMAXIMIZED,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
+    HTCLIENT, HTMAXBUTTON, WM_NCLBUTTONDOWN,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
@@ -451,6 +452,69 @@ pub fn is_minimised(hwnd: HWND) -> bool {
     unsafe { IsIconic(hwnd).as_bool() }
 }
 
+/// The caption Negotium draws when Settings > Use the Negotium title bar is on, in logical px: the
+/// Windows 11 caption's height and button width. `Caption` in titlebar.slint holds the same.
+pub const CAPTION_HEIGHT: f32 = 32.0;
+pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
+
+/// The hit-test code for a point in the client area of a window with Negotium's caption, in
+/// physical px from the client's top-left: the top `frame` px resize (not when maximised), the
+/// maximise button is `HTMAXBUTTON` (Windows 11 shows snap layouts over it), minimise, close and
+/// everything below the caption are the client's, and the rest of the caption drags.
+pub fn caption_hit(_x: i32, _y: i32, _width: i32, _scale: f32, _frame: i32, _maximised: bool) -> u32 {
+    HTCLIENT
+}
+
+/// The client area's top after WM_NCCALCSIZE: the window's own top, so the caption is the
+/// client's. A maximised window reaches past the monitor by its frame, so its top moves down by
+/// that much.
+pub fn caption_client_top(window_top: i32, _maximised: bool, _frame: i32) -> i32 {
+    window_top
+}
+
+/// The maximise button's mouse state. Its input is non-client (`HTMAXBUTTON`), so the subclass
+/// tracks it and Slint draws it (`MainWindow.max-button`, by index).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaxButton {
+    Idle,
+    Hover,
+    Pressed,
+}
+
+impl MaxButton {
+    pub fn index(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A button of Negotium's caption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptionButton {
+    Minimise,
+    MaximiseRestore,
+    Close,
+}
+
+thread_local! {
+    /// Negotium draws the caption (`set_custom_caption`); the subclass reads it per message.
+    static CUSTOM_CAPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The maximise button was pressed and the button has not been released or left since.
+    static MAX_PRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn set_caption_flag(on: bool) {
+    CUSTOM_CAPTION.with(|c| c.set(on));
+}
+
+/// Turns Negotium's caption on or off (Settings > Use the Negotium title bar). UI thread only.
+pub fn set_custom_caption(_ui: &MainWindow, _on: bool) {}
+
+/// Does what a caption button does, through the same WM_SYSCOMMAND the native caption sends.
+pub fn caption_command(_ui: &MainWindow, _button: CaptionButton) {}
+
+/// Wires the caption buttons' callbacks to `caption_command`.
+pub fn install_caption(_ui: &MainWindow) {}
+
 /// Messages the main window handles on top of what winit does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellEvent {
@@ -470,6 +534,10 @@ pub enum ShellEvent {
     Exit,
     /// The main window was moved, resized, maximized, or restored.
     MovedOrResized,
+    /// The maximise button of Negotium's caption changed state.
+    MaxButton(MaxButton),
+    /// The window became active (true) or inactive (false), while Negotium draws the caption.
+    Active(bool),
 }
 
 // Cached: the subclass compares every message the main window receives against these.
@@ -559,6 +627,8 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
+    } else if msg == WM_NCLBUTTONDOWN && wparam.0 as u32 == HTMAXBUTTON && CUSTOM_CAPTION.with(|c| c.get()) {
+        return LRESULT(0);
     } else if msg == WM_SIZE {
         // SAFETY: as above.
         let minimised = wparam.0 as u32 == SIZE_MINIMIZED;
@@ -1417,5 +1487,246 @@ mod tests {
         let sanitized_small = sanitize_geometry_bounds(too_small, primary, Some(primary));
         assert_eq!(sanitized_small.width, 760);
         assert_eq!(sanitized_small.height, 440);
+    }
+
+    #[test]
+    fn the_caption_hit_zones_of_a_restored_window() {
+        use windows::Win32::UI::WindowsAndMessaging::{HTCAPTION, HTTOP, HTTOPLEFT, HTTOPRIGHT};
+        let hit = |x, y| caption_hit(x, y, 1000, 1.0, 8, false);
+        assert_eq!(hit(500, 100), HTCLIENT, "below the caption");
+        assert_eq!(hit(500, 20), HTCAPTION, "the drag area");
+        assert_eq!(hit(10, 20), HTCAPTION, "the icon drags too");
+        assert_eq!(hit(1000 - 46 - 23, 20), HTMAXBUTTON, "maximise");
+        assert_eq!(hit(1000 - 23, 20), HTCLIENT, "close is Slint's");
+        assert_eq!(hit(1000 - 92 - 23, 20), HTCLIENT, "minimise is Slint's");
+        assert_eq!(hit(500, 3), HTTOP);
+        assert_eq!(hit(3, 3), HTTOPLEFT);
+        assert_eq!(hit(997, 3), HTTOPRIGHT);
+        assert_eq!(hit(1000 - 46 - 23, 3), HTTOP, "resizing wins over the button");
+        assert_eq!(hit(500, 31), HTCAPTION, "the caption's last row");
+        assert_eq!(hit(500, 32), HTCLIENT, "the first row below it");
+    }
+
+    #[test]
+    fn a_maximised_caption_has_no_resize_band() {
+        use windows::Win32::UI::WindowsAndMessaging::HTCAPTION;
+        assert_eq!(caption_hit(500, 3, 1000, 1.0, 8, true), HTCAPTION);
+        assert_eq!(caption_hit(1000 - 46 - 23, 3, 1000, 1.0, 8, true), HTMAXBUTTON);
+    }
+
+    #[test]
+    fn the_caption_hit_zones_follow_the_scale() {
+        use windows::Win32::UI::WindowsAndMessaging::HTCAPTION;
+        let hit = |x, y| caption_hit(x, y, 1000, 1.5, 12, false);
+        assert_eq!(hit(500, 47), HTCAPTION, "48 px high at 150%");
+        assert_eq!(hit(500, 48), HTCLIENT);
+        assert_eq!(hit(1000 - 69 - 34, 20), HTMAXBUTTON, "69 px wide buttons");
+        assert_eq!(hit(1000 - 69, 20), HTCLIENT, "close starts here");
+    }
+
+    #[test]
+    fn a_maximised_client_starts_below_the_frame() {
+        assert_eq!(caption_client_top(100, false, 8), 100);
+        assert_eq!(caption_client_top(-8, true, 8), 0);
+    }
+
+    /// A hidden top-level window with a native caption, standing in for the main window. Its
+    /// class's procedure is the default one: a system class such as STATIC answers the frame
+    /// messages itself.
+    fn captioned_window() -> HWND {
+        use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, RegisterClassW, WNDCLASSW, WS_OVERLAPPEDWINDOW};
+        unsafe extern "system" fn default_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            // SAFETY: forwards a message of our own window to the system default.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        static CLASS: OnceLock<()> = OnceLock::new();
+        CLASS.get_or_init(|| {
+            let class = WNDCLASSW { lpfnWndProc: Some(default_proc), lpszClassName: w!("negotium-test-frame"), ..Default::default() };
+            // SAFETY: registers a class whose procedure is the system default, once per process.
+            assert_ne!(unsafe { RegisterClassW(&class) }, 0, "register the test class");
+        });
+        // SAFETY: plain window creation with the class above; destroyed by the test.
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("negotium-test-frame"),
+                w!("negotium-test"),
+                WS_OVERLAPPEDWINDOW,
+                100,
+                100,
+                800,
+                600,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("create test window")
+    }
+
+    fn window_rect(hwnd: HWND) -> windows::Win32::Foundation::RECT {
+        let mut r = Default::default();
+        // SAFETY: our own test window.
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r) }.unwrap();
+        r
+    }
+
+    /// What WM_NCCALCSIZE (wParam TRUE) makes of the window's own rectangle.
+    fn calc_size(hwnd: HWND) -> windows::Win32::Foundation::RECT {
+        use windows::Win32::UI::WindowsAndMessaging::{NCCALCSIZE_PARAMS, WM_NCCALCSIZE};
+        let mut pos = windows::Win32::UI::WindowsAndMessaging::WINDOWPOS::default();
+        let mut params = NCCALCSIZE_PARAMS { lppos: &mut pos, ..Default::default() };
+        params.rgrc = [window_rect(hwnd); 3];
+        // SAFETY: synchronous send; `params` outlives it.
+        unsafe { SendMessageW(hwnd, WM_NCCALCSIZE, Some(WPARAM(1)), Some(LPARAM(&mut params as *mut _ as isize))) };
+        params.rgrc[0]
+    }
+
+    fn hit_test(hwnd: HWND, x: i32, y: i32) -> u32 {
+        use windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST;
+        let lparam = (((y as u32 & 0xFFFF) << 16) | (x as u32 & 0xFFFF)) as isize;
+        // SAFETY: synchronous send to our own window.
+        unsafe { SendMessageW(hwnd, WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0 as u32
+    }
+
+    fn reframe(hwnd: HWND) {
+        // SAFETY: our own test window: recompute its client area (no move, size or activation).
+        let _ = unsafe {
+            SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+        };
+    }
+
+    #[test]
+    fn with_the_caption_off_the_frame_answers_as_an_unhooked_window() {
+        set_caption_flag(false);
+        let (hooked, plain) = (captioned_window(), captioned_window());
+        assert!(install_window_hooks(hooked, |_| {}));
+        reframe(hooked);
+        assert_eq!(calc_size(hooked), calc_size(plain));
+        let r = window_rect(plain);
+        let (x, y) = (r.left + 400, r.top + 15);
+        assert_eq!(hit_test(hooked, x, y), hit_test(plain, x, y));
+        // SAFETY: our own test windows.
+        unsafe {
+            let _ = DestroyWindow(hooked);
+            let _ = DestroyWindow(plain);
+        }
+    }
+
+    #[test]
+    fn with_the_caption_on_the_client_area_starts_at_the_top() {
+        let (hooked, plain) = (captioned_window(), captioned_window());
+        assert!(install_window_hooks(hooked, |_| {}));
+        set_caption_flag(true);
+        let (got, native, r) = (calc_size(hooked), calc_size(plain), window_rect(hooked));
+        set_caption_flag(false);
+        assert_eq!(got.top, r.top, "the caption is the client's");
+        assert_eq!((got.left, got.right, got.bottom), (native.left, native.right, native.bottom), "the other borders stay");
+        // SAFETY: our own test windows.
+        unsafe {
+            let _ = DestroyWindow(hooked);
+            let _ = DestroyWindow(plain);
+        }
+    }
+
+    #[test]
+    fn with_the_caption_on_the_hit_test_finds_the_caption_and_the_maximise_button() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, HTCAPTION, HTLEFT};
+        let hwnd = captioned_window();
+        assert!(install_window_hooks(hwnd, |_| {}));
+        set_caption_flag(true);
+        reframe(hwnd);
+        // SAFETY: our own test window.
+        let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
+        let r = window_rect(hwnd);
+        let mut client = Default::default();
+        // SAFETY: as above.
+        unsafe { GetClientRect(hwnd, &mut client) }.unwrap();
+        let border = (r.right - r.left - client.right) / 2;
+        let bw = (CAPTION_BUTTON_WIDTH * scale).round() as i32;
+        let mid_y = r.top + (20.0 * scale) as i32;
+        let (caption, max, left) = (
+            hit_test(hwnd, r.left + client.right / 2, mid_y),
+            hit_test(hwnd, r.right - border - bw - bw / 2, mid_y),
+            hit_test(hwnd, r.left + 1, r.top + 300),
+        );
+        set_caption_flag(false);
+        // SAFETY: our own test window.
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        assert_eq!(caption, HTCAPTION);
+        assert_eq!(max, HTMAXBUTTON);
+        assert_eq!(left, HTLEFT, "the side border is still the default's");
+    }
+
+    /// Removes and returns the WM_SYSCOMMAND posted to `hwnd`, if any.
+    fn posted_command(hwnd: HWND) -> Option<u32> {
+        use windows::Win32::UI::WindowsAndMessaging::{MSG, PM_REMOVE, PeekMessageW, WM_SYSCOMMAND};
+        let mut m = MSG::default();
+        // SAFETY: reads this thread's queue for our own window.
+        unsafe { PeekMessageW(&mut m, Some(hwnd), WM_SYSCOMMAND, WM_SYSCOMMAND, PM_REMOVE) }
+            .as_bool()
+            .then_some(m.wParam.0 as u32 & 0xFFF0)
+    }
+
+    #[test]
+    fn the_maximise_button_is_pressed_and_released_through_non_client_messages() {
+        use windows::Win32::UI::WindowsAndMessaging::{HTCAPTION, SC_MAXIMIZE, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE};
+        let hwnd = captioned_window();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        assert!(install_window_hooks(hwnd, move |e| s.borrow_mut().push(e)));
+        set_caption_flag(true);
+        let send = |msg, ht: u32| {
+            // SAFETY: synchronous send to our own window.
+            unsafe { SendMessageW(hwnd, msg, Some(WPARAM(ht as usize)), Some(LPARAM(0))) }
+        };
+        send(WM_NCMOUSEMOVE, HTMAXBUTTON);
+        let down = send(WM_NCLBUTTONDOWN, HTMAXBUTTON);
+        send(WM_NCLBUTTONUP, HTMAXBUTTON);
+        let after_click = posted_command(hwnd);
+        send(WM_NCLBUTTONUP, HTMAXBUTTON);
+        let after_stray_up = posted_command(hwnd);
+        send(WM_NCMOUSEMOVE, HTCAPTION);
+        send(WM_NCMOUSELEAVE, 0);
+        set_caption_flag(false);
+        // SAFETY: our own test window.
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        assert_eq!(down, LRESULT(0), "the press is swallowed: no legacy button is drawn");
+        assert_eq!(after_click, Some(SC_MAXIMIZE));
+        assert_eq!(after_stray_up, None, "a release with no press first does nothing");
+        let states: Vec<MaxButton> =
+            seen.borrow().iter().filter_map(|e| if let ShellEvent::MaxButton(b) = e { Some(*b) } else { None }).collect();
+        use MaxButton::{Hover, Idle, Pressed};
+        assert_eq!(states, [Hover, Pressed, Hover, Hover, Idle, Idle]);
+    }
+
+    #[test]
+    fn activation_reaches_the_hook_only_with_the_caption_on() {
+        use windows::Win32::UI::WindowsAndMessaging::WM_NCACTIVATE;
+        let hwnd = captioned_window();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        assert!(install_window_hooks(hwnd, move |e| s.borrow_mut().push(e)));
+        let send = |active: usize| {
+            // SAFETY: synchronous send to our own window.
+            unsafe { SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(active)), Some(LPARAM(0))) };
+        };
+        set_caption_flag(false);
+        send(0);
+        set_caption_flag(true);
+        send(0);
+        send(1);
+        set_caption_flag(false);
+        // SAFETY: our own test window.
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let active: Vec<ShellEvent> = seen.borrow().iter().copied().filter(|e| matches!(e, ShellEvent::Active(_))).collect();
+        assert_eq!(active, [ShellEvent::Active(false), ShellEvent::Active(true)]);
     }
 }

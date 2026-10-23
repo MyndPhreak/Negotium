@@ -189,6 +189,8 @@ export component SettingsPage inherits VerticalLayout {
     // already holds the keys.
     in property <bool> picker-shortcut;
     in property <bool> shortcut-taken;
+    // Negotium draws the title bar (crate::platform::set_custom_caption).
+    in property <bool> custom-title-bar;
     // The saved GPU choice; whether an automatic fallback to the CPU is recorded; whether this
     // instance draws with the GPU; whether SLINT_BACKEND chose the renderer (crate::settingspage).
     in property <bool> gpu-rendering;
@@ -218,6 +220,7 @@ export component SettingsPage inherits VerticalLayout {
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback picker-shortcut-toggled(bool);
+    callback custom-title-bar-toggled(bool);
     callback gpu-rendering-toggled(bool);
     callback admin-mode-toggled(bool);
     callback hotkey-toggled(bool);

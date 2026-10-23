@@ -1495,6 +1495,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             // The installer is about to replace the files.
                             ShellEvent::Exit => begin_exit(&controls, &weak, &tray_wiring.saver),
                             ShellEvent::Minimised(_) => {} // handled above
+                            ShellEvent::MaxButton(_) | ShellEvent::Active(_) => {}
                             ShellEvent::MovedOrResized => {
                                 if let Some(ui) = weak.upgrade()
                                     && let Some(hwnd) = platform::main_hwnd(&ui)

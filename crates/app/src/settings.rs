@@ -75,6 +75,9 @@ pub struct Settings {
     pub tray_cpu: bool,
     /// Ctrl+Alt+Shift+Esc opens the window picker (crate::shortcut). Off by default: the flag.
     pub picker_shortcut: bool,
+    /// Negotium draws the caption itself (crate::platform::set_custom_caption), so it has the
+    /// window's backdrop tint. Off by default: the flag.
+    pub custom_title_bar: bool,
     /// The Overview's sort column: "name", "cpu", "memory", "disk", "gpu" or "network" (an unknown
     /// one reads as the default, CPU). A string so the file stays readable and a newer column can't
     /// break an older version.
@@ -112,6 +115,7 @@ impl Default for Settings {
             smooth_graphs: true,
             tray_cpu: true,
             picker_shortcut: false,
+            custom_title_bar: false,
             sort_column: "cpu".to_string(),
             sort_descending: true,
             group_by_type: true,
@@ -600,6 +604,34 @@ mod tests {
         let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["picker_shortcut".to_string()]));
         assert!(!s.picker_shortcut && !s.keep_in_tray);
+    }
+
+    #[test]
+    fn custom_title_bar_defaults_off() {
+        assert!(!Settings::default().custom_title_bar);
+        let dir = TempDir::new("captiondefault");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"keep_in_tray": false}"#).unwrap();
+        assert!(!load_with(&Writes::Plain, &p).0.custom_title_bar, "a file that predates the switch: off");
+    }
+
+    #[test]
+    fn custom_title_bar_round_trips() {
+        let dir = TempDir::new("captionround");
+        let p = dir.file();
+        let s = Settings { custom_title_bar: true, ..Settings::default() };
+        save_with(&Writes::Plain, &p, &s).unwrap();
+        assert_eq!(load_with(&Writes::Plain, &p), (s, Loaded::File));
+    }
+
+    #[test]
+    fn a_bad_custom_title_bar_value_takes_the_default_and_keeps_the_rest() {
+        let dir = TempDir::new("captionbad");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"custom_title_bar": "yes", "keep_in_tray": false}"#).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::Partial(vec!["custom_title_bar".to_string()]));
+        assert!(!s.custom_title_bar && !s.keep_in_tray);
     }
 
     #[test]
