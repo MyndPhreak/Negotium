@@ -3,7 +3,7 @@ import { Theme } from "theme.slint";
 import { MetersRow, MeterData } from "meters.slint";
 import { TopStrip, TileData } from "topstrip.slint";
 import { AppList, RowData } from "applist.slint";
-import { Banner, Toast, Modal, RunTaskModal, CpuAffinityModal, CpuPriorityModal, CoreItem } from "overlays.slint";
+import { Banner, Toast, Modal, RunTaskModal, CpuAffinityModal, CpuPriorityModal, CoreItem, CoreGroup } from "overlays.slint";
 import { Rail } from "rail.slint";
 import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
 import { SettingsPage } from "settingspage.slint";
@@ -109,11 +109,13 @@ export component MainWindow inherits Window {
     in-out property <bool> affinity-visible: false;
     in-out property <string> affinity-title: "";
     in-out property <string> affinity-process-name: "";
-    in-out property <[CoreItem]> affinity-cores: [];
+    in-out property <[CoreGroup]> affinity-groups: [];
+    in-out property <string> affinity-selected-text: "";
     in-out property <bool> affinity-all-cores: true;
     in-out property <bool> affinity-can-apply: true;
     in-out property <bool> affinity-remember: false;
     callback affinity-toggle-core(int);
+    callback affinity-toggle-group(int);
     callback affinity-toggle-all(bool);
     callback affinity-apply(bool);
     callback affinity-cancel();
@@ -617,11 +619,13 @@ export component MainWindow inherits Window {
     if root.affinity-visible : CpuAffinityModal {
         title: root.affinity-title;
         process-name: root.affinity-process-name;
-        cores <=> root.affinity-cores;
+        groups: root.affinity-groups;
+        selected-text: root.affinity-selected-text;
         all-cores <=> root.affinity-all-cores;
         can-apply: root.affinity-can-apply;
         remember <=> root.affinity-remember;
         toggle-core(id) => { root.affinity-toggle-core(id); }
+        toggle-group(i) => { root.affinity-toggle-group(i); }
         toggle-all(on) => { root.affinity-toggle-all(on); }
         apply(rem) => { root.affinity-apply(rem); }
         cancel => { root.affinity-cancel(); }

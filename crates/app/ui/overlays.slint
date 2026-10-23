@@ -1,5 +1,6 @@
 import { Button, LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { FocusButton } from "focusbutton.slint";
 import { Choice, Toggle } from "settingspage.slint";
 
 // An inline offer (spec 7: never a dialog): the admin path (why admin rights are needed and a
@@ -252,26 +253,113 @@ export component RunTaskModal inherits Rectangle {
 
 export struct CoreItem {
     id: int,
-    name: string,
     checked: bool,
+}
+
+// A CCD or core class (unnamed when the machine has neither) and its logical processors.
+export struct CoreGroup {
+    name: string,
+    detail: string,
+    checked: bool,
+    cores: [CoreItem],
+}
+
+// A drawn check box (the ballot box glyphs do not exist in every font).
+component CheckMark inherits Rectangle {
+    in property <bool> checked;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: root.checked ? Theme.accent : transparent;
+    border-width: root.checked ? 0px : 1px;
+    border-color: Theme.muted;
+    if root.checked : Path {
+        width: 10px;
+        height: 8px;
+        viewbox-width: 10;
+        viewbox-height: 8;
+        commands: "M 0.5 4 L 3.75 7 L 9.5 1";
+        stroke: Theme.on-accent;
+        stroke-width: 1.75px;
+        fill: transparent;
+    }
+}
+
+// A check box row: the remember-as-rule row and each CPU group header.
+component CheckRow inherits FocusButton {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> checked;
+    min-height: 32px;
+    border-radius: 4px;
+    background: root.hovered ? Theme.text.with-alpha(0.06) : transparent;
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.text;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-description: root.detail;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            CheckMark { checked: root.checked; }
+        }
+        Text { text: root.text; color: Theme.text; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+        Text { text: root.detail; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+    }
+}
+
+// One logical processor: filled with the accent colour when the process can use it.
+component CpuTile inherits FocusButton {
+    in property <int> cpu;
+    in property <bool> checked;
+    height: 30px;
+    border-radius: 4px;
+    background: root.checked ? (root.hovered ? Theme.accent.brighter(0.15) : Theme.accent) : (root.hovered ? Theme.card-hover : Theme.card-inset);
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.text : (root.checked ? Theme.accent : Theme.card-border);
+    accessible-role: checkbox;
+    accessible-label: "CPU " + root.cpu;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    Text {
+        text: root.cpu;
+        color: root.checked ? Theme.on-accent : Theme.muted;
+        font-size: 12px;
+        font-weight: root.checked ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 }
 
 export component CpuAffinityModal inherits Rectangle {
     in property <string> title: "Set CPU Affinity";
     in property <string> process-name: "";
-    in-out property <[CoreItem]> cores: [];
+    in property <[CoreGroup]> groups: [];
+    // "8 of 32 selected".
+    in property <string> selected-text: "";
     in-out property <bool> all-cores: true;
     in-out property <bool> remember: false;
     callback toggle-core(int);
+    callback toggle-group(int);
     callback toggle-all(bool);
     callback apply(bool);
     callback cancel();
 
     in property <bool> can-apply: true;
+    property <int> columns: 8;
+    property <length> gap: 4px;
 
     background: #00000066;
     TouchArea { }
+    // The dialog sits inside the scope, so Escape and Return reach it from a focused tile too.
     FocusScope {
+        init => { self.focus(); }
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.cancel();
@@ -283,148 +371,124 @@ export component CpuAffinityModal inherits Rectangle {
             }
             return reject;
         }
-    }
-    Rectangle {
-        width: min(parent.width - 48px, 480px);
-        height: layout.preferred-height;
-        border-radius: Theme.radius;
-        background: Theme.dark ? #2b2b2b : #ffffff;
-        border-width: 1px;
-        border-color: Theme.card-border;
-        layout := VerticalLayout {
-            padding: 20px;
-            spacing: 14px;
-            Text {
-                text: root.title;
-                color: Theme.text;
-                font-size: 16px;
-                font-weight: 600;
-            }
-            Text {
-                text: "Select the CPU cores that the process is allowed to run on.";
-                color: Theme.muted;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
+        Rectangle {
+            width: min(root.width - 48px, 520px);
+            height: layout.preferred-height;
+            border-radius: Theme.radius;
+            background: Theme.dark ? #2b2b2b : #ffffff;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            layout := VerticalLayout {
+                padding: 20px;
+                spacing: 14px;
+                Text {
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: 16px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "Select the CPUs that the process can use.";
+                    color: Theme.muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
 
-            // All Processors row
-            Rectangle {
-                height: 38px;
-                border-radius: 4px;
-                background: Theme.card;
-                border-width: 1px;
-                border-color: Theme.card-border;
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 8px;
-                    Text {
-                        text: "<All Processors>";
-                        color: Theme.text;
-                        font-size: 13px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                    Toggle {
-                        checked: root.all-cores;
-                        toggled(on) => {
-                            root.toggle-all(on);
+                // All processors row
+                Rectangle {
+                    height: 44px;
+                    border-radius: 4px;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text { text: "All processors"; color: Theme.text; font-size: 13px; font-weight: 600; }
+                            Text { text: root.selected-text; color: Theme.muted; font-size: 11px; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Toggle {
+                                label: "All processors";
+                                description: root.selected-text;
+                                checked: root.all-cores;
+                                toggled(on) => { root.toggle-all(on); }
+                            }
                         }
                     }
                 }
-            }
 
-            // Cores list
-            Rectangle {
-                border-radius: 4px;
-                background: Theme.card;
-                border-width: 1px;
-                border-color: Theme.card-border;
-                ScrollView {
-                    max-height: 200px;
+                // A header and a grid of tiles per CCD or core class
+                Rectangle {
+                    border-radius: 4px;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
                     VerticalLayout {
-                        padding: 6px;
-                        spacing: 2px;
-                        for core[i] in root.cores : Rectangle {
-                            height: 30px;
-                            border-radius: 4px;
-                            background: core-touch.has-hover ? Theme.text.with-alpha(0.06) : transparent;
-                            core-touch := TouchArea {
-                                clicked => {
-                                    root.toggle-core(core.id);
-                                }
+                        padding: 10px;
+                        spacing: 10px;
+                        for group[gi] in root.groups : VerticalLayout {
+                            spacing: 6px;
+                            if group.name != "" : CheckRow {
+                                text: group.name;
+                                detail: group.detail;
+                                checked: group.checked;
+                                activated => { root.toggle-group(gi); }
                             }
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                spacing: 8px;
-                                Text {
-                                    text: core.checked ? "☑" : "☐";
-                                    color: core.checked ? Theme.accent : Theme.muted;
-                                    font-size: 14px;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: core.name;
-                                    color: Theme.text;
-                                    font-size: 12px;
-                                    font-weight: core.checked ? 600 : 400;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
+                            grid := Rectangle {
+                                property <length> tile-width: (self.width - (root.columns - 1) * root.gap) / root.columns;
+                                height: ceil(group.cores.length / root.columns) * (30px + root.gap) - root.gap;
+                                for core[ci] in group.cores : CpuTile {
+                                    x: mod(ci, root.columns) * (grid.tile-width + root.gap);
+                                    y: floor(ci / root.columns) * (30px + root.gap);
+                                    width: grid.tile-width;
+                                    cpu: core.id;
+                                    checked: core.checked;
+                                    activated => { root.toggle-core(core.id); }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // Remember checkbox row
-            if root.process-name != "" : Rectangle {
-                height: 36px;
-                border-radius: 4px;
-                background: Theme.card;
-                border-width: 1px;
-                border-color: Theme.card-border;
-                rem-touch := TouchArea {
-                    clicked => {
-                        root.remember = !root.remember;
+                // Remember row
+                if root.process-name != "" : Rectangle {
+                    border-radius: 4px;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    HorizontalLayout {
+                        padding: 2px;
+                        CheckRow {
+                            text: "Remember for " + root.process-name;
+                            detail: "Keep as a rule";
+                            checked: root.remember;
+                            activated => { root.remember = !root.remember; }
+                        }
                     }
                 }
+
+                // Action buttons
                 HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
+                    alignment: end;
                     spacing: 8px;
-                    Text {
-                        text: root.remember ? "☑" : "☐";
-                        color: root.remember ? Theme.accent : Theme.muted;
-                        font-size: 14px;
-                        vertical-alignment: center;
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.cancel(); }
                     }
-                    Text {
-                        text: "Remember for " + root.process-name + " (persist as rule)";
-                        color: Theme.text;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                }
-            }
-
-            // Action buttons
-            HorizontalLayout {
-                alignment: end;
-                spacing: 8px;
-                Button {
-                    text: "Cancel";
-                    clicked => { root.cancel(); }
-                }
-                Button {
-                    text: "Apply";
-                    primary: true;
-                    enabled: root.can-apply;
-                    clicked => {
-                        root.apply(root.remember);
+                    Button {
+                        text: "Apply";
+                        primary: true;
+                        enabled: root.can-apply;
+                        clicked => {
+                            root.apply(root.remember);
+                        }
                     }
                 }
             }

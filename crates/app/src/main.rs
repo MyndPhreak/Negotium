@@ -8,7 +8,7 @@ use negotium::settings;
 use negotium::settingspage::Integrations;
 use negotium::smooth::OnScreen;
 use negotium::{MainWindow, NegotiumTray, worker};
-use slint::{ComponentHandle, Model};
+use slint::ComponentHandle;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,15 @@ struct ActiveAffinityTarget {
     /// The image name a remembered rule is saved under (view::Target::process_name).
     process_name: String,
     procs: Vec<(u32, i64)>,
+    selection: negotium::affinity::CoreSelection,
+}
+
+/// Shows the affinity dialog's selection: the groups, the count, the All switch and Apply.
+fn show_affinity(ui: &negotium::MainWindow, sel: &negotium::affinity::CoreSelection) {
+    ui.set_affinity_groups(slint::ModelRc::new(slint::VecModel::from(sel.model())));
+    ui.set_affinity_selected_text(format!("{} of {} selected", sel.selected(), sel.total()).into());
+    ui.set_affinity_all_cores(sel.selected() == sel.total());
+    ui.set_affinity_can_apply(sel.selected() > 0);
 }
 
 struct ActivePriorityTarget {
@@ -1092,36 +1101,22 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some((pid, ct)) = root_proc else { return; };
                 match negotium_actions::get_process_affinity(pid, ct) {
                     Ok((proc_mask, sys_mask)) => {
-                        let mut core_items = Vec::new();
-                        let mut all_checked = true;
-                        let mut any_checked = false;
-                        for i in 0..64 {
-                            if (sys_mask & (1u64 << i)) != 0 {
-                                let checked = (proc_mask & (1u64 << i)) != 0;
-                                if !checked {
-                                    all_checked = false;
-                                } else {
-                                    any_checked = true;
-                                }
-                                core_items.push(negotium::CoreItem {
-                                    id: i,
-                                    name: format!("CPU {i}").into(),
-                                    checked,
-                                });
-                            }
-                        }
+                        let selection = negotium::affinity::CoreSelection::new(
+                            proc_mask,
+                            sys_mask,
+                            &negotium_collector::sysinfo::cpu_groups(),
+                        );
                         let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.affinity_mask.is_some());
                         *active_affinity.lock().unwrap() = Some(ActiveAffinityTarget {
                             name: target.name.clone(),
                             process_name: target.process_name.clone(),
                             procs: target.procs.clone(),
+                            selection: selection.clone(),
                         });
                         if let Some(ui) = weak.upgrade() {
                             ui.set_affinity_title(format!("Set CPU Affinity - {} (PID {})", target.name, pid).into());
                             ui.set_affinity_process_name(target.name.clone().into());
-                            ui.set_affinity_cores(slint::ModelRc::new(slint::VecModel::from(core_items)));
-                            ui.set_affinity_all_cores(all_checked);
-                            ui.set_affinity_can_apply(any_checked);
+                            show_affinity(&ui, &selection);
                             ui.set_affinity_remember(has_rule);
                             ui.set_affinity_visible(true);
                         }
@@ -1221,44 +1216,29 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
-    {
+    // Each change edits the selection kept with the target, then shows it again.
+    let edit_affinity = {
         let weak = weak.clone();
-        ui.on_affinity_toggle_core(move |core_id| {
+        let active = active_affinity.clone();
+        move |edit: &dyn Fn(&mut negotium::affinity::CoreSelection)| {
             let Some(ui) = weak.upgrade() else { return };
-            let model = ui.get_affinity_cores();
-            let mut all_checked = true;
-            let mut any_checked = false;
-            for idx in 0..model.row_count() {
-                if let Some(mut item) = model.row_data(idx) {
-                    if item.id == core_id {
-                        item.checked = !item.checked;
-                        model.set_row_data(idx, item.clone());
-                    }
-                    if item.checked {
-                        any_checked = true;
-                    } else {
-                        all_checked = false;
-                    }
-                }
-            }
-            ui.set_affinity_all_cores(all_checked);
-            ui.set_affinity_can_apply(any_checked);
-        });
+            let mut active = active.lock().unwrap();
+            let Some(target) = active.as_mut() else { return };
+            edit(&mut target.selection);
+            show_affinity(&ui, &target.selection);
+        }
+    };
+    {
+        let edit = edit_affinity.clone();
+        ui.on_affinity_toggle_core(move |id| edit(&|s| s.toggle_core(id as u32)));
     }
     {
-        let weak = weak.clone();
-        ui.on_affinity_toggle_all(move |on| {
-            let Some(ui) = weak.upgrade() else { return };
-            let model = ui.get_affinity_cores();
-            for idx in 0..model.row_count() {
-                if let Some(mut item) = model.row_data(idx) {
-                    item.checked = on;
-                    model.set_row_data(idx, item);
-                }
-            }
-            ui.set_affinity_all_cores(on);
-            ui.set_affinity_can_apply(on && model.row_count() > 0);
-        });
+        let edit = edit_affinity.clone();
+        ui.on_affinity_toggle_group(move |i| edit(&|s| s.toggle_group(i as usize)));
+    }
+    {
+        let edit = edit_affinity;
+        ui.on_affinity_toggle_all(move |on| edit(&|s| s.set_all(on)));
     }
     {
         let weak = weak.clone();
@@ -1278,17 +1258,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_affinity_visible(false);
             let Some(target) = active.lock().unwrap().take() else { return };
-            let model = ui.get_affinity_cores();
-            let mut new_mask = 0u64;
-            let mut count = 0;
-            for idx in 0..model.row_count() {
-                if let Some(item) = model.row_data(idx)
-                    && item.checked
-                {
-                    new_mask |= 1u64 << (item.id as u64);
-                    count += 1;
-                }
-            }
+            let new_mask = target.selection.mask();
+            let count = target.selection.selected();
             if new_mask == 0 {
                 ui.set_toast("At least one CPU core must be selected.".into());
                 return;

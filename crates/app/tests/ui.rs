@@ -4871,11 +4871,8 @@ fn cpu_affinity_and_priority_modals_toggle_and_report() {
     // Show affinity modal
     ui.set_affinity_title("Set CPU Affinity - test.exe (PID 100)".into());
     ui.set_affinity_process_name("test.exe".into());
-    let cores = vec![
-        negotium::CoreItem { id: 0, name: "CPU 0".into(), checked: true },
-        negotium::CoreItem { id: 1, name: "CPU 1".into(), checked: true },
-    ];
-    ui.set_affinity_cores(slint::ModelRc::new(slint::VecModel::from(cores)));
+    let sel = negotium::affinity::CoreSelection::new(0b11, 0b11, &[]);
+    ui.set_affinity_groups(slint::ModelRc::new(slint::VecModel::from(sel.model())));
     ui.set_affinity_visible(true);
     assert!(ui.get_modal_open());
 
@@ -4890,6 +4887,31 @@ fn cpu_affinity_and_priority_modals_toggle_and_report() {
 
     ui.set_priority_visible(false);
     assert!(!ui.get_modal_open());
+}
+
+#[test]
+fn cpu_affinity_shows_groups_and_a_tile_per_cpu() {
+    let ui = shown_window();
+    let sel = negotium::affinity::CoreSelection::new(
+        0b0111,
+        0b1111,
+        &[
+            negotium_collector::sysinfo::CpuGroup { name: "CCD 0".into(), mask: 0b0011, l3_bytes: Some(96 << 20) },
+            negotium_collector::sysinfo::CpuGroup { name: "CCD 1".into(), mask: 0b1100, l3_bytes: Some(32 << 20) },
+        ],
+    );
+    ui.set_affinity_process_name("test.exe".into());
+    ui.set_affinity_groups(slint::ModelRc::new(slint::VecModel::from(sel.model())));
+    ui.set_affinity_visible(true);
+
+    let ccd0 = ElementHandle::find_by_accessible_label(&ui, "CCD 0").next().expect("CCD 0 group header");
+    assert_eq!(ccd0.accessible_checked(), Some(true), "every CPU of CCD 0 is on");
+    let ccd1 = ElementHandle::find_by_accessible_label(&ui, "CCD 1").next().expect("CCD 1 group header");
+    assert_eq!(ccd1.accessible_checked(), Some(false), "CPU 3 is off");
+    for (cpu, on) in [(0, true), (1, true), (2, true), (3, false)] {
+        let tile = ElementHandle::find_by_accessible_label(&ui, &format!("CPU {cpu}")).next().expect("a tile per CPU");
+        assert_eq!(tile.accessible_checked(), Some(on), "CPU {cpu}");
+    }
 }
 
 /// `NegotiumTray` is a `SystemTrayIcon`, not a window: the testing backend gives no
