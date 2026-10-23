@@ -883,6 +883,8 @@ fn the_performance_page_lays_out_graph_cells_details_and_ranges() {
     // Stands in for looking at the page: every key element is on screen, inside the window, with
     // a sane size, and the cells sit in a grid in logical-processor order.
     let ui = shown_window();
+    // The page as tall as under a native caption: Negotium's caption takes the window's top rows.
+    ui.window().set_size(PhysicalSize::new(1000, 720 + negotium::platform::CAPTION_HEIGHT as u32));
     ui.set_page(1);
     ui.set_perf_devices(ModelRc::new(VecModel::from(vec![device("cpu", "CPU"), device("memory", "Memory")])));
     ui.set_perf_title("CPU".into());

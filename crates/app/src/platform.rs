@@ -457,8 +457,7 @@ pub fn is_minimised(hwnd: HWND) -> bool {
     unsafe { IsIconic(hwnd).as_bool() }
 }
 
-/// The caption Negotium draws when Settings > Use the Negotium title bar is on, in logical px: the
-/// Windows 11 caption's height and button width. `Caption` in titlebar.slint holds the same.
+/// The caption Negotium draws, in logical px: the Windows 11 caption's height and button width. `Caption` in titlebar.slint holds the same.
 pub const CAPTION_HEIGHT: f32 = 32.0;
 pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 
@@ -540,22 +539,13 @@ pub enum CaptionButton {
 }
 
 thread_local! {
-    /// Negotium draws the caption (`set_custom_caption`); the subclass reads it per message.
-    static CUSTOM_CAPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The maximise button was pressed and the button has not been released or left since.
     static MAX_PRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn set_caption_flag(on: bool) {
-    CUSTOM_CAPTION.with(|c| c.set(on));
-}
-
-/// Turns Negotium's caption on or off (Settings > Use the Negotium title bar) and has the frame
-/// recomputed, so the native caption goes or comes back at once. Before the window exists only
-/// the choice is kept; `main` calls this again once the subclass is in place. UI thread only.
-pub fn set_custom_caption(ui: &MainWindow, on: bool) {
-    set_caption_flag(on);
-    ui.set_custom_caption(on);
+/// Has the frame recomputed once the subclass is in place, so it takes the caption from the
+/// native one, and shows whether the window is maximised. UI thread only.
+pub fn apply_caption(ui: &MainWindow) {
     let Some(hwnd) = hwnd_of(ui) else { return };
     ui.set_maximised(is_maximised(hwnd));
     // SAFETY: plain call on our own window handle (no move, size, z-order or activation change).
@@ -613,7 +603,7 @@ pub enum ShellEvent {
     MovedOrResized,
     /// The maximise button of Negotium's caption changed state.
     MaxButton(MaxButton),
-    /// The window became active (true) or inactive (false), while Negotium draws the caption.
+    /// The window became active (true) or inactive (false): the caption dims while inactive.
     Active(bool),
 }
 
@@ -704,11 +694,9 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
-    } else if msg == WM_NCLBUTTONDOWN && wparam.0 as u32 == HTMAXBUTTON && !CUSTOM_CAPTION.with(|c| c.get()) {
-        return LRESULT(0);
-    } else if CUSTOM_CAPTION.with(|c| c.get())
+    } else if let Some(answer) =
         // SAFETY: `hook` lives until WM_NCDESTROY; the arguments are this message's.
-        && let Some(answer) = unsafe { caption_proc(hwnd, msg, wparam, lparam, &*hook) }
+        unsafe { caption_proc(hwnd, msg, wparam, lparam, &*hook) }
     {
         return answer;
     } else if msg == WM_SIZE {
@@ -729,7 +717,7 @@ unsafe extern "system" fn subclass_proc(
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
-/// The frame and maximise-button messages while Negotium draws the caption: `Some` answers the
+/// The frame and maximise-button messages for Negotium's caption: `Some` answers the
 /// message, `None` lets the subclass go on (and pass it down the chain).
 ///
 /// # Safety

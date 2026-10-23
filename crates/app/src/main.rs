@@ -1543,8 +1543,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 on_screen.apply();
                 platform::mark_main_window(hwnd);
                 // The chrome above recomputed the frame before the subclass could take the
-                // caption: apply the choice again, now that it can.
-                platform::set_custom_caption(&ui, settings.borrow().custom_title_bar);
+                // caption: recompute it again, now that it can.
+                platform::apply_caption(&ui);
                 chromed = true;
                 // Started in the tray: the native window exists now (hooked and marked, so the tray
                 // and a second launch can show it), and goes out of sight as closing it to the

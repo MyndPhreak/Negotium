@@ -75,9 +75,6 @@ pub struct Settings {
     pub tray_cpu: bool,
     /// Ctrl+Alt+Shift+Esc opens the window picker (crate::shortcut). Off by default: the flag.
     pub picker_shortcut: bool,
-    /// Negotium draws the caption itself (crate::platform::set_custom_caption), so it has the
-    /// window's backdrop tint. Off by default: the flag.
-    pub custom_title_bar: bool,
     /// The Overview's sort column: "name", "cpu", "memory", "disk", "gpu" or "network" (an unknown
     /// one reads as the default, CPU). A string so the file stays readable and a newer column can't
     /// break an older version.
@@ -115,7 +112,6 @@ impl Default for Settings {
             smooth_graphs: true,
             tray_cpu: true,
             picker_shortcut: false,
-            custom_title_bar: false,
             sort_column: "cpu".to_string(),
             sort_descending: true,
             group_by_type: true,
@@ -281,7 +277,6 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(smooth_graphs);
     field!(tray_cpu);
     field!(picker_shortcut);
-    field!(custom_title_bar);
     field!(sort_column);
     // A well-formed string can still name a column this version doesn't have.
     if !SORT_NAMES.contains(&s.sort_column.as_str()) {

@@ -194,6 +194,11 @@ checked by hand on `try\negotium.exe` (`scripts/try.ps1`), setting on:
 
 ## Deviations
 
+- **No setting: the title bar is always on.** After the on-screen checks passed (Mica, Acrylic,
+  GPU rendering off, drag, snap layouts, resize, the buttons, the system menu, maximised), the
+  user asked to remove the switch. That drops the off-by-default flag and its flag-off parity
+  test (decision 11). A settings file that still has `custom_title_bar` loads in full: unknown
+  fields are ignored (`a_file_with_the_old_title_bar_switch_still_loads_in_full`).
 - `min-height` does not grow by the caption height while the setting is on. With the caption in
   the client area, the window's smallest outer height is 32 px less than with the native caption.
   The testing backend does not enforce or report `min-height`, so the growth could not be tested

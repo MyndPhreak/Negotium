@@ -25,9 +25,8 @@ export component MainWindow inherits Window {
     default-font-family: "Segoe UI Variable Text";
     background: Theme.window-bg;
 
-    // Negotium draws the caption (crate::platform::set_custom_caption): the window's state and
-    // the maximise button's (crate::platform::MaxButton, by index), and what the buttons ask for.
-    in property <bool> custom-caption;
+    // Negotium draws the caption (titlebar.slint): the window's state and the maximise button's
+    // (crate::platform::MaxButton, by index), and what the buttons ask for.
     in property <bool> maximised;
     in property <bool> active: true;
     in property <int> max-button;
@@ -226,7 +225,6 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-group-by-type: true;
     in-out property <bool> settings-tray-cpu: true;
     in-out property <bool> settings-picker-shortcut;
-    in-out property <bool> settings-custom-title-bar;
     in-out property <bool> settings-shortcut-taken;
     in-out property <bool> settings-gpu-rendering: true;
     in-out property <bool> settings-gpu-fallback;
@@ -244,7 +242,6 @@ export component MainWindow inherits Window {
     callback group-by-type-toggled(bool);
     callback tray-cpu-toggled(bool);
     callback picker-shortcut-toggled(bool);
-    callback custom-title-bar-toggled(bool);
     callback gpu-rendering-toggled(bool);
     // Installed copy, integration and updates (crate::install, crate::settingspage::show_install).
     // Admin mode: 0 off, 1 on, 2 needs repair, 3 not available on this account.
@@ -345,7 +342,7 @@ export component MainWindow inherits Window {
 
     HorizontalLayout {
         // Room for Negotium's caption, drawn on top of everything below.
-        padding-top: root.custom-caption ? Caption.height : 0px;
+        padding-top: Caption.height;
         Rail {
             page: root.page;
             interactive: !root.modal-open;
@@ -500,7 +497,6 @@ export component MainWindow inherits Window {
                         group-by-type: root.settings-group-by-type;
                         tray-cpu: root.settings-tray-cpu;
                         picker-shortcut: root.settings-picker-shortcut;
-                        custom-title-bar: root.settings-custom-title-bar;
                         shortcut-taken: root.settings-shortcut-taken;
                         gpu-rendering: root.settings-gpu-rendering;
                         gpu-fallback: root.settings-gpu-fallback;
@@ -527,7 +523,6 @@ export component MainWindow inherits Window {
                         group-by-type-toggled(on) => { root.group-by-type-toggled(on); }
                         tray-cpu-toggled(on) => { root.tray-cpu-toggled(on); }
                         picker-shortcut-toggled(on) => { root.picker-shortcut-toggled(on); }
-                        custom-title-bar-toggled(on) => { root.custom-title-bar-toggled(on); }
                         gpu-rendering-toggled(on) => { root.gpu-rendering-toggled(on); }
                         admin-mode-toggled(on) => { root.admin-mode-toggled(on); }
                         hotkey-toggled(on) => { root.hotkey-toggled(on); }
@@ -641,7 +636,7 @@ export component MainWindow inherits Window {
     }
     // Last, so it lies over a modal's scrim: the caption buttons still work while a modal is open,
     // as the native ones do.
-    if root.custom-caption : TitleBar {
+    TitleBar {
         x: 0;
         y: 0;
         width: root.width;
