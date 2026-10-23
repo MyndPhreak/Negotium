@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0](https://github.com/MyndPhreak/Negotium/compare/v0.8.0...v0.9.0) (2026-10-23)
+
+
+### Features
+
+* **app:** Backdrop setting (Mica or Acrylic), smaller debug builds and a test-build script ([#28](https://github.com/MyndPhreak/Negotium/issues/28)) ([7f94211](https://github.com/MyndPhreak/Negotium/commit/7f94211030d835d3cf828ca8c9aed5841c1dea98))
+* **app:** custom title bar with the window's backdrop tint ([#30](https://github.com/MyndPhreak/Negotium/issues/30)) ([e69d144](https://github.com/MyndPhreak/Negotium/commit/e69d144383e19277095ebf221e086e6b644aa6fd))
+
 ## [0.8.0](https://github.com/MyndPhreak/Negotium/compare/v0.7.0...v0.8.0) (2026-10-22)
 
 
