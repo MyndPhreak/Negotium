@@ -608,31 +608,13 @@ mod tests {
     }
 
     #[test]
-    fn custom_title_bar_defaults_off() {
-        assert!(!Settings::default().custom_title_bar);
-        let dir = TempDir::new("captiondefault");
+    fn a_file_with_the_old_title_bar_switch_still_loads_in_full() {
+        let dir = TempDir::new("captionold");
         let p = dir.file();
-        std::fs::write(&p, r#"{"keep_in_tray": false}"#).unwrap();
-        assert!(!load_with(&Writes::Plain, &p).0.custom_title_bar, "a file that predates the switch: off");
-    }
-
-    #[test]
-    fn custom_title_bar_round_trips() {
-        let dir = TempDir::new("captionround");
-        let p = dir.file();
-        let s = Settings { custom_title_bar: true, ..Settings::default() };
-        save_with(&Writes::Plain, &p, &s).unwrap();
-        assert_eq!(load_with(&Writes::Plain, &p), (s, Loaded::File));
-    }
-
-    #[test]
-    fn a_bad_custom_title_bar_value_takes_the_default_and_keeps_the_rest() {
-        let dir = TempDir::new("captionbad");
-        let p = dir.file();
-        std::fs::write(&p, r#"{"custom_title_bar": "yes", "keep_in_tray": false}"#).unwrap();
+        std::fs::write(&p, r#"{"custom_title_bar": true, "keep_in_tray": false}"#).unwrap();
         let (s, how) = load_with(&Writes::Plain, &p);
-        assert_eq!(how, Loaded::Partial(vec!["custom_title_bar".to_string()]));
-        assert!(!s.custom_title_bar && !s.keep_in_tray);
+        assert_eq!(how, Loaded::File);
+        assert!(!s.keep_in_tray);
     }
 
     #[test]

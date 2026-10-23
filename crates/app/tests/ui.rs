@@ -3281,7 +3281,7 @@ fn screen_readers_hear_each_setting_once_with_its_description() {
         assert_eq!(El::find_by_accessible_label(&ui, label).count(), 1, "{label:?} is announced once");
     }
     assert_eq!(El::find_by_accessible_label(&ui, REFRESH_DESC).count(), 0, "a description is read with its control only");
-    assert_eq!(row_texts(&ui, "title").len(), 19, "the titles are still drawn");
+    assert_eq!(row_texts(&ui, "title").len(), 18, "the titles are still drawn");
 }
 
 #[test]
@@ -4906,26 +4906,28 @@ fn tray_menu_offers_end_a_window() {
     assert_eq!(between.matches("MenuItem").count(), 1, "End a window\u{2026} comes right after Open");
 }
 
-const CAPTION_TITLE: &str = "Use the Negotium title bar";
-
 /// The caption button labelled `label`, if shown.
 fn caption_button(ui: &MainWindow, label: &str) -> Option<El> {
     El::find_by_accessible_label(ui, label).find(|e| e.accessible_role() == Some(AccessibleRole::Button))
 }
 
 #[test]
-fn the_title_bar_is_not_drawn_by_default() {
+fn the_title_bar_is_always_drawn() {
     let ui = shown_window();
-    assert!(!ui.get_custom_caption());
     for label in ["Minimise", "Maximise", "Close"] {
-        assert!(caption_button(&ui, label).is_none(), "{label} shown with the native caption");
+        assert!(caption_button(&ui, label).is_some(), "no {label} button");
     }
+}
+
+#[test]
+fn the_settings_page_offers_no_title_bar_switch() {
+    let ui = settings_window(1000, 1700);
+    assert_eq!(El::find_by_accessible_label(&ui, "Use the Negotium title bar").count(), 0);
 }
 
 #[test]
 fn the_title_bar_buttons_ask_for_their_commands() {
     let ui = shown_window();
-    ui.set_custom_caption(true);
     let log = Rc::new(RefCell::new(Vec::<&str>::new()));
     let l = log.clone();
     ui.on_caption_minimise(move || l.borrow_mut().push("minimise"));
@@ -4942,7 +4944,6 @@ fn the_title_bar_buttons_ask_for_their_commands() {
 #[test]
 fn a_maximised_window_offers_restore() {
     let ui = shown_window();
-    ui.set_custom_caption(true);
     ui.set_maximised(true);
     assert!(caption_button(&ui, "Maximise").is_none());
     assert!(caption_button(&ui, "Restore").is_some(), "the middle button restores");
@@ -4951,7 +4952,6 @@ fn a_maximised_window_offers_restore() {
 #[test]
 fn the_title_bar_lies_over_the_top_of_the_window() {
     let ui = shown_window();
-    ui.set_custom_caption(true);
     let close = caption_button(&ui, "Close").expect("close button");
     let (p, s) = (close.absolute_position(), close.size());
     assert_eq!((p.y, s.height), (0.0, negotium::platform::CAPTION_HEIGHT));
@@ -4966,26 +4966,4 @@ fn the_slint_caption_geometry_is_the_hit_tests() {
     let caption = ui.global::<negotium::Caption>();
     assert_eq!(caption.get_height(), negotium::platform::CAPTION_HEIGHT);
     assert_eq!(caption.get_button_width(), negotium::platform::CAPTION_BUTTON_WIDTH);
-}
-
-#[test]
-fn the_title_bar_switch_is_off_by_default_and_saves() {
-    let dir = Scratch::new("titlebar");
-    let path = dir.0.join("settings.json");
-    let (ui, _controls, settings) = settings_wired_with(&dir, Settings::default(), false, Renderer::Software);
-    let s = switch(&ui, CAPTION_TITLE);
-    assert_eq!(s.accessible_checked(), Some(false), "off by default");
-    s.invoke_accessible_default_action();
-    assert!(settings.borrow().custom_title_bar);
-    assert!(ui.get_custom_caption(), "applied at once");
-    saved(&path, "title bar on", |s| s.custom_title_bar);
-}
-
-#[test]
-fn a_saved_title_bar_choice_is_applied_at_start() {
-    let dir = Scratch::new("titlebarstart");
-    let s = Settings { custom_title_bar: true, ..Settings::default() };
-    let (ui, _controls, _settings) = settings_wired_with(&dir, s, false, Renderer::Software);
-    assert!(ui.get_custom_caption());
-    assert_eq!(switch(&ui, CAPTION_TITLE).accessible_checked(), Some(true));
 }

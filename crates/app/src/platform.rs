@@ -704,6 +704,8 @@ unsafe extern "system" fn subclass_proc(
     } else if msg != 0 && msg == taskbar_created_message() {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::TaskbarCreated) };
+    } else if msg == WM_NCLBUTTONDOWN && wparam.0 as u32 == HTMAXBUTTON && !CUSTOM_CAPTION.with(|c| c.get()) {
+        return LRESULT(0);
     } else if CUSTOM_CAPTION.with(|c| c.get())
         // SAFETY: `hook` lives until WM_NCDESTROY; the arguments are this message's.
         && let Some(answer) = unsafe { caption_proc(hwnd, msg, wparam, lparam, &*hook) }
@@ -1762,29 +1764,10 @@ mod tests {
     }
 
     #[test]
-    fn with_the_caption_off_the_frame_answers_as_an_unhooked_window() {
-        set_caption_flag(false);
-        let (hooked, plain) = (captioned_window(), captioned_window());
-        assert!(install_window_hooks(hooked, |_| {}));
-        reframe(hooked);
-        assert_eq!(calc_size(hooked), calc_size(plain));
-        let r = window_rect(plain);
-        let (x, y) = (r.left + 400, r.top + 15);
-        assert_eq!(hit_test(hooked, x, y), hit_test(plain, x, y));
-        // SAFETY: our own test windows.
-        unsafe {
-            let _ = DestroyWindow(hooked);
-            let _ = DestroyWindow(plain);
-        }
-    }
-
-    #[test]
     fn with_the_caption_on_the_client_area_starts_at_the_top() {
         let (hooked, plain) = (captioned_window(), captioned_window());
         assert!(install_window_hooks(hooked, |_| {}));
-        set_caption_flag(true);
         let (got, native, r) = (calc_size(hooked), calc_size(plain), window_rect(hooked));
-        set_caption_flag(false);
         assert_eq!(got.top, r.top, "the caption is the client's");
         assert_eq!((got.left, got.right, got.bottom), (native.left, native.right, native.bottom), "the other borders stay");
         // SAFETY: our own test windows.
@@ -1799,7 +1782,6 @@ mod tests {
         use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, HTCAPTION, HTLEFT};
         let hwnd = captioned_window();
         assert!(install_window_hooks(hwnd, |_| {}));
-        set_caption_flag(true);
         reframe(hwnd);
         // SAFETY: our own test window.
         let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
@@ -1815,7 +1797,6 @@ mod tests {
             hit_test(hwnd, r.right - border - bw - bw / 2, mid_y),
             hit_test(hwnd, r.left + 1, r.top + 300),
         );
-        set_caption_flag(false);
         // SAFETY: our own test window.
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -1842,7 +1823,6 @@ mod tests {
         let seen = Rc::new(RefCell::new(Vec::new()));
         let s = seen.clone();
         assert!(install_window_hooks(hwnd, move |e| s.borrow_mut().push(e)));
-        set_caption_flag(true);
         let send = |msg, ht: u32| {
             // SAFETY: synchronous send to our own window.
             unsafe { SendMessageW(hwnd, msg, Some(WPARAM(ht as usize)), Some(LPARAM(0))) }
@@ -1855,7 +1835,6 @@ mod tests {
         let after_stray_up = posted_command(hwnd);
         send(WM_NCMOUSEMOVE, HTCAPTION);
         send(WM_NCMOUSELEAVE, 0);
-        set_caption_flag(false);
         // SAFETY: our own test window.
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -1870,7 +1849,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_reaches_the_hook_only_with_the_caption_on() {
+    fn activation_reaches_the_hook() {
         use windows::Win32::UI::WindowsAndMessaging::WM_NCACTIVATE;
         let hwnd = captioned_window();
         let seen = Rc::new(RefCell::new(Vec::new()));
@@ -1880,12 +1859,8 @@ mod tests {
             // SAFETY: synchronous send to our own window.
             unsafe { SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(active)), Some(LPARAM(0))) };
         };
-        set_caption_flag(false);
-        send(0);
-        set_caption_flag(true);
         send(0);
         send(1);
-        set_caption_flag(false);
         // SAFETY: our own test window.
         unsafe {
             let _ = DestroyWindow(hwnd);
