@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/MyndPhreak/Negotium/compare/v0.9.0...v0.10.0) (2026-10-23)
+
+
+### Features
+
+* **app:** show CPU affinity as a grid grouped by CCD ([#31](https://github.com/MyndPhreak/Negotium/issues/31)) ([d126a21](https://github.com/MyndPhreak/Negotium/commit/d126a21a93af968cd4886ba4bd786d98db0a4a76))
+
 ## [0.9.0](https://github.com/MyndPhreak/Negotium/compare/v0.8.0...v0.9.0) (2026-10-23)
 
 
