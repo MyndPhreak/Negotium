@@ -3247,6 +3247,95 @@ fn a_saved_tint_and_a_clicked_tint_look_the_same() {
     assert_eq!(window_bg(&ui), at_startup);
 }
 
+/// The tint picker, opened from "Custom colour" over Settings wired with `tint`.
+fn tint_picker(dir: &Scratch, tint: [u8; 3]) -> (MainWindow, std::path::PathBuf) {
+    let ui = tint_wired(dir, tinted(Some(tint), None));
+    radio(&ui, "Custom colour").invoke_accessible_default_action();
+    assert!(ui.get_tint_picker_visible(), "the picker opens");
+    (ui, dir.0.join("settings.json"))
+}
+
+fn rgb_of(c: slint::Color) -> [u8; 3] {
+    [c.red(), c.green(), c.blue()]
+}
+
+#[test]
+fn custom_colour_opens_the_picker_over_the_page() {
+    let dir = Scratch::new("tintpickeropen");
+    let ui = tint_wired(&dir, tinted(Some(BLUE), None));
+    radio(&ui, "Custom colour").invoke_accessible_default_action();
+    assert!(ui.get_tint_picker_visible());
+    assert!(ui.get_modal_open(), "the picker is a modal");
+    assert_eq!(radio(&ui, "Blue").accessible_enabled(), Some(false), "the page beneath is blocked");
+}
+
+#[test]
+fn the_picker_starts_from_the_tint_in_effect() {
+    let dir = Scratch::new("tintpickerseed");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    // #0078d4: value 212 / 255, shown in whole percent.
+    assert_eq!(slider(&ui, "Brightness").accessible_value().as_deref(), Some("83"));
+}
+
+#[test]
+fn a_click_in_the_picker_then_apply_saves_that_colour() {
+    let dir = Scratch::new("tintpickerclick");
+    let (ui, path) = tint_picker(&dir, BLUE);
+    let (x, y) = centre(&El::find_by_accessible_label(&ui, "Hue and saturation").next().expect("hue and saturation area"));
+    move_pointer(&ui, x, y);
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    button(&ui, "Apply").expect("Apply button").invoke_accessible_default_action();
+    let expected = rgb_of(slint::Color::from_hsva(180.0, 0.5, 0.83, 1.0));
+    saved(&path, "the clicked colour", |s| s.acrylic_tint == Some(expected));
+    assert!(!ui.get_tint_picker_visible(), "Apply closes the picker");
+    for label in ["Default colour", "Black", "White", "Blue", "Purple", "Green", "Red"] {
+        assert_eq!(radio(&ui, label).accessible_checked(), Some(false), "{label}");
+    }
+    assert_eq!(radio(&ui, "Custom colour").accessible_checked(), Some(true));
+}
+
+#[test]
+fn the_picker_keys_move_hue_and_saturation_and_return_applies() {
+    use slint::platform::Key;
+    // Not fully saturated, so Up has room: hue 210, saturation 0.4, brightness 63%.
+    let seed = [96, 128, 160];
+    let dir = Scratch::new("tintpickerkeys");
+    let (ui, path) = tint_picker(&dir, seed);
+    let hsv = slint::Color::from_rgb_u8(seed[0], seed[1], seed[2]).to_hsva();
+    key(&ui, Key::RightArrow);
+    key(&ui, Key::UpArrow);
+    key(&ui, Key::Return);
+    let expected = rgb_of(slint::Color::from_hsva(hsv.hue + 10.0, hsv.saturation + 0.1, 0.63, 1.0));
+    saved(&path, "the keyed colour", |s| s.acrylic_tint == Some(expected));
+    assert!(!ui.get_tint_picker_visible(), "Return applies and closes");
+}
+
+#[test]
+fn cancel_closes_the_picker_and_changes_nothing() {
+    let dir = Scratch::new("tintpickercancel");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    let before = window_bg(&ui);
+    let (x, y) = centre(&El::find_by_accessible_label(&ui, "Hue and saturation").next().expect("hue and saturation area"));
+    move_pointer(&ui, x, y);
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    button(&ui, "Cancel").expect("Cancel button").invoke_accessible_default_action();
+    assert!(!ui.get_tint_picker_visible());
+    assert_eq!(window_bg(&ui), before);
+    assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(true), "the saved tint stands");
+}
+
+#[test]
+fn escape_closes_the_picker_and_changes_nothing() {
+    let dir = Scratch::new("tintpickeresc");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    let before = window_bg(&ui);
+    key(&ui, slint::platform::Key::RightArrow);
+    key(&ui, slint::platform::Key::Escape);
+    assert!(!ui.get_tint_picker_visible());
+    assert_eq!(window_bg(&ui), before);
+    assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(true), "the saved tint stands");
+}
+
 const FALLBACK_NOTE: &str =
     "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
 const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";
