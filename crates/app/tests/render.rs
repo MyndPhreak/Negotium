@@ -871,6 +871,10 @@ fn real_pipeline_redraws_per_second() {
 fn lum(p: slint::Rgba8Pixel) -> f32 { p.r as f32 * 0.299 + p.g as f32 * 0.587 + p.b as f32 * 0.114 }
 
 fn button_ink_range(dark: bool, tint: Option<[u8; 3]>, opacity: Option<u8>) -> (f32, f32, f32) {
+    button_ink_range_in_order(dark, tint, opacity, false)
+}
+
+fn button_ink_range_in_order(dark: bool, tint: Option<[u8; 3]>, opacity: Option<u8>, mode_first: bool) -> (f32, f32, f32) {
     software_backend();
     let ui = MainWindow::new().unwrap();
     ui.window().set_size(PhysicalSize::new(1000, 720));
@@ -880,9 +884,16 @@ fn button_ink_range(dark: bool, tint: Option<[u8; 3]>, opacity: Option<u8>) -> (
         acrylic_opacity: opacity,
         ..negotium::settings::Settings::default()
     };
-    negotium::settingspage::apply_settings(&ui, &s);
     ui.global::<Theme>().set_mica(true);
-    ui.invoke_set_dark(dark);
+    if mode_first {
+        ui.invoke_set_dark(dark);
+    }
+    slint::platform::update_timers_and_animations(); // the `changed` handlers see the mode first
+    negotium::settingspage::apply_settings(&ui, &s);
+    slint::platform::update_timers_and_animations(); // runs `changed palette-dark`
+    if !mode_first {
+        ui.invoke_set_dark(dark);
+    }
     ui.set_tint_picker_visible(true);
     ui.show().unwrap();
     let shot = ui.window().take_snapshot().expect("snapshot");
@@ -955,4 +966,12 @@ fn std_buttons_stay_visible_with_no_tint_in_dark_mode() {
 fn std_buttons_stay_visible_with_no_tint_in_light_mode() {
     let (lo, hi, _) = button_ink_range(false, None, None);
     assert!(hi - lo > 100.0, "light, no tint: Cancel button ink range only {}", hi - lo);
+}
+
+/// The tint arrives after the mode (a tint picked while the window is open): Theme moves the std
+/// widgets' scheme itself, without another set-dark.
+#[test]
+fn std_buttons_follow_a_tint_applied_after_the_mode() {
+    let (lo, hi, _) = button_ink_range_in_order(true, Some([255, 255, 255]), Some(100), true);
+    assert!(hi - lo > 100.0, "mode then White@100: Cancel button ink range only {}", hi - lo);
 }

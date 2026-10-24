@@ -5,7 +5,9 @@ export global Theme {
     in-out property <bool> mica: false;
     // The chosen backdrop is Acrylic (crate::platform::set_backdrop).
     in-out property <bool> acrylic: false;
-    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    // The mode (Settings > Theme), set by MainWindow.set-dark. The std widgets follow `palette-dark`
+    // instead: it is written to Palette.color-scheme below, so they stay readable on a flipped palette.
+    in-out property <bool> dark: false;
     property <color> solid-bg: dark ? #202020 : #f3f3f3;
     // Settings > Tint colour and Tint opacity (crate::settingspage::show_settings): the chosen
     // colour (`tint-color-set` false: the mode's own) and opacity in percent (-1: the mode's own).
@@ -36,6 +38,14 @@ export global Theme {
     // is the surface).
     property <float> tint-luma: tint-alpha * luma(tint-color) + (1 - tint-alpha) * luma(solid-bg);
     out property <bool> palette-dark: (mica && acrylic && tint-color-set) ? tint-luma < 128 : dark;
+    // Called by MainWindow.set-dark; the scheme is written at once, `changed` keeps it in step after.
+    public function set-mode(d: bool) {
+        dark = d;
+        Palette.color-scheme = palette-dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed palette-dark => {
+        Palette.color-scheme = palette-dark ? ColorScheme.dark : ColorScheme.light;
+    }
     out property <brush> window-bg: mica ? (acrylic ? acrylic-tint : transparent) : solid-bg;
     out property <color> card: palette-dark ? #ffffff0f : #ffffffb3;
     out property <color> card-border: palette-dark ? #ffffff14 : #0000000f;

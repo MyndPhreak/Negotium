@@ -281,9 +281,10 @@ export component MainWindow inherits Window {
     callback update-accepted();
     callback update-dismissed();
     // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
-    // function, not a `changed` handler, so Theme.dark is current as soon as it returns.
+    // function, not a `changed` handler, so the mode is current as soon as it returns. The std
+    // widgets follow Theme.palette-dark: written to Palette.color-scheme by Theme.set-mode, and by Theme after.
     public function set-dark(dark: bool) {
-        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+        Theme.set-mode(dark);
     }
 
     // Scrolls the app list so the row at `y` (its top in the list), `h` tall, is fully visible.
