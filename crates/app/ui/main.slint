@@ -530,6 +530,10 @@ export component MainWindow inherits Window {
                         refresh-chosen(i) => { root.refresh-chosen(i); }
                         theme-chosen(i) => { root.theme-chosen(i); }
                         backdrop-chosen(i) => { root.backdrop-chosen(i); }
+                        tint-chosen(c) => { root.tint-chosen(c); }
+                        tint-default-chosen => { root.tint-default-chosen(); }
+                        tint-opacity-chosen(v) => { root.tint-opacity-chosen(v); }
+                        custom-tint-requested => { root.show-tint-picker(); }
                         always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
                         tray-toggled(on) => { root.tray-toggled(on); }
                         smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
