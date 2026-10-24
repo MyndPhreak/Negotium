@@ -193,8 +193,8 @@ pub fn refresh_from_index(i: i32) -> u32 {
 /// The Tint opacity slider moved to `slider` (percent, fractional while dragging): the opacity to
 /// save, or `None` when the rounded percent (clamped to 0..=100) is the `current` one.
 pub fn opacity_change(current: Option<u8>, slider: f32) -> Option<u8> {
-    let _ = (current, slider);
-    None
+    let percent = slider.round().clamp(0.0, 100.0) as u8;
+    (current != Some(percent)).then_some(percent)
 }
 
 pub fn effective_dark(theme: ThemeChoice, system_dark: bool) -> bool {
@@ -311,6 +311,13 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(col_publisher);
     field!(moderator);
     field!(window_geometry);
+    field!(acrylic_tint);
+    field!(acrylic_opacity);
+    // A well-formed number can still be more than 100%.
+    if s.acrylic_opacity.is_some_and(|o| o > 100) {
+        s.acrylic_opacity = None;
+        bad.push("acrylic_opacity".to_string());
+    }
     let s = s.normalized();
     if bad.is_empty() {
         (s, Loaded::File)
