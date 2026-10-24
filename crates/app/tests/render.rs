@@ -912,39 +912,6 @@ fn button_ink_range_in_order(dark: bool, tint: Option<[u8; 3]>, opacity: Option<
 }
 
 #[test]
-fn probe_buttons_under_a_flipped_palette() {
-    let (lo, hi, _) = button_ink_range(true, Some([255, 255, 255]), Some(100));
-    assert!(hi - lo > 100.0, "dark + White@100: Cancel button ink range only {}", hi - lo);
-}
-#[test]
-fn probe_buttons_control_dark_default() {
-    let (lo, hi, _) = button_ink_range(true, None, None);
-    assert!(hi - lo > 100.0, "dark default: range {}", hi - lo);
-}
-#[test]
-fn probe_buttons_light_black() {
-    let (lo, hi, _) = button_ink_range(false, Some([0, 0, 0]), Some(100));
-    assert!(hi - lo > 100.0, "light + Black@100: range {}", hi - lo);
-}
-#[test]
-fn probe_buttons_control_light_default() {
-    let (lo, hi, _) = button_ink_range(false, None, None);
-    assert!(hi - lo > 100.0, "light default: range {}", hi - lo);
-}
-#[test]
-fn probe_sweep_0() { let (lo, hi, _) = button_ink_range(true, Some([255,255,255]), Some(43)); println!("SWEEP dark=true 255,255,255@43 range {}", hi - lo); }
-#[test]
-fn probe_sweep_1() { let (lo, hi, _) = button_ink_range(true, Some([255,255,255]), Some(50)); println!("SWEEP dark=true 255,255,255@50 range {}", hi - lo); }
-#[test]
-fn probe_sweep_2() { let (lo, hi, _) = button_ink_range(true, Some([255,255,255]), Some(70)); println!("SWEEP dark=true 255,255,255@70 range {}", hi - lo); }
-#[test]
-fn probe_sweep_3() { let (lo, hi, _) = button_ink_range(true, Some([200,200,200]), Some(100)); println!("SWEEP dark=true 200,200,200@100 range {}", hi - lo); }
-#[test]
-fn probe_sweep_4() { let (lo, hi, _) = button_ink_range(false, Some([0,0,0]), Some(50)); println!("SWEEP dark=false 0,0,0@50 range {}", hi - lo); }
-#[test]
-fn probe_sweep_5() { let (lo, hi, _) = button_ink_range(false, Some([0,0,0]), Some(70)); println!("SWEEP dark=false 0,0,0@70 range {}", hi - lo); }
-#[test]
-fn probe_sweep_6() { let (lo, hi, _) = button_ink_range(false, Some([60,60,60]), Some(100)); println!("SWEEP dark=false 60,60,60@100 range {}", hi - lo); }#[test]
 fn std_buttons_stay_visible_when_a_white_tint_flips_the_dark_palette() {
     let (lo, hi, _) = button_ink_range(true, Some([255, 255, 255]), Some(100));
     assert!(hi - lo > 100.0, "dark + White@100: Cancel button ink range only {}", hi - lo);
@@ -952,8 +919,10 @@ fn std_buttons_stay_visible_when_a_white_tint_flips_the_dark_palette() {
 
 #[test]
 fn std_buttons_stay_visible_when_a_black_tint_flips_the_light_palette() {
-    let (lo, hi, _) = button_ink_range(false, Some([0, 0, 0]), Some(100));
+    let (lo, hi, corner) = button_ink_range(false, Some([0, 0, 0]), Some(100));
     assert!(hi - lo > 100.0, "light + Black@100: Cancel button ink range only {}", hi - lo);
+    // A light-scheme Button is also readable here; only the dark scheme gives a dark corner fill.
+    assert!(corner < 128.0, "light + Black@100: Cancel button corner fill {corner} (light scheme not flipped)");
 }
 
 #[test]
