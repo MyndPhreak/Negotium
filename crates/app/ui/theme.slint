@@ -6,6 +6,8 @@ export global Theme {
     // The chosen backdrop is Acrylic (crate::platform::set_backdrop).
     in-out property <bool> acrylic: false;
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    // Which palette the text and surfaces use (P2 stub: the mode; the palette colours still read `dark`).
+    out property <bool> palette-dark: dark;
     property <color> solid-bg: dark ? #202020 : #f3f3f3;
     // Settings > Tint colour and Tint opacity (crate::settingspage::show_settings): the chosen
     // colour (`tint-color-set` false: the mode's own) and opacity in percent (-1: the mode's own).
