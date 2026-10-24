@@ -3026,6 +3026,349 @@ fn acrylic_is_tinted_and_mica_is_not() {
     assert_eq!(theme.get_window_bg().color().alpha(), 255, "no backdrop: solid");
 }
 
+// ---- Acrylic tint colour and opacity ----
+
+/// The light and dark Acrylic tints before Tint colour and Tint opacity existed (window-bg on
+/// 682ec58, Acrylic with the backdrop on, captured from a run).
+const LIGHT_TINT: (u8, u8, u8, u8) = (243, 243, 243, 204);
+const DARK_TINT: (u8, u8, u8, u8) = (0, 0, 0, 115);
+const BLUE: [u8; 3] = [0, 120, 212];
+
+fn rgba(c: slint::Color) -> (u8, u8, u8, u8) {
+    (c.red(), c.green(), c.blue(), c.alpha())
+}
+
+/// What `Color.with-alpha(opacity)` gives a colour's alpha.
+fn alpha_of(opacity: f32) -> u8 {
+    slint::Color::from_rgb_u8(0, 0, 0).with_alpha(opacity).alpha()
+}
+
+/// Acrylic with `tint` and `opacity` as saved.
+fn tinted(tint: Option<[u8; 3]>, opacity: Option<u8>) -> Settings {
+    use negotium::settings::BackdropChoice;
+    Settings { backdrop: BackdropChoice::Acrylic, acrylic_tint: tint, acrylic_opacity: opacity, ..Settings::default() }
+}
+
+/// `ui`'s window-bg once `s` is applied as at startup, the backdrop is on (`mica`, as
+/// apply_window_chrome sets it with the GPU renderer) and the mode is `dark`.
+fn window_bg_with(ui: &MainWindow, s: &Settings, mica: bool, dark: bool) -> (u8, u8, u8, u8) {
+    negotium::settingspage::apply_settings(ui, s);
+    let theme = ui.global::<negotium::Theme>();
+    theme.set_mica(mica);
+    ui.invoke_set_dark(dark);
+    rgba(theme.get_window_bg().color())
+}
+
+#[test]
+fn an_unset_tint_looks_as_before_in_light_mode() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, None), true, false), LIGHT_TINT);
+}
+
+#[test]
+fn an_unset_tint_looks_as_before_in_dark_mode() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, None), true, true), DARK_TINT);
+}
+
+#[test]
+fn a_tint_colour_alone_keeps_the_light_modes_opacity() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), None), true, false), (0, 120, 212, LIGHT_TINT.3));
+}
+
+#[test]
+fn a_tint_colour_alone_keeps_the_dark_modes_opacity() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), None), true, true), (0, 120, 212, DARK_TINT.3));
+}
+
+#[test]
+fn a_tint_opacity_alone_keeps_the_light_modes_colour() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, Some(30)), true, false), (243, 243, 243, alpha_of(0.30)));
+}
+
+#[test]
+fn a_tint_opacity_alone_keeps_the_dark_modes_colour() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, Some(30)), true, true), (0, 0, 0, alpha_of(0.30)));
+}
+
+#[test]
+fn a_tint_colour_and_opacity_look_the_same_in_both_modes() {
+    let ui = window();
+    let s = tinted(Some(BLUE), Some(30));
+    let light = window_bg_with(&ui, &s, true, false);
+    assert_eq!(light, (0, 120, 212, alpha_of(0.30)));
+    assert_eq!(window_bg_with(&ui, &s, true, true), light);
+}
+
+#[test]
+fn a_tint_opacity_of_0_is_clear_and_100_is_opaque() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), Some(0)), true, false).3, 0);
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), Some(100)), true, false).3, 255);
+}
+
+#[test]
+fn mica_ignores_the_tint() {
+    use negotium::settings::BackdropChoice;
+    let ui = window();
+    let s = Settings { backdrop: BackdropChoice::Mica, ..tinted(Some(BLUE), Some(30)) };
+    for dark in [false, true] {
+        assert_eq!(window_bg_with(&ui, &s, true, dark).3, 0, "dark = {dark}: Mica shows through untouched");
+    }
+}
+
+#[test]
+fn the_window_without_a_backdrop_ignores_the_tint() {
+    let ui = window();
+    for dark in [false, true] {
+        assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), Some(30)), false, dark).3, 255, "dark = {dark}: solid");
+    }
+}
+
+/// The std Slider labelled `label` (its `accessible-label` is set on the instance; its value reads
+/// as "45", "83.137").
+fn slider(ui: &MainWindow, label: &str) -> El {
+    El::find_by_accessible_label(ui, label)
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Slider))
+        .unwrap_or_else(|| panic!("no slider {label:?}"))
+}
+
+/// Settings wired as main.rs wires them, with `s` in light mode and the backdrop on.
+fn tint_wired(dir: &Scratch, s: Settings) -> MainWindow {
+    let (ui, _controls, _settings) = settings_wired(dir, Settings { theme: ThemeChoice::Light, ..s }, false);
+    ui.global::<negotium::Theme>().set_mica(true);
+    ui
+}
+
+fn window_bg(ui: &MainWindow) -> (u8, u8, u8, u8) {
+    rgba(ui.global::<negotium::Theme>().get_window_bg().color())
+}
+
+#[test]
+fn the_tint_rows_show_only_for_acrylic() {
+    let dir = Scratch::new("tintrows");
+    let (ui, _controls, _settings) = settings_wired(&dir, Settings::default(), false);
+    let shown = |label: &str| El::find_by_accessible_label(&ui, label).next().is_some();
+    assert!(!shown("Tint colour") && !shown("Tint opacity"), "Mica: no tint rows");
+    radio(&ui, "Acrylic").invoke_accessible_default_action();
+    assert!(shown("Tint colour"), "Acrylic: the tint colours");
+    slider(&ui, "Tint opacity");
+}
+
+#[test]
+fn a_tint_swatch_applies_at_once_and_is_saved() {
+    let dir = Scratch::new("tintswatch");
+    let path = dir.0.join("settings.json");
+    let ui = tint_wired(&dir, tinted(None, None));
+    assert_eq!(radio(&ui, "Default colour").accessible_checked(), Some(true), "unset: the default is chosen");
+    radio(&ui, "Blue").invoke_accessible_default_action();
+    assert_eq!(window_bg(&ui), (0, 120, 212, LIGHT_TINT.3), "the tint changes at once");
+    assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(true));
+    assert_eq!(radio(&ui, "Default colour").accessible_checked(), Some(false));
+    saved(&path, "tint blue", |s| s.acrylic_tint == Some(BLUE));
+}
+
+#[test]
+fn default_colour_returns_to_the_modes_tint_and_is_saved() {
+    let dir = Scratch::new("tintdefault");
+    let path = dir.0.join("settings.json");
+    let ui = tint_wired(&dir, tinted(Some(BLUE), None));
+    assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(true), "the saved tint is shown");
+    radio(&ui, "Default colour").invoke_accessible_default_action();
+    assert_eq!(window_bg(&ui), LIGHT_TINT);
+    assert_eq!(radio(&ui, "Default colour").accessible_checked(), Some(true));
+    assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(false));
+    saved(&path, "tint unset", |s| s.acrylic_tint.is_none());
+}
+
+#[test]
+fn the_opacity_slider_shows_the_modes_opacity_while_unset() {
+    let dir = Scratch::new("tintslidermode");
+    let ui = tint_wired(&dir, tinted(None, None));
+    assert_eq!(slider(&ui, "Tint opacity").accessible_value().as_deref(), Some("80"), "light");
+    ui.invoke_set_dark(true);
+    assert_eq!(slider(&ui, "Tint opacity").accessible_value().as_deref(), Some("45"), "dark");
+}
+
+#[test]
+fn moving_the_opacity_slider_applies_at_once_and_is_saved() {
+    let dir = Scratch::new("tintslidermove");
+    let path = dir.0.join("settings.json");
+    let ui = tint_wired(&dir, tinted(None, None));
+    slider(&ui, "Tint opacity").set_accessible_value("30");
+    assert_eq!(window_bg(&ui), (243, 243, 243, alpha_of(0.30)), "the opacity changes at once");
+    saved(&path, "opacity 30", |s| s.acrylic_opacity == Some(30));
+}
+
+#[test]
+fn the_tint_controls_report_each_choice() {
+    let ui = settings_window(1000, 1700);
+    ui.set_settings_backdrop(1);
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let l = log.clone();
+    ui.on_tint_default_chosen(move || l.borrow_mut().push("default".to_string()));
+    let l = log.clone();
+    ui.on_tint_chosen(move |c| l.borrow_mut().push(format!("tint {:?}", (c.red(), c.green(), c.blue(), c.alpha()))));
+    let l = log.clone();
+    ui.on_tint_opacity_chosen(move |v| l.borrow_mut().push(format!("opacity {v}")));
+    for label in ["Default colour", "Black", "White", "Blue", "Purple", "Green", "Red"] {
+        radio(&ui, label).invoke_accessible_default_action();
+    }
+    slider(&ui, "Tint opacity").set_accessible_value("30");
+    assert_eq!(
+        *log.borrow(),
+        [
+            "default",
+            "tint (0, 0, 0, 255)",
+            "tint (255, 255, 255, 255)",
+            "tint (0, 120, 212, 255)",
+            "tint (116, 77, 169, 255)",
+            "tint (16, 124, 16, 255)",
+            "tint (196, 43, 28, 255)",
+            "opacity 30",
+        ]
+    );
+}
+
+#[test]
+fn a_saved_tint_and_a_clicked_tint_look_the_same() {
+    let dir = Scratch::new("tintequal");
+    let ui = tint_wired(&dir, tinted(Some(BLUE), Some(30)));
+    let at_startup = window_bg(&ui);
+    radio(&ui, "Default colour").invoke_accessible_default_action();
+    slider(&ui, "Tint opacity").set_accessible_value("50");
+    assert_ne!(window_bg(&ui), at_startup, "moved away first");
+    radio(&ui, "Blue").invoke_accessible_default_action();
+    slider(&ui, "Tint opacity").set_accessible_value("30");
+    assert_eq!(window_bg(&ui), at_startup);
+}
+
+/// The tint picker, opened from "Custom colour" over Settings wired with `tint`.
+fn tint_picker(dir: &Scratch, tint: [u8; 3]) -> (MainWindow, std::path::PathBuf) {
+    let ui = tint_wired(dir, tinted(Some(tint), None));
+    radio(&ui, "Custom colour").invoke_accessible_default_action();
+    assert!(ui.get_tint_picker_visible(), "the picker opens");
+    (ui, dir.0.join("settings.json"))
+}
+
+fn rgb_of(c: slint::Color) -> [u8; 3] {
+    [c.red(), c.green(), c.blue()]
+}
+
+#[test]
+fn custom_colour_opens_the_picker_over_the_page() {
+    let dir = Scratch::new("tintpickeropen");
+    let ui = tint_wired(&dir, tinted(Some(BLUE), None));
+    radio(&ui, "Custom colour").invoke_accessible_default_action();
+    assert!(ui.get_tint_picker_visible());
+    assert!(ui.get_modal_open(), "the picker is a modal");
+    assert_eq!(radio(&ui, "Blue").accessible_enabled(), Some(false), "the page beneath is blocked");
+}
+
+#[test]
+fn the_picker_starts_from_the_tint_in_effect() {
+    let dir = Scratch::new("tintpickerseed");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    // #0078d4: value 212 / 255, shown in whole percent.
+    assert_eq!(slider(&ui, "Brightness").accessible_value().as_deref(), Some("83"));
+}
+
+#[test]
+fn a_click_in_the_picker_then_apply_saves_that_colour() {
+    let dir = Scratch::new("tintpickerclick");
+    let (ui, path) = tint_picker(&dir, BLUE);
+    let (x, y) = centre(&El::find_by_accessible_label(&ui, "Hue and saturation").next().expect("hue and saturation area"));
+    move_pointer(&ui, x, y);
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    button(&ui, "Apply").expect("Apply button").invoke_accessible_default_action();
+    let expected = rgb_of(slint::Color::from_hsva(180.0, 0.5, 0.83, 1.0));
+    saved(&path, "the clicked colour", |s| s.acrylic_tint == Some(expected));
+    assert!(!ui.get_tint_picker_visible(), "Apply closes the picker");
+    for label in ["Default colour", "Black", "White", "Blue", "Purple", "Green", "Red"] {
+        assert_eq!(radio(&ui, label).accessible_checked(), Some(false), "{label}");
+    }
+    assert_eq!(radio(&ui, "Custom colour").accessible_checked(), Some(true));
+}
+
+#[test]
+fn the_picker_keys_move_hue_and_saturation_and_return_applies() {
+    use slint::platform::Key;
+    // Not fully saturated, so Up has room: hue 210, saturation 0.4, brightness 63%.
+    let seed = [96, 128, 160];
+    let dir = Scratch::new("tintpickerkeys");
+    let (ui, path) = tint_picker(&dir, seed);
+    let hsv = slint::Color::from_rgb_u8(seed[0], seed[1], seed[2]).to_hsva();
+    key(&ui, Key::RightArrow);
+    key(&ui, Key::UpArrow);
+    key(&ui, Key::Return);
+    let expected = rgb_of(slint::Color::from_hsva(hsv.hue + 10.0, hsv.saturation + 0.1, 0.63, 1.0));
+    saved(&path, "the keyed colour", |s| s.acrylic_tint == Some(expected));
+    assert!(!ui.get_tint_picker_visible(), "Return applies and closes");
+}
+
+#[test]
+fn cancel_closes_the_picker_and_changes_nothing() {
+    let dir = Scratch::new("tintpickercancel");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    let before = window_bg(&ui);
+    let (x, y) = centre(&El::find_by_accessible_label(&ui, "Hue and saturation").next().expect("hue and saturation area"));
+    move_pointer(&ui, x, y);
+    press(&ui, x, y, slint::platform::PointerEventButton::Left);
+    button(&ui, "Cancel").expect("Cancel button").invoke_accessible_default_action();
+    assert!(!ui.get_tint_picker_visible());
+    assert_eq!(window_bg(&ui), before);
+    assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(true), "the saved tint stands");
+}
+
+#[test]
+fn escape_closes_the_picker_and_changes_nothing() {
+    let dir = Scratch::new("tintpickeresc");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    let before = window_bg(&ui);
+    key(&ui, slint::platform::Key::RightArrow);
+    key(&ui, slint::platform::Key::Escape);
+    assert!(!ui.get_tint_picker_visible());
+    assert_eq!(window_bg(&ui), before);
+    assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(true), "the saved tint stands");
+}
+
+/// Clicks the middle of the picker's brightness slider (it moves to 50), then Right: the slider,
+/// not the picker, has the keys (51).
+fn focus_brightness(ui: &MainWindow) {
+    let (x, y) = centre(&slider(ui, "Brightness"));
+    move_pointer(ui, x, y);
+    press(ui, x, y, slint::platform::PointerEventButton::Left);
+    key(ui, slint::platform::Key::RightArrow);
+    assert_eq!(slider(ui, "Brightness").accessible_value().as_deref(), Some("51"), "the slider has focus");
+}
+
+#[test]
+fn return_applies_while_the_brightness_slider_has_focus() {
+    let dir = Scratch::new("tintpickerslideret");
+    let (ui, path) = tint_picker(&dir, BLUE);
+    focus_brightness(&ui);
+    key(&ui, slint::platform::Key::Return);
+    let hsv = slint::Color::from_rgb_u8(BLUE[0], BLUE[1], BLUE[2]).to_hsva();
+    let expected = rgb_of(slint::Color::from_hsva(hsv.hue, hsv.saturation, 0.51, 1.0));
+    saved(&path, "the slider's brightness", |s| s.acrylic_tint == Some(expected));
+    assert!(!ui.get_tint_picker_visible());
+}
+
+#[test]
+fn escape_cancels_while_the_brightness_slider_has_focus() {
+    let dir = Scratch::new("tintpickerslideresc");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    let before = window_bg(&ui);
+    focus_brightness(&ui);
+    key(&ui, slint::platform::Key::Escape);
+    assert!(!ui.get_tint_picker_visible());
+    assert_eq!(window_bg(&ui), before);
+}
+
 const FALLBACK_NOTE: &str =
     "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
 const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";

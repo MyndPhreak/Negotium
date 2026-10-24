@@ -6,7 +6,7 @@ use negotium_model::{Metric, Sort, SortColumn};
 use crate::install::{self, Install};
 use crate::controls::Page;
 use crate::integrate::{Action, TaskState};
-use crate::settings::{BackdropChoice, Saver, Settings, ThemeChoice, refresh_from_index};
+use crate::settings::{BackdropChoice, Saver, Settings, ThemeChoice, opacity_change, refresh_from_index};
 use crate::renderer::{self, Renderer};
 use crate::{MainWindow, platform};
 use slint::ComponentHandle;
@@ -31,6 +31,12 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_refresh(s.refresh_index());
     ui.set_settings_theme(s.theme.index());
     ui.set_settings_backdrop(s.backdrop.index());
+    // The Acrylic tint (Theme.acrylic-tint); unset is the mode's own colour and opacity.
+    let theme = ui.global::<crate::Theme>();
+    theme.set_tint_color_set(s.acrylic_tint.is_some());
+    let [r, g, b] = s.acrylic_tint.unwrap_or_default();
+    theme.set_tint_color(slint::Color::from_rgb_u8(r, g, b));
+    theme.set_tint_opacity(s.acrylic_opacity.map_or(-1, i32::from));
     ui.set_settings_keep_in_tray(s.keep_in_tray);
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
@@ -621,6 +627,29 @@ impl SettingsWiring {
                 let backdrop = BackdropChoice::from_index(i);
                 if let Some(ui) = change.apply(|s| s.backdrop = backdrop) {
                     platform::set_backdrop(&ui, backdrop);
+                }
+            });
+        }
+        // The Acrylic tint: a swatch's (or the picker's) colour, the mode's own, and the slider.
+        {
+            let change = change.clone();
+            ui.on_tint_chosen(move |c| {
+                change.apply(|s| s.acrylic_tint = Some([c.red(), c.green(), c.blue()]));
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_tint_default_chosen(move || {
+                change.apply(|s| s.acrylic_tint = None);
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_tint_opacity_chosen(move |v| {
+                // A drag reports every step: only a new whole percent is applied and saved.
+                let current = change.settings.borrow().acrylic_opacity;
+                if let Some(percent) = opacity_change(current, v) {
+                    change.apply(|s| s.acrylic_opacity = Some(percent));
                 }
             });
         }
