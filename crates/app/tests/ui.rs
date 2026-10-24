@@ -3026,6 +3026,109 @@ fn acrylic_is_tinted_and_mica_is_not() {
     assert_eq!(theme.get_window_bg().color().alpha(), 255, "no backdrop: solid");
 }
 
+// ---- Acrylic tint colour and opacity ----
+
+/// The light and dark Acrylic tints before Tint colour and Tint opacity existed (window-bg on
+/// 682ec58, Acrylic with the backdrop on, captured from a run).
+const LIGHT_TINT: (u8, u8, u8, u8) = (243, 243, 243, 204);
+const DARK_TINT: (u8, u8, u8, u8) = (0, 0, 0, 115);
+const BLUE: [u8; 3] = [0, 120, 212];
+
+fn rgba(c: slint::Color) -> (u8, u8, u8, u8) {
+    (c.red(), c.green(), c.blue(), c.alpha())
+}
+
+/// What `Color.with-alpha(opacity)` gives a colour's alpha.
+fn alpha_of(opacity: f32) -> u8 {
+    slint::Color::from_rgb_u8(0, 0, 0).with_alpha(opacity).alpha()
+}
+
+/// Acrylic with `tint` and `opacity` as saved.
+fn tinted(tint: Option<[u8; 3]>, opacity: Option<u8>) -> Settings {
+    use negotium::settings::BackdropChoice;
+    Settings { backdrop: BackdropChoice::Acrylic, acrylic_tint: tint, acrylic_opacity: opacity, ..Settings::default() }
+}
+
+/// `ui`'s window-bg once `s` is applied as at startup, the backdrop is on (`mica`, as
+/// apply_window_chrome sets it with the GPU renderer) and the mode is `dark`.
+fn window_bg_with(ui: &MainWindow, s: &Settings, mica: bool, dark: bool) -> (u8, u8, u8, u8) {
+    negotium::settingspage::apply_settings(ui, s);
+    let theme = ui.global::<negotium::Theme>();
+    theme.set_mica(mica);
+    ui.invoke_set_dark(dark);
+    rgba(theme.get_window_bg().color())
+}
+
+#[test]
+fn an_unset_tint_looks_as_before_in_light_mode() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, None), true, false), LIGHT_TINT);
+}
+
+#[test]
+fn an_unset_tint_looks_as_before_in_dark_mode() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, None), true, true), DARK_TINT);
+}
+
+#[test]
+fn a_tint_colour_alone_keeps_the_light_modes_opacity() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), None), true, false), (0, 120, 212, LIGHT_TINT.3));
+}
+
+#[test]
+fn a_tint_colour_alone_keeps_the_dark_modes_opacity() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), None), true, true), (0, 120, 212, DARK_TINT.3));
+}
+
+#[test]
+fn a_tint_opacity_alone_keeps_the_light_modes_colour() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, Some(30)), true, false), (243, 243, 243, alpha_of(0.30)));
+}
+
+#[test]
+fn a_tint_opacity_alone_keeps_the_dark_modes_colour() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(None, Some(30)), true, true), (0, 0, 0, alpha_of(0.30)));
+}
+
+#[test]
+fn a_tint_colour_and_opacity_look_the_same_in_both_modes() {
+    let ui = window();
+    let s = tinted(Some(BLUE), Some(30));
+    let light = window_bg_with(&ui, &s, true, false);
+    assert_eq!(light, (0, 120, 212, alpha_of(0.30)));
+    assert_eq!(window_bg_with(&ui, &s, true, true), light);
+}
+
+#[test]
+fn a_tint_opacity_of_0_is_clear_and_100_is_opaque() {
+    let ui = window();
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), Some(0)), true, false).3, 0);
+    assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), Some(100)), true, false).3, 255);
+}
+
+#[test]
+fn mica_ignores_the_tint() {
+    use negotium::settings::BackdropChoice;
+    let ui = window();
+    let s = Settings { backdrop: BackdropChoice::Mica, ..tinted(Some(BLUE), Some(30)) };
+    for dark in [false, true] {
+        assert_eq!(window_bg_with(&ui, &s, true, dark).3, 0, "dark = {dark}: Mica shows through untouched");
+    }
+}
+
+#[test]
+fn the_window_without_a_backdrop_ignores_the_tint() {
+    let ui = window();
+    for dark in [false, true] {
+        assert_eq!(window_bg_with(&ui, &tinted(Some(BLUE), Some(30)), false, dark).3, 255, "dark = {dark}: solid");
+    }
+}
+
 const FALLBACK_NOTE: &str =
     "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
 const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";
