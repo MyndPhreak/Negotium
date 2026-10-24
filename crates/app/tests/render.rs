@@ -866,3 +866,93 @@ fn real_pipeline_redraws_per_second() {
     }
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+// Std Buttons in a modal under a flipped palette (dark mode + White@100).
+fn lum(p: slint::Rgba8Pixel) -> f32 { p.r as f32 * 0.299 + p.g as f32 * 0.587 + p.b as f32 * 0.114 }
+
+fn button_ink_range(dark: bool, tint: Option<[u8; 3]>, opacity: Option<u8>) -> (f32, f32, f32) {
+    software_backend();
+    let ui = MainWindow::new().unwrap();
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    let s = negotium::settings::Settings {
+        backdrop: negotium::settings::BackdropChoice::Acrylic,
+        acrylic_tint: tint,
+        acrylic_opacity: opacity,
+        ..negotium::settings::Settings::default()
+    };
+    negotium::settingspage::apply_settings(&ui, &s);
+    ui.global::<Theme>().set_mica(true);
+    ui.invoke_set_dark(dark);
+    ui.set_tint_picker_visible(true);
+    ui.show().unwrap();
+    let shot = ui.window().take_snapshot().expect("snapshot");
+    let b = ElementHandle::find_by_accessible_label(&ui, "Cancel").next().expect("Cancel button");
+    let (pos, size) = (b.absolute_position(), b.size());
+    let (x0, y0) = (pos.x.round() as u32, pos.y.round() as u32);
+    let (w, h) = (size.width.round() as u32, size.height.round() as u32);
+    let mut lo = f32::MAX; let mut hi = f32::MIN; let mut edge = 0.0;
+    for y in y0 + 2..y0 + h - 2 { for x in x0 + 2..x0 + w - 2 {
+        let l = lum(shot.as_slice()[(y * shot.width() + x) as usize]);
+        lo = lo.min(l); hi = hi.max(l);
+    } }
+    edge += lum(shot.as_slice()[((y0 + 3) * shot.width() + x0 + 3) as usize]);
+    println!("PROBE dark={dark} tint={tint:?} op={opacity:?}: Cancel button lum min {lo:.0} max {hi:.0} corner fill {edge:.0}");
+    (lo, hi, edge)
+}
+
+#[test]
+fn probe_buttons_under_a_flipped_palette() {
+    let (lo, hi, _) = button_ink_range(true, Some([255, 255, 255]), Some(100));
+    assert!(hi - lo > 100.0, "dark + White@100: Cancel button ink range only {}", hi - lo);
+}
+#[test]
+fn probe_buttons_control_dark_default() {
+    let (lo, hi, _) = button_ink_range(true, None, None);
+    assert!(hi - lo > 100.0, "dark default: range {}", hi - lo);
+}
+#[test]
+fn probe_buttons_light_black() {
+    let (lo, hi, _) = button_ink_range(false, Some([0, 0, 0]), Some(100));
+    assert!(hi - lo > 100.0, "light + Black@100: range {}", hi - lo);
+}
+#[test]
+fn probe_buttons_control_light_default() {
+    let (lo, hi, _) = button_ink_range(false, None, None);
+    assert!(hi - lo > 100.0, "light default: range {}", hi - lo);
+}
+#[test]
+fn probe_sweep_0() { let (lo, hi, _) = button_ink_range(true, Some([255,255,255]), Some(43)); println!("SWEEP dark=true 255,255,255@43 range {}", hi - lo); }
+#[test]
+fn probe_sweep_1() { let (lo, hi, _) = button_ink_range(true, Some([255,255,255]), Some(50)); println!("SWEEP dark=true 255,255,255@50 range {}", hi - lo); }
+#[test]
+fn probe_sweep_2() { let (lo, hi, _) = button_ink_range(true, Some([255,255,255]), Some(70)); println!("SWEEP dark=true 255,255,255@70 range {}", hi - lo); }
+#[test]
+fn probe_sweep_3() { let (lo, hi, _) = button_ink_range(true, Some([200,200,200]), Some(100)); println!("SWEEP dark=true 200,200,200@100 range {}", hi - lo); }
+#[test]
+fn probe_sweep_4() { let (lo, hi, _) = button_ink_range(false, Some([0,0,0]), Some(50)); println!("SWEEP dark=false 0,0,0@50 range {}", hi - lo); }
+#[test]
+fn probe_sweep_5() { let (lo, hi, _) = button_ink_range(false, Some([0,0,0]), Some(70)); println!("SWEEP dark=false 0,0,0@70 range {}", hi - lo); }
+#[test]
+fn probe_sweep_6() { let (lo, hi, _) = button_ink_range(false, Some([60,60,60]), Some(100)); println!("SWEEP dark=false 60,60,60@100 range {}", hi - lo); }#[test]
+fn std_buttons_stay_visible_when_a_white_tint_flips_the_dark_palette() {
+    let (lo, hi, _) = button_ink_range(true, Some([255, 255, 255]), Some(100));
+    assert!(hi - lo > 100.0, "dark + White@100: Cancel button ink range only {}", hi - lo);
+}
+
+#[test]
+fn std_buttons_stay_visible_when_a_black_tint_flips_the_light_palette() {
+    let (lo, hi, _) = button_ink_range(false, Some([0, 0, 0]), Some(100));
+    assert!(hi - lo > 100.0, "light + Black@100: Cancel button ink range only {}", hi - lo);
+}
+
+#[test]
+fn std_buttons_stay_visible_with_no_tint_in_dark_mode() {
+    let (lo, hi, _) = button_ink_range(true, None, None);
+    assert!(hi - lo > 100.0, "dark, no tint: Cancel button ink range only {}", hi - lo);
+}
+
+#[test]
+fn std_buttons_stay_visible_with_no_tint_in_light_mode() {
+    let (lo, hi, _) = button_ink_range(false, None, None);
+    assert!(hi - lo > 100.0, "light, no tint: Cancel button ink range only {}", hi - lo);
+}
