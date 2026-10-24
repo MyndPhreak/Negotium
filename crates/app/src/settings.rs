@@ -98,6 +98,13 @@ pub struct Settings {
     /// Window position, size, and maximized state to restore across sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
+    /// The colour laid over Acrylic, `[r, g, b]`; `None`: the mode's own (black in dark mode,
+    /// #f3f3f3 in light). One colour for both modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acrylic_tint: Option<[u8; 3]>,
+    /// The Acrylic tint's opacity in percent, 0..=100; `None`: the mode's own (45 dark, 80 light).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acrylic_opacity: Option<u8>,
 }
 
 impl Default for Settings {
@@ -125,6 +132,8 @@ impl Default for Settings {
             col_publisher: false,
             moderator: negotium_moderator::ModeratorConfig::default(),
             window_geometry: None,
+            acrylic_tint: None,
+            acrylic_opacity: None,
         }
     }
 }
@@ -179,6 +188,13 @@ pub fn nearest_refresh(ms: u32) -> u32 {
 
 pub fn refresh_from_index(i: i32) -> u32 {
     REFRESH_CHOICES_MS[(i.max(0) as usize).min(REFRESH_CHOICES_MS.len() - 1)]
+}
+
+/// The Tint opacity slider moved to `slider` (percent, fractional while dragging): the opacity to
+/// save, or `None` when the rounded percent (clamped to 0..=100) is the `current` one.
+pub fn opacity_change(current: Option<u8>, slider: f32) -> Option<u8> {
+    let _ = (current, slider);
+    None
 }
 
 pub fn effective_dark(theme: ThemeChoice, system_dark: bool) -> bool {
@@ -776,6 +792,118 @@ mod tests {
         let (s, how) = load_with(&Writes::Plain, &p);
         assert_eq!(how, Loaded::Partial(vec!["backdrop".to_string()]));
         assert_eq!(s, Settings { refresh_ms: 2000, ..Settings::default() });
+    }
+
+    #[test]
+    fn a_file_without_tint_fields_loads_in_full_and_none_are_written_by_default() {
+        let dir = TempDir::new("tintmissing");
+        let p = dir.file();
+        std::fs::write(&p, r#"{"backdrop": "acrylic"}"#).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::File);
+        assert_eq!((s.acrylic_tint, s.acrylic_opacity), (None, None));
+        assert!(!p.with_extension("json.bad").exists());
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.contains("acrylic_tint") && !json.contains("acrylic_opacity"), "{json}");
+    }
+
+    #[test]
+    fn a_tint_colour_and_opacity_are_saved_and_loaded() {
+        let dir = TempDir::new("tintround");
+        let p = dir.file();
+        let s = Settings { acrylic_tint: Some([0, 120, 212]), acrylic_opacity: Some(30), ..Settings::default() };
+        save_with(&Writes::Plain, &p, &s).unwrap();
+        assert_eq!(load_with(&Writes::Plain, &p), (s, Loaded::File));
+    }
+
+    /// One invalid `acrylic_tint` value: only that field is lost, the original is kept aside.
+    fn a_bad_tint(name: &str, value: &str) {
+        let dir = TempDir::new(name);
+        let p = dir.file();
+        std::fs::write(&p, format!(r#"{{"acrylic_tint": {value}, "backdrop": "acrylic"}}"#)).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::Partial(vec!["acrylic_tint".to_string()]), "{value}");
+        assert_eq!(s.acrylic_tint, None, "{value}");
+        assert_eq!(s.backdrop, BackdropChoice::Acrylic, "{value}: the rest is kept");
+        assert!(p.with_extension("json.bad").exists(), "{value}");
+    }
+
+    #[test]
+    fn a_tint_written_as_hex_takes_the_default() {
+        a_bad_tint("tinthex", r##""#0078d4""##);
+    }
+
+    #[test]
+    fn a_tint_with_two_channels_takes_the_default() {
+        a_bad_tint("tinttwo", "[1, 2]");
+    }
+
+    #[test]
+    fn a_tint_channel_above_255_takes_the_default() {
+        a_bad_tint("tint256", "[256, 0, 0]");
+    }
+
+    #[test]
+    fn a_negative_tint_channel_takes_the_default() {
+        a_bad_tint("tintneg", "[-1, 0, 0]");
+    }
+
+    /// One invalid `acrylic_opacity` value: only that field is lost, the original is kept aside.
+    fn a_bad_opacity(name: &str, value: &str) {
+        let dir = TempDir::new(name);
+        let p = dir.file();
+        std::fs::write(&p, format!(r#"{{"acrylic_opacity": {value}, "backdrop": "acrylic"}}"#)).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::Partial(vec!["acrylic_opacity".to_string()]), "{value}");
+        assert_eq!(s.acrylic_opacity, None, "{value}");
+        assert_eq!(s.backdrop, BackdropChoice::Acrylic, "{value}: the rest is kept");
+        assert!(p.with_extension("json.bad").exists(), "{value}");
+    }
+
+    #[test]
+    fn an_opacity_above_100_takes_the_default() {
+        a_bad_opacity("opacity101", "101");
+    }
+
+    #[test]
+    fn a_negative_opacity_takes_the_default() {
+        a_bad_opacity("opacityneg", "-1");
+    }
+
+    #[test]
+    fn a_fractional_opacity_takes_the_default() {
+        a_bad_opacity("opacityfrac", "50.5");
+    }
+
+    #[test]
+    fn an_opacity_written_as_text_takes_the_default() {
+        a_bad_opacity("opacitytext", r#""50""#);
+    }
+
+    #[test]
+    fn opacities_0_and_100_are_kept() {
+        let dir = TempDir::new("opacityends");
+        let p = dir.file();
+        for value in [0u8, 100] {
+            std::fs::write(&p, format!(r#"{{"acrylic_opacity": {value}}}"#)).unwrap();
+            let (s, how) = load_with(&Writes::Plain, &p);
+            assert_eq!((how, s.acrylic_opacity), (Loaded::File, Some(value)));
+        }
+    }
+
+    #[test]
+    fn the_opacity_slider_saves_only_a_new_rounded_percent() {
+        let cases: [(Option<u8>, f32, Option<u8>); 6] = [
+            (None, 45.0, Some(45)),
+            (Some(30), 30.4, None),
+            (Some(30), 30.6, Some(31)),
+            (Some(0), -3.0, None),
+            (None, -3.0, Some(0)),
+            (None, 140.0, Some(100)),
+        ];
+        for (current, slider, expected) in cases {
+            assert_eq!(opacity_change(current, slider), expected, "({current:?}, {slider})");
+        }
     }
 
     #[test]

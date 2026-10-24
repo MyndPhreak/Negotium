@@ -127,6 +127,9 @@ export component MainWindow inherits Window {
     in-out property <bool> priority-remember: false;
     callback priority-apply(int, bool);
     callback priority-cancel();
+
+    // Settings > Tint colour > Custom colour: the picker is open (show-tint-picker).
+    in-out property <bool> tint-picker-visible: false;
     // The room the floating toast takes at the bottom of a page (its height and its gap), so the
     // end of every page (the Overview and Startup lists, the Performance and Settings scroll
     // content) can still be scrolled clear of it.
@@ -238,6 +241,11 @@ export component MainWindow inherits Window {
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback backdrop-chosen(int);
+    // Settings > Tint colour and Tint opacity (crate::settingspage): a swatch's or the picker's
+    // colour, "Default colour", and the opacity slider's value (percent).
+    callback tint-chosen(color);
+    callback tint-default-chosen();
+    callback tint-opacity-chosen(float);
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
@@ -310,6 +318,9 @@ export component MainWindow inherits Window {
         root.run-task-command = "";
         root.run-task-working-dir = "";
         root.run-task-visible = true;
+    }
+    // Opens the custom tint picker, seeded with the tint colour in effect.
+    public function show-tint-picker() {
     }
     // Leaving the Overview: the hidden list or row control gives up keyboard focus at once (Slint
     // drops focus from a hidden item only on a later event-loop turn).

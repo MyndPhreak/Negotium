@@ -657,3 +657,13 @@ export component CpuPriorityModal inherits Rectangle {
         }
     }
 }
+
+// Settings > Tint colour > Custom colour: hue and saturation in one area, brightness on a slider.
+// Its state is its own; `apply` gives the colour, `cancel` changes nothing.
+export component TintPickerModal inherits Rectangle {
+    in-out property <float> hue; // 0..360
+    in-out property <float> saturation; // 0..1
+    in-out property <float> brightness; // 0..100
+    callback apply(color);
+    callback cancel();
+}
