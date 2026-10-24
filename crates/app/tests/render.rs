@@ -866,3 +866,81 @@ fn real_pipeline_redraws_per_second() {
     }
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+// Std Buttons in a modal under a flipped palette (dark mode + White@100).
+fn lum(p: slint::Rgba8Pixel) -> f32 { p.r as f32 * 0.299 + p.g as f32 * 0.587 + p.b as f32 * 0.114 }
+
+fn button_ink_range(dark: bool, tint: Option<[u8; 3]>, opacity: Option<u8>) -> (f32, f32, f32) {
+    button_ink_range_in_order(dark, tint, opacity, false)
+}
+
+fn button_ink_range_in_order(dark: bool, tint: Option<[u8; 3]>, opacity: Option<u8>, mode_first: bool) -> (f32, f32, f32) {
+    software_backend();
+    let ui = MainWindow::new().unwrap();
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    let s = negotium::settings::Settings {
+        backdrop: negotium::settings::BackdropChoice::Acrylic,
+        acrylic_tint: tint,
+        acrylic_opacity: opacity,
+        ..negotium::settings::Settings::default()
+    };
+    ui.global::<Theme>().set_mica(true);
+    if mode_first {
+        ui.invoke_set_dark(dark);
+    }
+    slint::platform::update_timers_and_animations(); // the `changed` handlers see the mode first
+    negotium::settingspage::apply_settings(&ui, &s);
+    slint::platform::update_timers_and_animations(); // runs `changed palette-dark`
+    if !mode_first {
+        ui.invoke_set_dark(dark);
+    }
+    ui.set_tint_picker_visible(true);
+    ui.show().unwrap();
+    let shot = ui.window().take_snapshot().expect("snapshot");
+    let b = ElementHandle::find_by_accessible_label(&ui, "Cancel").next().expect("Cancel button");
+    let (pos, size) = (b.absolute_position(), b.size());
+    let (x0, y0) = (pos.x.round() as u32, pos.y.round() as u32);
+    let (w, h) = (size.width.round() as u32, size.height.round() as u32);
+    let mut lo = f32::MAX; let mut hi = f32::MIN; let mut edge = 0.0;
+    for y in y0 + 2..y0 + h - 2 { for x in x0 + 2..x0 + w - 2 {
+        let l = lum(shot.as_slice()[(y * shot.width() + x) as usize]);
+        lo = lo.min(l); hi = hi.max(l);
+    } }
+    edge += lum(shot.as_slice()[((y0 + 3) * shot.width() + x0 + 3) as usize]);
+    println!("PROBE dark={dark} tint={tint:?} op={opacity:?}: Cancel button lum min {lo:.0} max {hi:.0} corner fill {edge:.0}");
+    (lo, hi, edge)
+}
+
+#[test]
+fn std_buttons_stay_visible_when_a_white_tint_flips_the_dark_palette() {
+    let (lo, hi, _) = button_ink_range(true, Some([255, 255, 255]), Some(100));
+    assert!(hi - lo > 100.0, "dark + White@100: Cancel button ink range only {}", hi - lo);
+}
+
+#[test]
+fn std_buttons_stay_visible_when_a_black_tint_flips_the_light_palette() {
+    let (lo, hi, corner) = button_ink_range(false, Some([0, 0, 0]), Some(100));
+    assert!(hi - lo > 100.0, "light + Black@100: Cancel button ink range only {}", hi - lo);
+    // A light-scheme Button is also readable here; only the dark scheme gives a dark corner fill.
+    assert!(corner < 128.0, "light + Black@100: Cancel button corner fill {corner} (light scheme not flipped)");
+}
+
+#[test]
+fn std_buttons_stay_visible_with_no_tint_in_dark_mode() {
+    let (lo, hi, _) = button_ink_range(true, None, None);
+    assert!(hi - lo > 100.0, "dark, no tint: Cancel button ink range only {}", hi - lo);
+}
+
+#[test]
+fn std_buttons_stay_visible_with_no_tint_in_light_mode() {
+    let (lo, hi, _) = button_ink_range(false, None, None);
+    assert!(hi - lo > 100.0, "light, no tint: Cancel button ink range only {}", hi - lo);
+}
+
+/// The tint arrives after the mode (a tint picked while the window is open): Theme moves the std
+/// widgets' scheme itself, without another set-dark.
+#[test]
+fn std_buttons_follow_a_tint_applied_after_the_mode() {
+    let (lo, hi, _) = button_ink_range_in_order(true, Some([255, 255, 255]), Some(100), true);
+    assert!(hi - lo > 100.0, "mode then White@100: Cancel button ink range only {}", hi - lo);
+}

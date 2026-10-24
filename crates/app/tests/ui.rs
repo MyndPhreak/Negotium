@@ -5334,3 +5334,195 @@ fn the_slint_caption_geometry_is_the_hit_tests() {
     assert_eq!(caption.get_height(), negotium::platform::CAPTION_HEIGHT);
     assert_eq!(caption.get_button_width(), negotium::platform::CAPTION_BUTTON_WIDTH);
 }
+
+// ---- Automatic contrast: the palette follows the effective tint ----
+
+type Rgba = (u8, u8, u8, u8);
+
+/// The ten colours that follow `palette-dark`, in the order of `palette_of` (today's literals).
+const LIGHT_PALETTE: [Rgba; 10] = [
+    (255, 255, 255, 0xb3), (0, 0, 0, 0x0f), (255, 255, 255, 0xff), (0, 0, 0, 0x08), (0x1a, 0x1a, 0x1a, 0xff),
+    (0, 0, 0, 0x99), (0xc4, 0x2b, 0x1c, 0xff), (0xfd, 0xe7, 0xe9, 0xff), (0, 0, 0, 0x0a), (0, 0, 0, 0x06),
+];
+const DARK_PALETTE: [Rgba; 10] = [
+    (255, 255, 255, 0x0f), (255, 255, 255, 0x14), (255, 255, 255, 0x17), (0, 0, 0, 0x2e), (255, 255, 255, 0xff),
+    (255, 255, 255, 0xa0), (0xff, 0x99, 0xa4, 0xff), (0x44, 0x27, 0x26, 0xff), (255, 255, 255, 0x0f), (255, 255, 255, 0x0a),
+];
+
+/// card, card-border, card-hover, card-inset, text, muted, danger-text, danger-bg, caption-hover, caption-press.
+fn palette_of(ui: &MainWindow) -> [Rgba; 10] {
+    let t = ui.global::<negotium::Theme>();
+    [
+        t.get_card(), t.get_card_border(), t.get_card_hover(), t.get_card_inset(), t.get_text(),
+        t.get_muted(), t.get_danger_text(), t.get_danger_bg(), t.get_caption_hover(), t.get_caption_press(),
+    ]
+    .map(rgba)
+}
+
+/// The fills that keep their own pair in both palettes: accent, on-accent, danger, on-danger, caption-close.
+fn fixed_fills(ui: &MainWindow) -> [Rgba; 5] {
+    let t = ui.global::<negotium::Theme>();
+    [t.get_accent(), t.get_on_accent(), t.get_danger(), t.get_on_danger(), t.get_caption_close()].map(rgba)
+}
+
+fn palette_dark(ui: &MainWindow) -> bool {
+    ui.global::<negotium::Theme>().get_palette_dark()
+}
+
+/// `palette-dark` once `s` is applied as at startup, the backdrop is on and the mode is `dark`.
+fn palette_dark_with(ui: &MainWindow, s: &Settings, dark: bool) -> bool {
+    window_bg_with(ui, s, true, dark);
+    palette_dark(ui)
+}
+
+const BLACK: [u8; 3] = [0, 0, 0];
+const WHITE: [u8; 3] = [255, 255, 255];
+
+#[test]
+fn an_unset_tint_keeps_the_modes_palette() {
+    let ui = window();
+    for (dark, palette) in [(false, LIGHT_PALETTE), (true, DARK_PALETTE)] {
+        assert_eq!(palette_dark_with(&ui, &tinted(None, None), dark), dark, "dark = {dark}");
+        assert_eq!(palette_of(&ui), palette, "dark = {dark}: the colours are today's literals");
+    }
+}
+
+#[test]
+fn an_unset_colour_keeps_the_modes_palette_at_any_opacity() {
+    let ui = window();
+    for dark in [false, true] {
+        for opacity in [0, 30, 100] {
+            assert_eq!(palette_dark_with(&ui, &tinted(None, Some(opacity)), dark), dark, "dark = {dark}, opacity {opacity}");
+        }
+    }
+}
+
+/// (colour, opacity, expected palette-dark) in light mode; `None` opacity is the mode's own (80).
+/// Light Blue unset (L 124) is marginal and not pinned.
+const LIGHT_CASES: [([u8; 3], Option<u8>, bool); 11] = [
+    (BLACK, Some(0), false), (BLACK, Some(30), false), (BLACK, Some(100), true), (BLACK, None, true),
+    (WHITE, Some(0), false), (WHITE, Some(30), false), (WHITE, Some(100), false), (WHITE, None, false),
+    (BLUE, Some(0), false), (BLUE, Some(30), false), (BLUE, Some(100), true),
+];
+
+/// The same in dark mode (the mode's own opacity is 45). White unset (L 132) is marginal and not pinned.
+const DARK_CASES: [([u8; 3], Option<u8>, bool); 11] = [
+    (BLACK, Some(0), true), (BLACK, Some(30), true), (BLACK, Some(100), true), (BLACK, None, true),
+    (WHITE, Some(0), true), (WHITE, Some(30), true), (WHITE, Some(100), false),
+    (BLUE, Some(0), true), (BLUE, Some(30), true), (BLUE, Some(100), true), (BLUE, None, true),
+];
+
+#[test]
+fn the_palette_follows_the_tint_in_light_mode() {
+    let ui = window();
+    for (colour, opacity, expected) in LIGHT_CASES {
+        assert_eq!(palette_dark_with(&ui, &tinted(Some(colour), opacity), false), expected, "light, {colour:?}, {opacity:?}");
+    }
+}
+
+#[test]
+fn the_palette_follows_the_tint_in_dark_mode() {
+    let ui = window();
+    for (colour, opacity, expected) in DARK_CASES {
+        assert_eq!(palette_dark_with(&ui, &tinted(Some(colour), opacity), true), expected, "dark, {colour:?}, {opacity:?}");
+    }
+}
+
+#[test]
+fn the_palette_flips_between_greys_either_side_of_mid_grey() {
+    let ui = window();
+    for dark in [false, true] {
+        assert!(palette_dark_with(&ui, &tinted(Some([120; 3]), Some(100)), dark), "dark = {dark}: grey 120 is dark");
+        assert!(!palette_dark_with(&ui, &tinted(Some([136; 3]), Some(100)), dark), "dark = {dark}: grey 136 is light");
+    }
+}
+
+#[test]
+fn white_at_full_opacity_in_dark_mode_uses_the_light_palette() {
+    let ui = window();
+    palette_dark_with(&ui, &tinted(None, None), true);
+    let fills = fixed_fills(&ui);
+    assert!(!palette_dark_with(&ui, &tinted(Some(WHITE), Some(100)), true));
+    assert_eq!(palette_of(&ui), LIGHT_PALETTE, "the ten colours");
+    assert_eq!(fixed_fills(&ui), fills, "the fixed fills");
+    assert!(ui.global::<negotium::Theme>().get_dark(), "`dark` stays the mode");
+}
+
+#[test]
+fn black_at_full_opacity_in_light_mode_uses_the_dark_palette() {
+    let ui = window();
+    palette_dark_with(&ui, &tinted(None, None), false);
+    let fills = fixed_fills(&ui);
+    assert!(palette_dark_with(&ui, &tinted(Some(BLACK), Some(100)), false));
+    assert_eq!(palette_of(&ui), DARK_PALETTE, "the ten colours");
+    assert_eq!(fixed_fills(&ui), fills, "the fixed fills");
+    assert!(!ui.global::<negotium::Theme>().get_dark(), "`dark` stays the mode");
+}
+
+#[test]
+fn mica_never_changes_the_palette() {
+    use negotium::settings::BackdropChoice;
+    let ui = window();
+    let mica = Settings { backdrop: BackdropChoice::Mica, ..tinted(Some(WHITE), Some(100)) };
+    assert!(palette_dark_with(&ui, &mica, true));
+    assert_eq!(palette_of(&ui), DARK_PALETTE, "text unchanged");
+}
+
+#[test]
+fn a_window_without_a_backdrop_never_changes_the_palette() {
+    let ui = window();
+    window_bg_with(&ui, &tinted(Some(WHITE), Some(100)), false, true);
+    assert!(palette_dark(&ui));
+    assert_eq!(palette_of(&ui), DARK_PALETTE, "text unchanged");
+}
+
+fn text_of(ui: &MainWindow) -> Rgba {
+    rgba(ui.global::<negotium::Theme>().get_text())
+}
+
+#[test]
+fn the_rows_switch_the_palette_at_once() {
+    let dir = Scratch::new("contrastlive");
+    let ui = tint_wired(&dir, tinted(None, None));
+    ui.invoke_set_dark(true);
+    assert_eq!(text_of(&ui), (255, 255, 255, 255), "dark, nothing chosen");
+    radio(&ui, "White").invoke_accessible_default_action();
+    slider(&ui, "Tint opacity").set_accessible_value("100");
+    assert_eq!(text_of(&ui), (0x1a, 0x1a, 0x1a, 255), "dark + White@100");
+    radio(&ui, "Default colour").invoke_accessible_default_action();
+    assert_eq!(text_of(&ui), (255, 255, 255, 255), "Default colour");
+    radio(&ui, "White").invoke_accessible_default_action();
+    ui.invoke_set_dark(false);
+    assert_eq!(palette_of(&ui), LIGHT_PALETTE, "light + White@100");
+}
+
+#[test]
+fn a_saved_tint_and_a_clicked_tint_give_the_same_palette() {
+    let dir = Scratch::new("contrastequal");
+    let ui = tint_wired(&dir, tinted(Some(WHITE), Some(100)));
+    ui.invoke_set_dark(true);
+    let at_startup = palette_of(&ui);
+    assert_eq!(at_startup, LIGHT_PALETTE, "dark + White@100 from the file");
+    radio(&ui, "Default colour").invoke_accessible_default_action();
+    assert_ne!(palette_of(&ui), at_startup, "moved away first");
+    radio(&ui, "White").invoke_accessible_default_action();
+    assert_eq!(palette_of(&ui), at_startup);
+}
+
+#[test]
+fn no_slint_file_outside_the_theme_reads_the_mode_for_a_surface() {
+    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let mut reads = Vec::new();
+    for entry in std::fs::read_dir(&ui_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "slint") || path.file_name().is_some_and(|n| n == "theme.slint") {
+            continue;
+        }
+        for (i, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
+            if line.contains("Theme.dark") && !line.trim_start().starts_with("//") {
+                reads.push(format!("{}:{}", path.file_name().unwrap().to_string_lossy(), i + 1));
+            }
+        }
+    }
+    assert!(reads.is_empty(), "Theme.dark is read at {reads:?}; use Theme.palette-dark");
+}
