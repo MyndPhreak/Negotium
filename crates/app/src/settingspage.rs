@@ -31,6 +31,12 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_settings_refresh(s.refresh_index());
     ui.set_settings_theme(s.theme.index());
     ui.set_settings_backdrop(s.backdrop.index());
+    // The Acrylic tint (Theme.acrylic-tint); unset is the mode's own colour and opacity.
+    let theme = ui.global::<crate::Theme>();
+    theme.set_tint_color_set(s.acrylic_tint.is_some());
+    let [r, g, b] = s.acrylic_tint.unwrap_or_default();
+    theme.set_tint_color(slint::Color::from_rgb_u8(r, g, b));
+    theme.set_tint_opacity(s.acrylic_opacity.map_or(-1, i32::from));
     ui.set_settings_keep_in_tray(s.keep_in_tray);
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
