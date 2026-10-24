@@ -3336,6 +3336,39 @@ fn escape_closes_the_picker_and_changes_nothing() {
     assert_eq!(radio(&ui, "Blue").accessible_checked(), Some(true), "the saved tint stands");
 }
 
+/// Clicks the middle of the picker's brightness slider (it moves to 50), then Right: the slider,
+/// not the picker, has the keys (51).
+fn focus_brightness(ui: &MainWindow) {
+    let (x, y) = centre(&slider(ui, "Brightness"));
+    move_pointer(ui, x, y);
+    press(ui, x, y, slint::platform::PointerEventButton::Left);
+    key(ui, slint::platform::Key::RightArrow);
+    assert_eq!(slider(ui, "Brightness").accessible_value().as_deref(), Some("51"), "the slider has focus");
+}
+
+#[test]
+fn return_applies_while_the_brightness_slider_has_focus() {
+    let dir = Scratch::new("tintpickerslideret");
+    let (ui, path) = tint_picker(&dir, BLUE);
+    focus_brightness(&ui);
+    key(&ui, slint::platform::Key::Return);
+    let hsv = slint::Color::from_rgb_u8(BLUE[0], BLUE[1], BLUE[2]).to_hsva();
+    let expected = rgb_of(slint::Color::from_hsva(hsv.hue, hsv.saturation, 0.51, 1.0));
+    saved(&path, "the slider's brightness", |s| s.acrylic_tint == Some(expected));
+    assert!(!ui.get_tint_picker_visible());
+}
+
+#[test]
+fn escape_cancels_while_the_brightness_slider_has_focus() {
+    let dir = Scratch::new("tintpickerslideresc");
+    let (ui, _path) = tint_picker(&dir, BLUE);
+    let before = window_bg(&ui);
+    focus_brightness(&ui);
+    key(&ui, slint::platform::Key::Escape);
+    assert!(!ui.get_tint_picker_visible());
+    assert_eq!(window_bg(&ui), before);
+}
+
 const FALLBACK_NOTE: &str =
     "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again.";
 const RESTART_NOTE: &str = "Takes effect when Negotium restarts.";
