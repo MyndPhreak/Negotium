@@ -1,6 +1,7 @@
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
 import { RevealScrollView } from "revealscroll.slint";
+import { Slider } from "std-widgets.slint";
 
 // An on/off switch. `checked` is owned by the caller: the switch only asks (`toggled` with the
 // requested state), so a refused change never leaves it showing the wrong state.
@@ -93,6 +94,46 @@ component ActionButton inherits FocusButton {
             // The button already carries the label.
             accessible-role: none;
         }
+    }
+}
+
+// One tint colour as a square: its fill, and an accent ring while it is the chosen one. `plus`
+// draws "+" instead of the fill ("Custom colour" before a custom colour is chosen).
+component TintSwatch inherits FocusButton {
+    in property <string> label;
+    in property <color> fill;
+    in property <bool> selected;
+    in property <bool> plus;
+    width: 28px;
+    height: 28px;
+    vertical-stretch: 0;
+    border-radius: 6px;
+    opacity: root.interactive ? 1 : 0.5;
+    border-width: root.focused || root.selected ? 2px : 1px;
+    border-color: root.focused ? Theme.text : (root.selected ? Theme.accent : Theme.card-border);
+    accessible-role: radio-button;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-enabled: root.interactive;
+    Rectangle {
+        x: 4px;
+        y: 4px;
+        width: parent.width - 8px;
+        height: parent.height - 8px;
+        border-radius: 3px;
+        background: root.plus ? transparent : root.fill;
+        border-width: 1px;
+        border-color: Theme.card-border;
+    }
+    if root.plus : Text {
+        text: "+";
+        color: Theme.text;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        // The swatch already carries the label.
+        accessible-role: none;
     }
 }
 
@@ -212,6 +253,12 @@ export component SettingsPage inherits VerticalLayout {
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback backdrop-chosen(int);
+    // Tint colour (Acrylic only): a swatch's colour, "Default colour" (the mode's own), the
+    // opacity slider's value (percent), and "Custom colour" (the owner opens the picker).
+    callback tint-chosen(color);
+    callback tint-default-chosen();
+    callback tint-opacity-chosen(float);
+    callback custom-tint-requested();
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
@@ -229,6 +276,21 @@ export component SettingsPage inherits VerticalLayout {
     callback aequilibrium-toggled(bool);
     // A recorded fallback keeps the CPU renderer whatever the setting says: the switch shows off.
     property <bool> gpu-shown: root.gpu-rendering && !root.gpu-fallback;
+    // The tint swatches after "Default colour"; a swatch gives its colour, Rust saves it.
+    property <[{label: string, color: color}]> tint-presets: [
+        { label: "Black", color: #000000 },
+        { label: "White", color: #ffffff },
+        { label: "Blue", color: #0078d4 },
+        { label: "Purple", color: #744da9 },
+        { label: "Green", color: #107c10 },
+        { label: "Red", color: #c42b1c },
+    ];
+    // A chosen tint that is none of the presets: "Custom colour" is the chosen swatch.
+    // ponytail: one `!=` per preset; a new preset needs its term here too.
+    property <bool> tint-custom: Theme.tint-color-set
+        && Theme.tint-color != root.tint-presets[0].color && Theme.tint-color != root.tint-presets[1].color
+        && Theme.tint-color != root.tint-presets[2].color && Theme.tint-color != root.tint-presets[3].color
+        && Theme.tint-color != root.tint-presets[4].color && Theme.tint-color != root.tint-presets[5].color;
     max-width: 16384px;
 
     // A control reached with Tab is never out of sight: its whole row scrolls into view.
@@ -285,6 +347,67 @@ export component SettingsPage inherits VerticalLayout {
                     interactive: root.interactive;
                     chosen(i) => { root.backdrop-chosen(i); }
                     focus-gained => { sv.reveal(backdrop-row.absolute-position.y, backdrop-row.height); }
+                }
+            }
+            // The layer Negotium draws over Acrylic (Theme.acrylic-tint); Mica has none.
+            if root.backdrop == 1 : tint-row := SettingRow {
+                title: "Tint colour";
+                description: "The colour on top of Acrylic. Default colour follows light or dark mode.";
+                Rectangle {
+                    accessible-role: groupbox;
+                    accessible-label: tint-row.title;
+                    accessible-description: tint-row.description;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+                        TintSwatch {
+                            label: "Default colour";
+                            fill: Theme.tint-default;
+                            selected: !Theme.tint-color-set;
+                            interactive: root.interactive;
+                            activated => { root.tint-default-chosen(); }
+                            focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                        }
+                        for preset in root.tint-presets : TintSwatch {
+                            label: preset.label;
+                            fill: preset.color;
+                            selected: Theme.tint-color-set && Theme.tint-color == preset.color;
+                            interactive: root.interactive;
+                            activated => { root.tint-chosen(preset.color); }
+                            focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                        }
+                        TintSwatch {
+                            label: "Custom colour";
+                            fill: Theme.tint-color;
+                            plus: !root.tint-custom;
+                            selected: root.tint-custom;
+                            interactive: root.interactive;
+                            activated => { root.custom-tint-requested(); }
+                            focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                        }
+                    }
+                }
+            }
+            if root.backdrop == 1 : opacity-row := SettingRow {
+                title: "Tint opacity";
+                description: "Move to the left to see more of the windows behind Negotium. Move to the right for a stronger tint.";
+                // One-way: a drag breaks the binding, and the opacity is then a saved percent that
+                // no longer follows the mode, so the two agree. Rust saves only a new percent.
+                Slider {
+                    width: 200px;
+                    minimum: 0;
+                    maximum: 100;
+                    value: Theme.tint-percent;
+                    enabled: root.interactive;
+                    accessible-label: opacity-row.title;
+                    accessible-description: opacity-row.description;
+                    changed(v) => { root.tint-opacity-chosen(v); }
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            sv.reveal(opacity-row.absolute-position.y, opacity-row.height);
+                        }
+                    }
                 }
             }
             smooth-row := SettingRow {

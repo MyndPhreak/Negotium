@@ -1,4 +1,4 @@
-import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Button, LineEdit, ScrollView, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
 import { Choice, Toggle } from "settingspage.slint";
@@ -71,7 +71,7 @@ export component Modal inherits Rectangle {
         width: min(parent.width - 48px, 520px);
         height: layout.preferred-height;
         border-radius: Theme.radius;
-        background: Theme.dark ? #2b2b2b : #ffffff;
+        background: Theme.palette-dark ? #2b2b2b : #ffffff;
         layout := VerticalLayout {
             padding: 16px;
             spacing: 12px;
@@ -118,7 +118,7 @@ export component RunTaskModal inherits Rectangle {
         width: min(parent.width - 48px, 560px);
         height: layout.preferred-height;
         border-radius: Theme.radius;
-        background: Theme.dark ? #2b2b2b : #ffffff;
+        background: Theme.palette-dark ? #2b2b2b : #ffffff;
         border-width: 1px;
         border-color: Theme.card-border;
         layout := VerticalLayout {
@@ -375,7 +375,7 @@ export component CpuAffinityModal inherits Rectangle {
             width: min(root.width - 48px, 520px);
             height: layout.preferred-height;
             border-radius: Theme.radius;
-            background: Theme.dark ? #2b2b2b : #ffffff;
+            background: Theme.palette-dark ? #2b2b2b : #ffffff;
             border-width: 1px;
             border-color: Theme.card-border;
             layout := VerticalLayout {
@@ -532,7 +532,7 @@ export component CpuPriorityModal inherits Rectangle {
         width: min(parent.width - 48px, 460px);
         height: layout.preferred-height;
         border-radius: Theme.radius;
-        background: Theme.dark ? #2b2b2b : #ffffff;
+        background: Theme.palette-dark ? #2b2b2b : #ffffff;
         border-width: 1px;
         border-color: Theme.card-border;
         layout := VerticalLayout {
@@ -651,6 +651,158 @@ export component CpuPriorityModal inherits Rectangle {
                     primary: true;
                     clicked => {
                         root.apply(root.selected, root.remember);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Settings > Tint colour > Custom colour: hue and saturation in one area, brightness on a slider.
+// Its state is its own; `apply` gives the colour, `cancel` changes nothing.
+export component TintPickerModal inherits Rectangle {
+    in-out property <float> hue; // 0..360
+    in-out property <float> saturation; // 0..1
+    in-out property <float> brightness; // 0..100
+    callback apply(color);
+    callback cancel();
+    // The colour the three give (hsv clamps saturation and brightness).
+    property <color> chosen: hsv(root.hue, root.saturation, root.brightness / 100);
+
+    // A point in the area: hue across, saturation from full at the top to none at the bottom.
+    function pick(x: length, y: length) {
+        root.hue = clamp(x / area.width, 0, 1) * 360;
+        root.saturation = 1 - clamp(y / area.height, 0, 1);
+    }
+
+    background: #00000066;
+    TouchArea { }
+    // Holds the keys while the picker is open. The brightness slider takes Left and Right while it
+    // has focus; every other key (Return, Esc, Up, Down) comes here.
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.apply(root.chosen);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.hue = min(360, root.hue + 10);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow) {
+                root.hue = max(0, root.hue - 10);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.saturation = min(1, root.saturation + 0.1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.saturation = max(0, root.saturation - 0.1);
+                return accept;
+            }
+            return reject;
+        }
+        Rectangle {
+            width: min(parent.width - 48px, 400px);
+            height: layout.preferred-height;
+            border-radius: Theme.radius;
+            background: Theme.palette-dark ? #2b2b2b : #ffffff;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Text {
+                    text: "Custom tint colour";
+                    color: Theme.text;
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "Hue and saturation";
+                    color: Theme.muted;
+                    font-size: 12px;
+                    // The area carries the same label.
+                    accessible-role: none;
+                }
+                area := Rectangle {
+                    height: 160px;
+                    border-radius: 4px;
+                    background: @linear-gradient(90deg, #ff0000 0%, #ffff00 16.667%, #00ff00 33.333%, #00ffff 50%, #0000ff 66.667%, #ff00ff 83.333%, #ff0000 100%);
+                    accessible-role: groupbox;
+                    accessible-label: "Hue and saturation";
+                    accessible-value: "Hue " + round(root.hue) + ", saturation " + round(root.saturation * 100) + "%";
+                    Rectangle {
+                        border-radius: parent.border-radius;
+                        background: @linear-gradient(180deg, #ffffff00 0%, #ffffff 100%);
+                    }
+                    // Brightness darkens the whole area, as it does the colour.
+                    Rectangle {
+                        border-radius: parent.border-radius;
+                        background: #000000;
+                        opacity: 1 - root.brightness / 100;
+                    }
+                    Rectangle {
+                        x: root.hue / 360 * parent.width - self.width / 2;
+                        y: (1 - root.saturation) * parent.height - self.height / 2;
+                        width: 14px;
+                        height: 14px;
+                        border-radius: 7px;
+                        border-width: 2px;
+                        border-color: #ffffff;
+                        background: root.chosen;
+                    }
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                root.pick(self.mouse-x, self.mouse-y);
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.pick(self.mouse-x, self.mouse-y);
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "Brightness";
+                    color: Theme.muted;
+                    font-size: 12px;
+                    // The slider carries the same label.
+                    accessible-role: none;
+                }
+                Slider {
+                    minimum: 0;
+                    maximum: 100;
+                    value <=> root.brightness;
+                    accessible-label: "Brightness";
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    // The colour Apply gives.
+                    Rectangle {
+                        width: 32px;
+                        border-radius: 4px;
+                        background: root.chosen;
+                        border-width: 1px;
+                        border-color: Theme.card-border;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.cancel(); }
+                    }
+                    Button {
+                        text: "Apply";
+                        primary: true;
+                        clicked => { root.apply(root.chosen); }
                     }
                 }
             }

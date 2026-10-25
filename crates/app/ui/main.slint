@@ -3,7 +3,7 @@ import { Theme } from "theme.slint";
 import { MetersRow, MeterData } from "meters.slint";
 import { TopStrip, TileData } from "topstrip.slint";
 import { AppList, RowData } from "applist.slint";
-import { Banner, Toast, Modal, RunTaskModal, CpuAffinityModal, CpuPriorityModal, CoreItem, CoreGroup } from "overlays.slint";
+import { Banner, Toast, Modal, RunTaskModal, CpuAffinityModal, CpuPriorityModal, TintPickerModal, CoreItem, CoreGroup } from "overlays.slint";
 import { Rail } from "rail.slint";
 import { PerformancePage, DeviceData, StatData, SegmentData } from "perfpage.slint";
 import { SettingsPage } from "settingspage.slint";
@@ -104,7 +104,7 @@ export component MainWindow inherits Window {
         GraphClock.lead-ms = lead-ms;
         GraphClock.speed = speed;
     }
-    out property <bool> modal-open: confirm-visible || details-visible || run-task-visible || affinity-visible || priority-visible;
+    out property <bool> modal-open: confirm-visible || details-visible || run-task-visible || affinity-visible || priority-visible || tint-picker-visible;
 
     in-out property <bool> affinity-visible: false;
     in-out property <string> affinity-title: "";
@@ -127,6 +127,13 @@ export component MainWindow inherits Window {
     in-out property <bool> priority-remember: false;
     callback priority-apply(int, bool);
     callback priority-cancel();
+
+    // Settings > Tint colour > Custom colour: the picker is open (show-tint-picker).
+    in-out property <bool> tint-picker-visible: false;
+    // The picker's hue (0..360), saturation (0..1) and brightness (0..100), seeded as it opens.
+    property <float> tint-picker-hue;
+    property <float> tint-picker-saturation;
+    property <float> tint-picker-brightness;
     // The room the floating toast takes at the bottom of a page (its height and its gap), so the
     // end of every page (the Overview and Startup lists, the Performance and Settings scroll
     // content) can still be scrolled clear of it.
@@ -238,6 +245,11 @@ export component MainWindow inherits Window {
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback backdrop-chosen(int);
+    // Settings > Tint colour and Tint opacity (crate::settingspage): a swatch's or the picker's
+    // colour, "Default colour", and the opacity slider's value (percent).
+    callback tint-chosen(color);
+    callback tint-default-chosen();
+    callback tint-opacity-chosen(float);
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
@@ -269,9 +281,10 @@ export component MainWindow inherits Window {
     callback update-accepted();
     callback update-dismissed();
     // Settings > Theme: Rust passes the effective scheme (crate::settings::effective_dark). A
-    // function, not a `changed` handler, so Theme.dark is current as soon as it returns.
+    // function, not a `changed` handler, so the mode is current as soon as it returns. The std
+    // widgets follow Theme.palette-dark: written to Palette.color-scheme by Theme.set-mode, and by Theme after.
     public function set-dark(dark: bool) {
-        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+        Theme.set-mode(dark);
     }
 
     // Scrolls the app list so the row at `y` (its top in the list), `h` tall, is fully visible.
@@ -310,6 +323,16 @@ export component MainWindow inherits Window {
         root.run-task-command = "";
         root.run-task-working-dir = "";
         root.run-task-visible = true;
+    }
+    // Opens the custom tint picker, seeded with the tint colour in effect.
+    public function show-tint-picker() {
+        parking.focus();
+        let hsv = (Theme.tint-color-set ? Theme.tint-color : Theme.tint-default).to-hsv();
+        root.tint-picker-hue = hsv.hue;
+        root.tint-picker-saturation = hsv.saturation;
+        // Whole percent, as the slider steps.
+        root.tint-picker-brightness = round(hsv.value * 100);
+        root.tint-picker-visible = true;
     }
     // Leaving the Overview: the hidden list or row control gives up keyboard focus at once (Slint
     // drops focus from a hidden item only on a later event-loop turn).
@@ -519,6 +542,10 @@ export component MainWindow inherits Window {
                         refresh-chosen(i) => { root.refresh-chosen(i); }
                         theme-chosen(i) => { root.theme-chosen(i); }
                         backdrop-chosen(i) => { root.backdrop-chosen(i); }
+                        tint-chosen(c) => { root.tint-chosen(c); }
+                        tint-default-chosen => { root.tint-default-chosen(); }
+                        tint-opacity-chosen(v) => { root.tint-opacity-chosen(v); }
+                        custom-tint-requested => { root.show-tint-picker(); }
                         always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
                         tray-toggled(on) => { root.tray-toggled(on); }
                         smooth-graphs-toggled(on) => { root.smooth-graphs-toggled(on); }
@@ -637,6 +664,18 @@ export component MainWindow inherits Window {
         remember <=> root.priority-remember;
         apply(sel, rem) => { root.priority-apply(sel, rem); }
         cancel => { root.priority-cancel(); }
+    }
+    if root.tint-picker-visible : TintPickerModal {
+        hue <=> root.tint-picker-hue;
+        saturation <=> root.tint-picker-saturation;
+        brightness <=> root.tint-picker-brightness;
+        apply(c) => {
+            root.tint-picker-visible = false;
+            root.tint-chosen(c);
+        }
+        cancel => {
+            root.tint-picker-visible = false;
+        }
     }
     // Last, so it lies over a modal's scrim: the caption buttons still work while a modal is open,
     // as the native ones do.
