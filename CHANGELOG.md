@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/MyndPhreak/Negotium/compare/v0.10.0...v0.11.0) (2026-10-25)
+
+
+### Features
+
+* **app:** Acrylic tint colour and opacity settings ([#33](https://github.com/MyndPhreak/Negotium/issues/33)) ([24cfeb0](https://github.com/MyndPhreak/Negotium/commit/24cfeb0088c3b0f860416b3ef0fa78107ff043d8))
+
 ## [0.10.0](https://github.com/MyndPhreak/Negotium/compare/v0.9.0...v0.10.0) (2026-10-23)
 
 
