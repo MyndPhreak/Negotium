@@ -3112,6 +3112,27 @@ fn a_tint_opacity_of_0_is_clear_and_100_is_opaque() {
 }
 
 #[test]
+fn a_tint_saturation_of_0_greys_the_colour_and_100_keeps_it() {
+    let ui = window();
+    let mut s = tinted(Some(BLUE), Some(30));
+    assert_eq!(window_bg_with(&ui, &s, true, false), (0, 120, 212, alpha_of(0.30)), "unset keeps the colour");
+    s.acrylic_saturation = Some(100);
+    assert_eq!(window_bg_with(&ui, &s, true, false), (0, 120, 212, alpha_of(0.30)), "100 keeps the colour");
+    s.acrylic_saturation = Some(0);
+    let (r, g, b, a) = window_bg_with(&ui, &s, true, false);
+    assert!(r.abs_diff(g) <= 1 && g.abs_diff(b) <= 1, "0 is grey: {:?}", (r, g, b));
+    assert_eq!(a, alpha_of(0.30), "and the opacity is untouched");
+}
+
+#[test]
+fn a_tint_saturation_does_not_change_the_modes_own_grey() {
+    let ui = window();
+    let s = Settings { acrylic_saturation: Some(0), ..tinted(None, None) };
+    assert_eq!(window_bg_with(&ui, &s, true, false), LIGHT_TINT);
+    assert_eq!(window_bg_with(&ui, &s, true, true), DARK_TINT);
+}
+
+#[test]
 fn mica_ignores_the_tint() {
     use negotium::settings::BackdropChoice;
     let ui = window();

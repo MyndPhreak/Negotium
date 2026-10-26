@@ -250,6 +250,8 @@ export component MainWindow inherits Window {
     callback tint-chosen(color);
     callback tint-default-chosen();
     callback tint-opacity-chosen(float);
+    // Settings > Tint saturation: the slider's value (percent of the colour's saturation kept).
+    callback tint-saturation-chosen(float);
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
     callback smooth-graphs-toggled(bool);
@@ -545,6 +547,7 @@ export component MainWindow inherits Window {
                         tint-chosen(c) => { root.tint-chosen(c); }
                         tint-default-chosen => { root.tint-default-chosen(); }
                         tint-opacity-chosen(v) => { root.tint-opacity-chosen(v); }
+                        tint-saturation-chosen(v) => { root.tint-saturation-chosen(v); }
                         custom-tint-requested => { root.show-tint-picker(); }
                         always-on-top-toggled(on) => { root.always-on-top-toggled(on); }
                         tray-toggled(on) => { root.tray-toggled(on); }

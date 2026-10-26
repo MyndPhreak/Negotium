@@ -258,6 +258,7 @@ export component SettingsPage inherits VerticalLayout {
     callback tint-chosen(color);
     callback tint-default-chosen();
     callback tint-opacity-chosen(float);
+    callback tint-saturation-chosen(float);
     callback custom-tint-requested();
     callback always-on-top-toggled(bool);
     callback tray-toggled(bool);
@@ -389,9 +390,28 @@ export component SettingsPage inherits VerticalLayout {
                     }
                 }
             }
+            if root.backdrop == 1 : saturation-row := SettingRow {
+                title: "Tint saturation";
+                description: "How vivid the tint colour is. Move to the left for a greyer tint. Has no effect on Default colour, which is grey.";
+                Slider {
+                    width: 200px;
+                    minimum: 0;
+                    maximum: 100;
+                    value: Theme.tint-saturation;
+                    enabled: root.interactive && Theme.tint-color-set;
+                    accessible-label: saturation-row.title;
+                    accessible-description: saturation-row.description;
+                    changed(v) => { root.tint-saturation-chosen(v); }
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            sv.reveal(saturation-row.absolute-position.y, saturation-row.height);
+                        }
+                    }
+                }
+            }
             if root.backdrop == 1 : opacity-row := SettingRow {
                 title: "Tint opacity";
-                description: "Move to the left to see more of the windows behind Negotium. Move to the right for a stronger tint.";
+                description: "How much of the windows behind Negotium shows through. Move to the left to see more, to the right for a stronger tint.";
                 // One-way: a drag breaks the binding, and the opacity is then a saved percent that
                 // no longer follows the mode, so the two agree. Rust saves only a new percent.
                 Slider {

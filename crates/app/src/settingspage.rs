@@ -6,7 +6,7 @@ use negotium_model::{Metric, Sort, SortColumn};
 use crate::install::{self, Install};
 use crate::controls::Page;
 use crate::integrate::{Action, TaskState};
-use crate::settings::{BackdropChoice, Saver, Settings, ThemeChoice, opacity_change, refresh_from_index};
+use crate::settings::{BackdropChoice, Saver, Settings, ThemeChoice, opacity_change, refresh_from_index, saturation_change};
 use crate::renderer::{self, Renderer};
 use crate::{MainWindow, platform};
 use slint::ComponentHandle;
@@ -37,6 +37,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     let [r, g, b] = s.acrylic_tint.unwrap_or_default();
     theme.set_tint_color(slint::Color::from_rgb_u8(r, g, b));
     theme.set_tint_opacity(s.acrylic_opacity.map_or(-1, i32::from));
+    theme.set_tint_saturation(s.acrylic_saturation.map_or(100, i32::from));
     ui.set_settings_keep_in_tray(s.keep_in_tray);
     ui.set_settings_gpu_rendering(s.gpu_rendering);
     ui.set_settings_smooth_graphs(s.smooth_graphs);
@@ -650,6 +651,15 @@ impl SettingsWiring {
                 let current = change.settings.borrow().acrylic_opacity;
                 if let Some(percent) = opacity_change(current, v) {
                     change.apply(|s| s.acrylic_opacity = Some(percent));
+                }
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_tint_saturation_chosen(move |v| {
+                let current = change.settings.borrow().acrylic_saturation;
+                if let Some(percent) = saturation_change(current, v) {
+                    change.apply(|s| s.acrylic_saturation = Some(percent));
                 }
             });
         }

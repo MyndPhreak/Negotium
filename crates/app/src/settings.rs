@@ -105,6 +105,10 @@ pub struct Settings {
     /// The Acrylic tint's opacity in percent, 0..=100; `None`: the mode's own (45 dark, 80 light).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acrylic_opacity: Option<u8>,
+    /// How much of the chosen tint colour's saturation is kept, percent 0..=100; `None`: all of it
+    /// (100). The mode's own grey tint has none to scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acrylic_saturation: Option<u8>,
 }
 
 impl Default for Settings {
@@ -134,6 +138,7 @@ impl Default for Settings {
             window_geometry: None,
             acrylic_tint: None,
             acrylic_opacity: None,
+            acrylic_saturation: None,
         }
     }
 }
@@ -195,6 +200,11 @@ pub fn refresh_from_index(i: i32) -> u32 {
 pub fn opacity_change(current: Option<u8>, slider: f32) -> Option<u8> {
     let percent = slider.round().clamp(0.0, 100.0) as u8;
     (current != Some(percent)).then_some(percent)
+}
+
+/// The Tint saturation slider moved to `slider`: the same rounding as the opacity slider's.
+pub fn saturation_change(current: Option<u8>, slider: f32) -> Option<u8> {
+    opacity_change(current, slider)
 }
 
 pub fn effective_dark(theme: ThemeChoice, system_dark: bool) -> bool {
@@ -317,6 +327,11 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     if s.acrylic_opacity.is_some_and(|o| o > 100) {
         s.acrylic_opacity = None;
         bad.push("acrylic_opacity".to_string());
+    }
+    field!(acrylic_saturation);
+    if s.acrylic_saturation.is_some_and(|o| o > 100) {
+        s.acrylic_saturation = None;
+        bad.push("acrylic_saturation".to_string());
     }
     let s = s.normalized();
     if bad.is_empty() {
@@ -911,6 +926,26 @@ mod tests {
         for (current, slider, expected) in cases {
             assert_eq!(opacity_change(current, slider), expected, "({current:?}, {slider})");
         }
+    }
+
+    #[test]
+    fn a_tint_saturation_is_saved_and_loaded_and_above_100_takes_the_default() {
+        let dir = TempDir::new("saturationround");
+        let p = dir.file();
+        let s = Settings { acrylic_saturation: Some(40), ..Settings::default() };
+        save_with(&Writes::Plain, &p, &s).unwrap();
+        assert_eq!(load_with(&Writes::Plain, &p), (s, Loaded::File));
+        std::fs::write(&p, r#"{"acrylic_saturation": 101, "backdrop": "acrylic"}"#).unwrap();
+        let (s, how) = load_with(&Writes::Plain, &p);
+        assert_eq!(how, Loaded::Partial(vec!["acrylic_saturation".to_string()]));
+        assert_eq!((s.acrylic_saturation, s.backdrop), (None, BackdropChoice::Acrylic));
+    }
+
+    #[test]
+    fn the_saturation_slider_saves_only_a_new_rounded_percent() {
+        assert_eq!(saturation_change(None, 100.0), Some(100));
+        assert_eq!(saturation_change(Some(40), 40.4), None);
+        assert_eq!(saturation_change(Some(40), 140.0), Some(100));
     }
 
     #[test]

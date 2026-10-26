@@ -14,6 +14,8 @@ export global Theme {
     in-out property <bool> tint-color-set: false;
     in-out property <color> tint-color: #000000;
     in-out property <int> tint-opacity: -1;
+    // Settings > Tint saturation: percent of the chosen colour's saturation kept (100: as chosen).
+    in-out property <int> tint-saturation: 100;
     // What the Settings page shows: the mode's own tint colour, and the opacity in effect (percent).
     out property <color> tint-default: dark ? #000000 : solid-bg;
     out property <int> tint-percent: round(tint-alpha * 100);
@@ -23,7 +25,13 @@ export global Theme {
     // only tints from the wallpaper and is shown as it is. A chosen colour or opacity replaces the
     // mode's own in both modes; unset, the old values apply unchanged.
     property <float> tint-alpha: tint-opacity >= 0 ? tint-opacity / 100 : (dark ? 0.45 : 0.8);
-    property <color> acrylic-tint: (tint-color-set ? tint-color : tint-default).with-alpha(tint-alpha);
+    // The colour under the alpha: the chosen one with its saturation scaled by the slider. The
+    // mode's own tint is grey, and an unchanged 100% skips the HSV round trip, so both stay exact.
+    property <color> tint-base: tint-color-set ? tint-color : tint-default;
+    property <color> tint-effective: (tint-color-set && tint-saturation < 100)
+        ? Colors.hsv(tint-base.to-hsv().hue, tint-base.to-hsv().saturation * tint-saturation / 100, tint-base.to-hsv().value, 1)
+        : tint-base;
+    property <color> acrylic-tint: tint-effective.with-alpha(tint-alpha);
     pure function luma(c: color) -> float {
         return c.red * 0.299 + c.green * 0.587 + c.blue * 0.114;
     }
@@ -36,7 +44,7 @@ export global Theme {
     // measured backdrop would be the upgrade. Only a chosen colour on Acrylic can flip it: unset,
     // Mica and no backdrop give the mode exactly, and an opacity alone cannot (the default colour
     // is the surface).
-    property <float> tint-luma: tint-alpha * luma(tint-color) + (1 - tint-alpha) * luma(solid-bg);
+    property <float> tint-luma: tint-alpha * luma(tint-effective) + (1 - tint-alpha) * luma(solid-bg);
     out property <bool> palette-dark: (mica && acrylic && tint-color-set) ? tint-luma < 128 : dark;
     // Called by MainWindow.set-dark; the scheme is written at once, `changed` keeps it in step after.
     public function set-mode(d: bool) {
