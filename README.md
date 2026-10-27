@@ -2,6 +2,8 @@
 
 A fast, modern Task Manager replacement for Windows 11, written in Rust with [Slint](https://slint.dev).
 
+<img width="1016" height="1224" alt="negotium" src="https://github.com/user-attachments/assets/8e570546-237c-4966-8a80-7d3a0444829a" />
+
 ## What it does
 
 - **Overview** — live CPU, memory, disk, GPU and network meters with smooth graphs, the top apps for the selected meter, and a sortable app list grouped into Apps, Background processes and Windows processes, with program icons and per-process detail.
