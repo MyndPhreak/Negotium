@@ -5526,3 +5526,117 @@ fn no_slint_file_outside_the_theme_reads_the_mode_for_a_surface() {
     }
     assert!(reads.is_empty(), "Theme.dark is read at {reads:?}; use Theme.palette-dark");
 }
+
+// ---- Grouped Settings (docs/superpowers/plans/2026-10-28-grouped-settings.md) ----
+
+/// The Settings groups in page order: header and the controls of its rows, by accessible label.
+const SETTING_GROUP_ROWS: [(&str, &[&str]); 7] = [
+    ("Appearance", &["System", "Mica", "Smooth graphs"]),
+    ("Window and tray", &["Always on top", "Keep running in the tray when closed", "Show CPU in tray icon"]),
+    ("Processes", &["0.5 s", "Group apps by type", "Aequilibrium (Runaway CPU restraint)"]),
+    ("Startup and shortcuts", &["Start with Windows", "Admin mode", "Open on Ctrl+Shift+Esc", "Pick a window to end on Ctrl+Alt+Shift+Esc"]),
+    ("Updates", &["Check for updates on startup", "Check for updates"]),
+    ("Add-ons", &["CPU temperature add-on"]),
+    ("Advanced", &["Use GPU rendering", "Open Windows Task Manager"]),
+];
+
+/// The header of the Settings group named `name`.
+fn group_header(ui: &MainWindow, name: &str) -> El {
+    try_group_header(ui, name).unwrap_or_else(|| panic!("no group header {name:?}"))
+}
+
+fn try_group_header(ui: &MainWindow, name: &str) -> Option<El> {
+    El::find_by_accessible_label(ui, name).find(|e| e.accessible_expandable() == Some(true))
+}
+
+/// The switch, choice or button labelled `label`, if the page shows it.
+fn setting_control(ui: &MainWindow, label: &str) -> Option<El> {
+    El::find_by_accessible_label(ui, label).find(|e| {
+        matches!(e.accessible_role(), Some(AccessibleRole::Switch | AccessibleRole::RadioButton | AccessibleRole::Button))
+            && e.accessible_expandable() != Some(true)
+    })
+}
+
+#[test]
+fn settings_groups_are_listed_in_order_and_open_by_default() {
+    let ui = settings_window(1000, 2600);
+    let mut last_y = f32::MIN;
+    for (name, _) in SETTING_GROUP_ROWS {
+        let h = group_header(&ui, name);
+        assert_eq!(h.accessible_expanded(), Some(true), "{name} starts open");
+        let y = rect_of(&h).1;
+        assert!(y > last_y, "{name} comes after the group before it");
+        last_y = y;
+    }
+}
+
+#[test]
+fn each_setting_sits_in_its_group() {
+    let ui = settings_window(1000, 2600);
+    for (i, (name, labels)) in SETTING_GROUP_ROWS.iter().enumerate() {
+        let top = rect_of(&group_header(&ui, name)).1;
+        let bottom = SETTING_GROUP_ROWS.get(i + 1).map_or(f32::MAX, |(next, _)| rect_of(&group_header(&ui, next)).1);
+        for label in *labels {
+            let c = setting_control(&ui, label).unwrap_or_else(|| panic!("no control {label:?}"));
+            let y = rect_of(&c).1;
+            assert!(y > top && y < bottom, "{label} is in {name}: {y} not in {top}..{bottom}");
+        }
+    }
+}
+
+#[test]
+fn a_group_header_closes_and_reopens_its_group_and_saves_it() {
+    let dir = Scratch::new("groups");
+    let path = dir.0.join("settings.json");
+    let (ui, _, settings) = settings_wired(&dir, Settings::default(), false);
+    assert!(setting_control(&ui, "Check for updates on startup").is_some(), "the row shows while open");
+    group_header(&ui, "Updates").invoke_accessible_default_action();
+    assert_eq!(group_header(&ui, "Updates").accessible_expanded(), Some(false));
+    assert!(setting_control(&ui, "Check for updates on startup").is_none(), "a closed group hides its rows");
+    assert_eq!(settings.borrow().collapsed_groups, ["updates"]);
+    saved(&path, "updates closed", |s| s.collapsed_groups == ["updates"]);
+    group_header(&ui, "Updates").invoke_accessible_default_action();
+    assert_eq!(group_header(&ui, "Updates").accessible_expanded(), Some(true));
+    assert!(setting_control(&ui, "Check for updates on startup").is_some(), "reopened");
+    saved(&path, "updates open", |s| s.collapsed_groups.is_empty());
+}
+
+#[test]
+fn closed_groups_are_restored_at_launch() {
+    let ui = settings_window(1000, 2600);
+    negotium::settingspage::apply_settings(&ui, &Settings { collapsed_groups: vec!["advanced".into()], ..Settings::default() });
+    assert_eq!(group_header(&ui, "Advanced").accessible_expanded(), Some(false));
+    assert!(setting_control(&ui, "Use GPU rendering").is_none(), "the closed group's rows are hidden");
+    assert!(setting_control(&ui, "System").is_some(), "other groups stay open");
+}
+
+#[test]
+fn an_open_modal_disables_the_group_headers() {
+    let ui = settings_window(1000, 2600);
+    let toggled = Rc::new(RefCell::new(Vec::new()));
+    let t = toggled.clone();
+    ui.on_settings_group_toggled(move |i| t.borrow_mut().push(i));
+    ui.set_details_visible(true);
+    for (name, _) in SETTING_GROUP_ROWS {
+        let h = group_header(&ui, name);
+        assert_eq!(h.accessible_enabled(), Some(false), "{name}");
+        h.invoke_accessible_default_action();
+    }
+    assert!(toggled.borrow().is_empty(), "nothing beneath a modal acts");
+}
+
+#[test]
+fn group_headers_wrap_at_the_smallest_window() {
+    use i_slint_backend_testing::ElementRoot;
+    let ui = settings_window(760, 440);
+    let headers = ui.root_element().query_descendants().match_id("SettingGroup::header").find_all();
+    let summaries = ui.root_element().query_descendants().match_id("SettingGroup::summary").find_all();
+    let chevrons = ui.root_element().query_descendants().match_id("SettingGroup::chevron").find_all();
+    assert!(!headers.is_empty() && headers.len() == summaries.len() && headers.len() == chevrons.len());
+    for ((h, s), c) in headers.iter().zip(&summaries).zip(&chevrons) {
+        let (h, s, c) = (rect_of(h), rect_of(s), rect_of(c));
+        assert!(s.1 + s.3 <= h.1 + h.3, "the summary fits in its header: {s:?} {h:?}");
+        assert!(s.0 + s.2 <= c.0, "the summary stays left of the chevron: {s:?} {c:?}");
+        assert!(h.0 + h.2 <= 760.0 - 14.0, "the header is clear of the scrollbar gutter: {h:?}");
+    }
+}

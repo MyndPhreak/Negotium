@@ -242,6 +242,9 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-pawnio-installed: false;
     in-out property <bool> settings-aequilibrium-enabled: true;
     callback settings-aequilibrium-toggled(bool);
+    // Which Settings groups are open (crate::settings::Settings::groups_open); a header was activated.
+    in-out property <[bool]> settings-groups-open: [true, true, true, true, true, true, true];
+    callback settings-group-toggled(int);
     callback refresh-chosen(int);
     callback theme-chosen(int);
     callback backdrop-chosen(int);
@@ -536,6 +539,8 @@ export component MainWindow inherits Window {
                         update-status: root.settings-update-status;
                         version-text: root.version-text;
                         aequilibrium-enabled: root.settings-aequilibrium-enabled;
+                        groups-open: root.settings-groups-open;
+                        group-toggled(i) => { root.settings-group-toggled(i); }
                         aequilibrium-toggled(on) => { root.settings-aequilibrium-toggled(on); }
                         bottom-inset: root.toast-inset;
                         interactive: !root.modal-open;

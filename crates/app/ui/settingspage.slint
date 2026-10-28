@@ -213,6 +213,17 @@ export component SettingRow inherits Rectangle {
     }
 }
 
+// A titled group of Settings rows (crate::settings::SETTING_GROUPS) that opens and closes from
+// its header.
+export component SettingGroup inherits VerticalLayout {
+    in property <string> title;
+    in property <string> summary;
+    in property <bool> open;
+    in property <bool> interactive: true;
+    callback toggled();
+    @children
+}
+
 export component SettingsPage inherits VerticalLayout {
     in property <int> refresh;
     in property <int> theme;
@@ -248,6 +259,9 @@ export component SettingsPage inherits VerticalLayout {
     in property <string> version-text;
     in property <bool> pawnio-installed: false;
     in property <bool> interactive: true;
+    // Which groups are open, in crate::settings::SETTING_GROUPS order.
+    in property <[bool]> groups-open;
+    callback group-toggled(int);
     // Room kept free below the last row (the floating toast), so it can be scrolled clear.
     in property <length> bottom-inset;
     callback refresh-chosen(int);
