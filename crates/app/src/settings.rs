@@ -105,6 +105,9 @@ pub struct Settings {
     /// The Acrylic tint's opacity in percent, 0..=100; `None`: the mode's own (45 dark, 80 light).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acrylic_opacity: Option<u8>,
+    /// The Settings page groups the user closed, by `SETTING_GROUPS` id; the rest are open. Ids
+    /// this version does not know are kept, so a newer version's state survives a save.
+    pub collapsed_groups: Vec<String>,
 }
 
 impl Default for Settings {
@@ -134,9 +137,13 @@ impl Default for Settings {
             window_geometry: None,
             acrylic_tint: None,
             acrylic_opacity: None,
+            collapsed_groups: Vec::new(),
         }
     }
 }
+
+/// The Settings page's groups, in page order, by the id `Settings::collapsed_groups` holds.
+pub const SETTING_GROUPS: [&str; 7] = ["appearance", "window", "processes", "startup", "updates", "addons", "advanced"];
 
 /// The names `Settings::sort_column` holds, in the window's column order (name first).
 const SORT_NAMES: [&str; 6] = ["name", "cpu", "memory", "disk", "gpu", "network"];
@@ -177,9 +184,23 @@ impl Settings {
         self
     }
 
+    /// Which of `SETTING_GROUPS` are open.
+    pub fn groups_open(&self) -> [bool; 7] {
+        [false; 7]
+    }
+
+    /// Opens or closes the group at `index` in `SETTING_GROUPS`; an out-of-range index does nothing.
+    pub fn toggle_group(&mut self, _index: usize) {}
+
     pub fn refresh_index(&self) -> i32 {
         REFRESH_CHOICES_MS.iter().position(|&c| c == nearest_refresh(self.refresh_ms)).unwrap_or(1) as i32
     }
+}
+
+/// Whether a Settings row with `title` and `description` matches the search `query`: an empty
+/// query matches everything; otherwise a case-insensitive substring of either.
+pub fn setting_matches(_query: &str, _title: &str, _description: &str) -> bool {
+    false
 }
 
 pub fn nearest_refresh(ms: u32) -> u32 {
@@ -446,6 +467,79 @@ impl Saver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn collapsed(ids: &[&str]) -> Settings {
+        Settings { collapsed_groups: ids.iter().map(|s| s.to_string()).collect(), ..Settings::default() }
+    }
+
+    #[test]
+    fn every_settings_group_is_open_by_default() {
+        assert_eq!(Settings::default().groups_open(), [true; 7]);
+    }
+
+    #[test]
+    fn a_collapsed_group_is_closed_and_the_rest_open() {
+        assert_eq!(collapsed(&["updates"]).groups_open(), [true, true, true, true, false, true, true]);
+    }
+
+    #[test]
+    fn toggling_a_group_twice_restores_it() {
+        let mut s = collapsed(&["advanced"]);
+        s.toggle_group(4);
+        assert_eq!(s.collapsed_groups, ["advanced", "updates"]);
+        s.toggle_group(4);
+        assert_eq!(s.collapsed_groups, ["advanced"]);
+    }
+
+    #[test]
+    fn toggling_keeps_group_ids_from_a_newer_version() {
+        let mut s = collapsed(&["future", "updates"]);
+        s.toggle_group(4);
+        assert_eq!(s.collapsed_groups, ["future"]);
+    }
+
+    #[test]
+    fn toggling_an_unknown_group_index_changes_nothing() {
+        let mut s = collapsed(&["updates"]);
+        s.toggle_group(7);
+        assert_eq!(s.collapsed_groups, ["updates"]);
+    }
+
+    #[test]
+    fn collapsed_groups_are_loaded_from_the_file_and_default_to_none() {
+        let dir = std::env::temp_dir().join(format!("negotium-settings-groups-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, serde_json::to_string(&collapsed(&["updates", "future"])).unwrap()).unwrap();
+        let (s, loaded) = load_with(&Writes::Plain, &path);
+        std::fs::write(&path, r#"{"smooth_graphs":false}"#).unwrap();
+        let (old, _) = load_with(&Writes::Plain, &path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(loaded, Loaded::File);
+        assert_eq!(s.collapsed_groups, ["updates", "future"]);
+        assert!(old.collapsed_groups.is_empty());
+    }
+
+    #[test]
+    fn an_empty_search_matches_every_setting() {
+        assert!(setting_matches("", "Theme", ""));
+    }
+
+    #[test]
+    fn search_ignores_case_and_surrounding_spaces() {
+        assert!(setting_matches("TRAY", "Show CPU in tray icon", ""));
+        assert!(setting_matches("  theme ", "Theme", ""));
+    }
+
+    #[test]
+    fn search_matches_the_description() {
+        assert!(setting_matches("blur", "Backdrop", "Acrylic blurs the windows behind Negotium."));
+    }
+
+    #[test]
+    fn search_with_no_match_is_false() {
+        assert!(!setting_matches("zzz", "Theme", "System follows Windows' light or dark mode."));
+    }
 
     /// The benchmark writes these keys (crates/bench `APP_FIELDS` / `settings_json`); the tolerant
     /// loader silently ignores a renamed one, so this pins them.
