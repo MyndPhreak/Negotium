@@ -5730,3 +5730,35 @@ fn an_open_modal_disables_the_search() {
     ui.set_details_visible(true);
     assert_eq!(search_box(&ui).accessible_enabled(), Some(false));
 }
+
+#[test]
+fn a_header_activated_during_a_search_saves_nothing() {
+    let dir = Scratch::new("search-header");
+    let (ui, _, settings) = settings_wired(&dir, Settings::default(), false);
+    search_settings(&ui, "update");
+    group_header(&ui, "Updates").invoke_accessible_default_action();
+    assert!(settings.borrow().collapsed_groups.is_empty(), "the header shows open and changes nothing");
+    search_settings(&ui, "");
+    assert_eq!(group_header(&ui, "Updates").accessible_expanded(), Some(true), "still open after the search");
+}
+
+#[test]
+fn the_expand_action_only_opens_a_group() {
+    let dir = Scratch::new("expand-action");
+    let (ui, _, settings) = settings_wired(&dir, Settings { collapsed_groups: vec!["updates".into()], ..Settings::default() }, false);
+    group_header(&ui, "Appearance").invoke_accessible_expand_action();
+    assert_eq!(group_header(&ui, "Appearance").accessible_expanded(), Some(true), "an open group stays open");
+    group_header(&ui, "Updates").invoke_accessible_expand_action();
+    assert_eq!(group_header(&ui, "Updates").accessible_expanded(), Some(true), "a closed group opens");
+    assert!(settings.borrow().collapsed_groups.is_empty());
+}
+
+#[test]
+fn a_search_of_only_spaces_keeps_the_saved_groups() {
+    let dir = Scratch::new("search-blank");
+    let (ui, _, _) = settings_wired(&dir, Settings { collapsed_groups: vec!["updates".into()], ..Settings::default() }, false);
+    search_settings(&ui, "   ");
+    assert_eq!(group_header(&ui, "Updates").accessible_expanded(), Some(false), "blank is not a search");
+    assert!(setting_control(&ui, "System").is_some());
+    assert!(text(&ui, NO_MATCH).is_none());
+}
