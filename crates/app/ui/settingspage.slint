@@ -1,7 +1,7 @@
 import { Theme } from "theme.slint";
 import { FocusButton } from "focusbutton.slint";
 import { RevealScrollView } from "revealscroll.slint";
-import { Slider } from "std-widgets.slint";
+import { LineEdit, Slider } from "std-widgets.slint";
 
 // An on/off switch. `checked` is owned by the caller: the switch only asks (`toggled` with the
 // requested state), so a refused change never leaves it showing the wrong state.
@@ -331,6 +331,9 @@ export component SettingsPage inherits VerticalLayout {
     // Which groups are open, in crate::settings::SETTING_GROUPS order.
     in property <[bool]> groups-open;
     callback group-toggled(int);
+    // Whether a row with this title and description matches the search (crate::settings::setting_matches).
+    pure callback setting-matches(string, string, string) -> bool;
+    property <string> search-text;
     // Room kept free below the last row (the floating toast), so it can be scrolled clear.
     in property <length> bottom-inset;
     callback refresh-chosen(int);
@@ -393,6 +396,12 @@ export component SettingsPage inherits VerticalLayout {
             // Spare height stays empty below the last row.
             alignment: start;
             Text { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 600; vertical-stretch: 0; }
+            LineEdit {
+                text <=> root.search-text;
+                placeholder-text: "Search settings";
+                accessible-label: "Search settings";
+                enabled: root.interactive;
+            }
             appearance-group := SettingGroup {
                 title: "Appearance";
                 summary: "Theme, backdrop, tint and graphs";

@@ -5641,3 +5641,89 @@ fn group_headers_wrap_at_the_smallest_window() {
         assert!(h.0 + h.2 <= 760.0 - 14.0, "the header is clear of the scrollbar gutter: {h:?}");
     }
 }
+
+/// Types `query` into the Settings search box, replacing what was there.
+fn search_settings(ui: &MainWindow, query: &str) {
+    search_box(ui).set_accessible_value(query);
+    slint::platform::update_timers_and_animations();
+}
+
+fn search_box(ui: &MainWindow) -> El {
+    El::find_by_accessible_label(ui, "Search settings")
+        .find(|e| e.accessible_role() == Some(AccessibleRole::TextInput))
+        .expect("the Settings search box")
+}
+
+const NO_MATCH: &str = "No settings match your search.";
+
+#[test]
+fn search_shows_only_matching_rows_and_opens_their_groups() {
+    let dir = Scratch::new("search");
+    let (ui, _, settings) = settings_wired(&dir, Settings { collapsed_groups: vec!["window".into()], ..Settings::default() }, false);
+    assert!(setting_control(&ui, "Show CPU in tray icon").is_none(), "closed before the search");
+    search_settings(&ui, "tray");
+    assert!(setting_control(&ui, "Keep running in the tray when closed").is_some());
+    assert!(setting_control(&ui, "Show CPU in tray icon").is_some());
+    assert!(setting_control(&ui, "Always on top").is_none(), "a row that does not match is hidden");
+    assert!(setting_control(&ui, "System").is_none(), "so are other groups' rows");
+    assert_eq!(group_header(&ui, "Window and tray").accessible_expanded(), Some(true), "a group with a match opens");
+    assert!(try_group_header(&ui, "Updates").is_none(), "a group with no match is hidden");
+    assert!(text(&ui, NO_MATCH).is_none());
+    assert_eq!(settings.borrow().collapsed_groups, ["window"], "a search saves nothing");
+}
+
+#[test]
+fn search_matches_descriptions() {
+    let dir = Scratch::new("search-desc");
+    let (ui, _, _) = settings_wired(&dir, Settings::default(), false);
+    search_settings(&ui, "BLUR");
+    assert!(setting_control(&ui, "Mica").is_some(), "Backdrop's description mentions blur");
+    assert!(setting_control(&ui, "System").is_none());
+}
+
+#[test]
+fn a_search_with_no_match_says_so() {
+    let dir = Scratch::new("search-none");
+    let (ui, _, _) = settings_wired(&dir, Settings::default(), false);
+    assert!(text(&ui, NO_MATCH).is_none(), "not before a search");
+    search_settings(&ui, "zzz");
+    assert!(text(&ui, NO_MATCH).is_some());
+    for (name, _) in SETTING_GROUP_ROWS {
+        assert!(try_group_header(&ui, name).is_none(), "{name} is hidden");
+    }
+}
+
+#[test]
+fn a_search_for_a_hidden_row_says_no_match() {
+    let dir = Scratch::new("search-tint");
+    let (ui, _, _) = settings_wired(&dir, Settings::default(), false);
+    // Mica: the Tint rows are not offered, so "tint" finds nothing.
+    search_settings(&ui, "tint");
+    assert!(text(&ui, NO_MATCH).is_some());
+    assert!(try_group_header(&ui, "Appearance").is_none());
+}
+
+#[test]
+fn clearing_the_search_restores_saved_groups_and_saves_nothing() {
+    let dir = Scratch::new("search-clear");
+    let path = dir.0.join("settings.json");
+    let (ui, _, settings) = settings_wired(&dir, Settings::default(), false);
+    group_header(&ui, "Updates").invoke_accessible_default_action();
+    search_settings(&ui, "update");
+    assert_eq!(group_header(&ui, "Updates").accessible_expanded(), Some(true), "opened by the search");
+    search_settings(&ui, "top");
+    switch(&ui, "Always on top").invoke_accessible_default_action();
+    search_settings(&ui, "");
+    assert_eq!(group_header(&ui, "Updates").accessible_expanded(), Some(false), "closed again");
+    assert!(setting_control(&ui, "Check for updates on startup").is_none());
+    assert!(setting_control(&ui, "System").is_some(), "every other row is back");
+    assert_eq!(settings.borrow().collapsed_groups, ["updates"]);
+    saved(&path, "on top, updates still closed", |s| s.always_on_top && s.collapsed_groups == ["updates"]);
+}
+
+#[test]
+fn an_open_modal_disables_the_search() {
+    let ui = settings_window(1000, 2600);
+    ui.set_details_visible(true);
+    assert_eq!(search_box(&ui).accessible_enabled(), Some(false));
+}
