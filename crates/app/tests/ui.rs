@@ -3561,6 +3561,8 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
     ui.on_tray_cpu_toggled(move |_| l.borrow_mut().push("Show CPU in tray icon".into()));
     let l = log.clone();
     ui.on_select_page(move |i| l.borrow_mut().push(format!("page {i}")));
+    // Space types into the search box on the way: match the way the app does.
+    ui.on_setting_matches(|q, t, d| negotium::settings::setting_matches(&q, &t, &d));
     let in_view = |e: &El| {
         let r = rect_of(e);
         r.1 >= 0.0 && r.1 + r.3 <= 440.0
@@ -3572,7 +3574,7 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
         log.borrow().last().cloned()
     };
     let mut seen: Vec<String> = Vec::new();
-    for _ in 0..30 {
+    for _ in 0..60 {
         press_key(&ui, Key::Tab);
         let Some(now) = current(&ui) else { continue };
         let control = match now.as_str() {
@@ -3600,7 +3602,7 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
     assert!(seen.contains(&"Show CPU in tray icon".to_string()), "{seen:?}");
     // And back up: the first choice comes back into view.
     let mut back = None;
-    for _ in 0..30 {
+    for _ in 0..60 {
         press_key(&ui, Key::Backtab);
         back = current(&ui);
         if back.as_deref() == Some("refresh 0") {
@@ -5629,11 +5631,12 @@ fn an_open_modal_disables_the_group_headers() {
 #[test]
 fn group_headers_wrap_at_the_smallest_window() {
     use i_slint_backend_testing::ElementRoot;
-    let ui = settings_window(760, 440);
+    // The smallest width; tall, because the testing backend finds only what the view shows.
+    let ui = settings_window(760, 2600);
     let headers = ui.root_element().query_descendants().match_id("SettingGroup::header").find_all();
     let summaries = ui.root_element().query_descendants().match_id("SettingGroup::summary").find_all();
     let chevrons = ui.root_element().query_descendants().match_id("SettingGroup::chevron").find_all();
-    assert!(!headers.is_empty() && headers.len() == summaries.len() && headers.len() == chevrons.len());
+    assert!(headers.len() == 7 && headers.len() == summaries.len() && headers.len() == chevrons.len(), "one summary and chevron per header");
     for ((h, s), c) in headers.iter().zip(&summaries).zip(&chevrons) {
         let (h, s, c) = (rect_of(h), rect_of(s), rect_of(c));
         assert!(s.1 + s.3 <= h.1 + h.3, "the summary fits in its header: {s:?} {h:?}");

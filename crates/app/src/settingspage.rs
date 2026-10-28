@@ -668,6 +668,7 @@ impl SettingsWiring {
         }
         {
             let change = change.clone();
+            ui.on_setting_matches(|q, t, d| crate::settings::setting_matches(&q, &t, &d));
             // A negative index wraps to one past every group: toggle_group ignores it.
             ui.on_settings_group_toggled(move |i| {
                 change.apply(|s| s.toggle_group(i as usize));

@@ -334,6 +334,77 @@ export component SettingsPage inherits VerticalLayout {
     // Whether a row with this title and description matches the search (crate::settings::setting_matches).
     pure callback setting-matches(string, string, string) -> bool;
     property <string> search-text;
+    // Each row's title and description (its control reads them out) and whether it matches the
+    // search; a group shows while any of its rows does. The Tint rows exist with Acrylic only.
+    property <bool> searching: root.search-text != "";
+    property <string> theme-row-title: "Theme";
+    property <string> theme-row-desc: "System follows Windows' light or dark mode.";
+    property <bool> theme-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.theme-row-title, root.theme-row-desc);
+    property <string> backdrop-row-title: "Backdrop";
+    property <string> backdrop-row-desc: "Mica takes its colour from the desktop background. Acrylic blurs the windows behind Negotium. Needs GPU rendering.";
+    property <bool> backdrop-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.backdrop-row-title, root.backdrop-row-desc);
+    property <string> tint-row-title: "Tint colour";
+    property <string> tint-row-desc: "The colour on top of Acrylic. Default colour follows light or dark mode.";
+    property <bool> tint-row-hit: root.backdrop == 1 && (root.search-text == "" || root.setting-matches(root.search-text, root.tint-row-title, root.tint-row-desc));
+    property <string> opacity-row-title: "Tint opacity";
+    property <string> opacity-row-desc: "Move to the left to see more of the windows behind Negotium. Move to the right for a stronger tint.";
+    property <bool> opacity-row-hit: root.backdrop == 1 && (root.search-text == "" || root.setting-matches(root.search-text, root.opacity-row-title, root.opacity-row-desc));
+    property <string> smooth-row-title: "Smooth graphs";
+    property <string> smooth-row-desc: "Graphs scroll continuously between updates instead of stepping. Turn off to use a little less CPU.";
+    property <bool> smooth-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.smooth-row-title, root.smooth-row-desc);
+    property <bool> appearance-hit: root.theme-row-hit || root.backdrop-row-hit || root.tint-row-hit || root.opacity-row-hit || root.smooth-row-hit;
+    property <string> top-row-title: "Always on top";
+    property <string> top-row-desc: "Keep Negotium above other windows.";
+    property <bool> top-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.top-row-title, root.top-row-desc);
+    property <string> tray-row-title: "Keep running in the tray when closed";
+    property <string> tray-row-desc: "Closing the window keeps Negotium in the notification area: history keeps recording and reopening is instant.";
+    property <bool> tray-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.tray-row-title, root.tray-row-desc);
+    property <string> tray-cpu-row-title: "Show CPU in tray icon";
+    property <string> tray-cpu-row-desc: "The tray icon draws the last minute of CPU use; point at it to see the current value.";
+    property <bool> tray-cpu-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.tray-cpu-row-title, root.tray-cpu-row-desc);
+    property <bool> window-hit: root.top-row-hit || root.tray-row-hit || root.tray-cpu-row-hit;
+    property <string> refresh-row-title: "Refresh rate";
+    property <string> refresh-row-desc: "How often numbers update while the window is open. In the tray Negotium updates every 2 s, or slower if you choose a slower rate.";
+    property <bool> refresh-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.refresh-row-title, root.refresh-row-desc);
+    property <string> group-row-title: "Group apps by type";
+    property <string> group-row-desc: "Apps, background processes and Windows processes under their own headings";
+    property <bool> group-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.group-row-title, root.group-row-desc);
+    property <string> aequilibrium-row-title: "Aequilibrium (Runaway CPU restraint)";
+    property <string> aequilibrium-row-desc: "Automatically throttles background processes consuming high CPU when the system is under pressure, keeping the desktop responsive.";
+    property <bool> aequilibrium-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.aequilibrium-row-title, root.aequilibrium-row-desc);
+    property <bool> processes-hit: root.refresh-row-hit || root.group-row-hit || root.aequilibrium-row-hit;
+    property <string> start-row-title: "Start with Windows";
+    property <string> start-row-desc: "Open Negotium in the tray when you sign in.";
+    property <bool> start-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.start-row-title, root.start-row-desc);
+    property <string> admin-row-title: "Admin mode";
+    property <string> admin-row-desc: "Start with admin rights without a prompt. Anything that can start Negotium can then open it with admin rights, without a prompt.";
+    property <bool> admin-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.admin-row-title, root.admin-row-desc);
+    property <string> hotkey-row-title: "Open on Ctrl+Shift+Esc";
+    property <string> hotkey-row-desc: "Open Negotium instead of Task Manager. Turning this on replaces another tool's Task Manager replacement, such as Process Explorer's.";
+    property <bool> hotkey-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.hotkey-row-title, root.hotkey-row-desc);
+    property <string> picker-row-title: "Pick a window to end on Ctrl+Alt+Shift+Esc";
+    property <string> picker-row-desc: "Press the keys, then click a window to end its app. Shift+click ends it with no question.";
+    property <bool> picker-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.picker-row-title, root.picker-row-desc);
+    property <bool> startup-hit: root.start-row-hit || root.admin-row-hit || root.hotkey-row-hit || root.picker-row-hit;
+    property <string> updates-row-title: "Check for updates on startup";
+    property <string> updates-row-desc: "Look for a newer version of Negotium each time it starts.";
+    property <bool> updates-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.updates-row-title, root.updates-row-desc);
+    property <string> check-row-title: "Check for updates now";
+    property <string> check-row-desc: "Look for a newer version of Negotium.";
+    property <bool> check-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.check-row-title, root.check-row-desc);
+    property <bool> updates-hit: root.updates-row-hit || root.check-row-hit;
+    property <string> temp-row-title: "CPU temperature add-on";
+    property <string> temp-row-desc: "Show the CPU temperature (installs the PawnIO driver from its publisher).";
+    property <bool> temp-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.temp-row-title, root.temp-row-desc);
+    property <bool> addons-hit: root.temp-row-hit;
+    property <string> gpu-row-title: "Use GPU rendering";
+    property <string> gpu-row-desc: "Draw the window with the graphics card: smoother resizing. Turn off if the window shows glitches.";
+    property <bool> gpu-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.gpu-row-title, root.gpu-row-desc);
+    property <string> taskmgr-row-title: "Windows Task Manager";
+    property <string> taskmgr-row-desc: "Open the original Task Manager, whatever Ctrl+Shift+Esc does.";
+    property <bool> taskmgr-row-hit: root.search-text == "" || root.setting-matches(root.search-text, root.taskmgr-row-title, root.taskmgr-row-desc);
+    property <bool> advanced-hit: root.gpu-row-hit || root.taskmgr-row-hit;
+    property <bool> any-hit: root.appearance-hit || root.window-hit || root.processes-hit || root.startup-hit || root.updates-hit || root.addons-hit || root.advanced-hit;
     // Room kept free below the last row (the floating toast), so it can be scrolled clear.
     in property <length> bottom-inset;
     callback refresh-chosen(int);
@@ -402,18 +473,24 @@ export component SettingsPage inherits VerticalLayout {
                 accessible-label: "Search settings";
                 enabled: root.interactive;
             }
-            appearance-group := SettingGroup {
+            if !root.any-hit : Text {
+                text: "No settings match your search.";
+                color: Theme.muted;
+                font-size: 13px;
+                vertical-stretch: 0;
+            }
+            if root.appearance-hit : appearance-group := SettingGroup {
                 title: "Appearance";
                 summary: "Theme, backdrop, tint and graphs";
-                open: root.groups-open[0];
+                open: root.searching || root.groups-open[0];
                 interactive: root.interactive;
                 toggled => { root.group-toggled(0); }
                 focus-gained => { sv.reveal(appearance-group.absolute-position.y, 44px); }
-                if root.groups-open[0] : VerticalLayout {
+                if root.searching || root.groups-open[0] : VerticalLayout {
                     spacing: 10px;
-                    theme-row := SettingRow {
-                        title: "Theme";
-                        description: "System follows Windows' light or dark mode.";
+                    if root.theme-row-hit : theme-row := SettingRow {
+                        title: root.theme-row-title;
+                        description: root.theme-row-desc;
                         Choice {
                             label: theme-row.title;
                             description: theme-row.description;
@@ -424,9 +501,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(theme-row.absolute-position.y, theme-row.height); }
                         }
                     }
-                    backdrop-row := SettingRow {
-                        title: "Backdrop";
-                        description: "Mica takes its colour from the desktop background. Acrylic blurs the windows behind Negotium. Needs GPU rendering.";
+                    if root.backdrop-row-hit : backdrop-row := SettingRow {
+                        title: root.backdrop-row-title;
+                        description: root.backdrop-row-desc;
                         Choice {
                             label: backdrop-row.title;
                             description: backdrop-row.description;
@@ -438,9 +515,9 @@ export component SettingsPage inherits VerticalLayout {
                         }
                     }
                     // The layer Negotium draws over Acrylic (Theme.acrylic-tint); Mica has none.
-                    if root.backdrop == 1 : tint-row := SettingRow {
-                        title: "Tint colour";
-                        description: "The colour on top of Acrylic. Default colour follows light or dark mode.";
+                    if root.tint-row-hit : tint-row := SettingRow {
+                        title: root.tint-row-title;
+                        description: root.tint-row-desc;
                         Rectangle {
                             accessible-role: groupbox;
                             accessible-label: tint-row.title;
@@ -477,9 +554,9 @@ export component SettingsPage inherits VerticalLayout {
                             }
                         }
                     }
-                    if root.backdrop == 1 : opacity-row := SettingRow {
-                        title: "Tint opacity";
-                        description: "Move to the left to see more of the windows behind Negotium. Move to the right for a stronger tint.";
+                    if root.opacity-row-hit : opacity-row := SettingRow {
+                        title: root.opacity-row-title;
+                        description: root.opacity-row-desc;
                         // One-way: a drag breaks the binding, and the opacity is then a saved percent that
                         // no longer follows the mode, so the two agree. Rust saves only a new percent.
                         Slider {
@@ -498,9 +575,9 @@ export component SettingsPage inherits VerticalLayout {
                             }
                         }
                     }
-                    smooth-row := SettingRow {
-                        title: "Smooth graphs";
-                        description: "Graphs scroll continuously between updates instead of stepping. Turn off to use a little less CPU.";
+                    if root.smooth-row-hit : smooth-row := SettingRow {
+                        title: root.smooth-row-title;
+                        description: root.smooth-row-desc;
                         Toggle {
                             label: smooth-row.title;
                             description: smooth-row.description;
@@ -512,18 +589,18 @@ export component SettingsPage inherits VerticalLayout {
                     }
                 }
             }
-            window-group := SettingGroup {
+            if root.window-hit : window-group := SettingGroup {
                 title: "Window and tray";
                 summary: "Always on top and the tray icon";
-                open: root.groups-open[1];
+                open: root.searching || root.groups-open[1];
                 interactive: root.interactive;
                 toggled => { root.group-toggled(1); }
                 focus-gained => { sv.reveal(window-group.absolute-position.y, 44px); }
-                if root.groups-open[1] : VerticalLayout {
+                if root.searching || root.groups-open[1] : VerticalLayout {
                     spacing: 10px;
-                    top-row := SettingRow {
-                        title: "Always on top";
-                        description: "Keep Negotium above other windows.";
+                    if root.top-row-hit : top-row := SettingRow {
+                        title: root.top-row-title;
+                        description: root.top-row-desc;
                         Toggle {
                             label: top-row.title;
                             description: top-row.description;
@@ -533,9 +610,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(top-row.absolute-position.y, top-row.height); }
                         }
                     }
-                    tray-row := SettingRow {
-                        title: "Keep running in the tray when closed";
-                        description: "Closing the window keeps Negotium in the notification area: history keeps recording and reopening is instant.";
+                    if root.tray-row-hit : tray-row := SettingRow {
+                        title: root.tray-row-title;
+                        description: root.tray-row-desc;
                         Toggle {
                             label: tray-row.title;
                             description: tray-row.description;
@@ -545,9 +622,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(tray-row.absolute-position.y, tray-row.height); }
                         }
                     }
-                    tray-cpu-row := SettingRow {
-                        title: "Show CPU in tray icon";
-                        description: "The tray icon draws the last minute of CPU use; point at it to see the current value.";
+                    if root.tray-cpu-row-hit : tray-cpu-row := SettingRow {
+                        title: root.tray-cpu-row-title;
+                        description: root.tray-cpu-row-desc;
                         Toggle {
                             label: tray-cpu-row.title;
                             description: tray-cpu-row.description;
@@ -559,18 +636,18 @@ export component SettingsPage inherits VerticalLayout {
                     }
                 }
             }
-            processes-group := SettingGroup {
+            if root.processes-hit : processes-group := SettingGroup {
                 title: "Processes";
                 summary: "Refresh rate, grouping and Aequilibrium";
-                open: root.groups-open[2];
+                open: root.searching || root.groups-open[2];
                 interactive: root.interactive;
                 toggled => { root.group-toggled(2); }
                 focus-gained => { sv.reveal(processes-group.absolute-position.y, 44px); }
-                if root.groups-open[2] : VerticalLayout {
+                if root.searching || root.groups-open[2] : VerticalLayout {
                     spacing: 10px;
-                    refresh-row := SettingRow {
-                        title: "Refresh rate";
-                        description: "How often numbers update while the window is open. In the tray Negotium updates every 2 s, or slower if you choose a slower rate.";
+                    if root.refresh-row-hit : refresh-row := SettingRow {
+                        title: root.refresh-row-title;
+                        description: root.refresh-row-desc;
                         Choice {
                             label: refresh-row.title;
                             description: refresh-row.description;
@@ -581,9 +658,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(refresh-row.absolute-position.y, refresh-row.height); }
                         }
                     }
-                    group-row := SettingRow {
-                        title: "Group apps by type";
-                        description: "Apps, background processes and Windows processes under their own headings";
+                    if root.group-row-hit : group-row := SettingRow {
+                        title: root.group-row-title;
+                        description: root.group-row-desc;
                         Toggle {
                             label: group-row.title;
                             description: group-row.description;
@@ -593,9 +670,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(group-row.absolute-position.y, group-row.height); }
                         }
                     }
-                    aequilibrium-row := SettingRow {
-                        title: "Aequilibrium (Runaway CPU restraint)";
-                        description: "Automatically throttles background processes consuming high CPU when the system is under pressure, keeping the desktop responsive.";
+                    if root.aequilibrium-row-hit : aequilibrium-row := SettingRow {
+                        title: root.aequilibrium-row-title;
+                        description: root.aequilibrium-row-desc;
                         Toggle {
                             label: aequilibrium-row.title;
                             description: aequilibrium-row.description;
@@ -607,18 +684,18 @@ export component SettingsPage inherits VerticalLayout {
                     }
                 }
             }
-            startup-group := SettingGroup {
+            if root.startup-hit : startup-group := SettingGroup {
                 title: "Startup and shortcuts";
                 summary: "Start with Windows, admin mode and shortcut keys";
-                open: root.groups-open[3];
+                open: root.searching || root.groups-open[3];
                 interactive: root.interactive;
                 toggled => { root.group-toggled(3); }
                 focus-gained => { sv.reveal(startup-group.absolute-position.y, 44px); }
-                if root.groups-open[3] : VerticalLayout {
+                if root.searching || root.groups-open[3] : VerticalLayout {
                     spacing: 10px;
-                    start-row := SettingRow {
-                        title: "Start with Windows";
-                        description: "Open Negotium in the tray when you sign in.";
+                    if root.start-row-hit : start-row := SettingRow {
+                        title: root.start-row-title;
+                        description: root.start-row-desc;
                         note: root.installed ? "" : "Install Negotium to use this";
                         available: root.installed;
                         Toggle {
@@ -630,9 +707,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(start-row.absolute-position.y, start-row.height); }
                         }
                     }
-                    admin-row := SettingRow {
-                        title: "Admin mode";
-                        description: "Start with admin rights without a prompt. Anything that can start Negotium can then open it with admin rights, without a prompt.";
+                    if root.admin-row-hit : admin-row := SettingRow {
+                        title: root.admin-row-title;
+                        description: root.admin-row-desc;
                         note: !root.installed ? "Install Negotium to use this"
                             : root.admin-mode-state == 2 ? "Needs repair. Turn on again to repair"
                             : root.admin-mode-state == 3 ? "Needs an administrator account" : "";
@@ -648,9 +725,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(admin-row.absolute-position.y, admin-row.height); }
                         }
                     }
-                    hotkey-row := SettingRow {
-                        title: "Open on Ctrl+Shift+Esc";
-                        description: "Open Negotium instead of Task Manager. Turning this on replaces another tool's Task Manager replacement, such as Process Explorer's.";
+                    if root.hotkey-row-hit : hotkey-row := SettingRow {
+                        title: root.hotkey-row-title;
+                        description: root.hotkey-row-desc;
                         note: root.installed ? "" : "Install Negotium to use this";
                         available: root.installed;
                         Toggle {
@@ -662,11 +739,11 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(hotkey-row.absolute-position.y, hotkey-row.height); }
                         }
                     }
-                    picker-row := SettingRow {
-                        title: "Pick a window to end on Ctrl+Alt+Shift+Esc";
+                    if root.picker-row-hit : picker-row := SettingRow {
+                        title: root.picker-row-title;
                         description: root.shortcut-taken
                             ? "Another program uses Ctrl+Alt+Shift+Esc"
-                            : "Press the keys, then click a window to end its app. Shift+click ends it with no question.";
+                            : root.picker-row-desc;
                         Toggle {
                             label: picker-row.title;
                             description: picker-row.description;
@@ -678,18 +755,18 @@ export component SettingsPage inherits VerticalLayout {
                     }
                 }
             }
-            updates-group := SettingGroup {
+            if root.updates-hit : updates-group := SettingGroup {
                 title: "Updates";
                 summary: "Update checks";
-                open: root.groups-open[4];
+                open: root.searching || root.groups-open[4];
                 interactive: root.interactive;
                 toggled => { root.group-toggled(4); }
                 focus-gained => { sv.reveal(updates-group.absolute-position.y, 44px); }
-                if root.groups-open[4] : VerticalLayout {
+                if root.searching || root.groups-open[4] : VerticalLayout {
                     spacing: 10px;
-                    updates-row := SettingRow {
-                        title: "Check for updates on startup";
-                        description: "Look for a newer version of Negotium each time it starts.";
+                    if root.updates-row-hit : updates-row := SettingRow {
+                        title: root.updates-row-title;
+                        description: root.updates-row-desc;
                         note: root.installed ? "" : "Install Negotium to use this";
                         available: root.installed;
                         Toggle {
@@ -701,9 +778,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(updates-row.absolute-position.y, updates-row.height); }
                         }
                     }
-                    check-row := SettingRow {
-                        title: "Check for updates now";
-                        description: "Look for a newer version of Negotium.";
+                    if root.check-row-hit : check-row := SettingRow {
+                        title: root.check-row-title;
+                        description: root.check-row-desc;
                         note: root.installed ? root.update-status : "Install Negotium to use this";
                         available: root.installed;
                         ActionButton {
@@ -716,19 +793,19 @@ export component SettingsPage inherits VerticalLayout {
                     }
                 }
             }
-            addons-group := SettingGroup {
+            if root.addons-hit : addons-group := SettingGroup {
                 title: "Add-ons";
                 summary: "CPU temperature";
-                open: root.groups-open[5];
+                open: root.searching || root.groups-open[5];
                 interactive: root.interactive;
                 toggled => { root.group-toggled(5); }
                 focus-gained => { sv.reveal(addons-group.absolute-position.y, 44px); }
-                if root.groups-open[5] : VerticalLayout {
+                if root.searching || root.groups-open[5] : VerticalLayout {
                     spacing: 10px;
-                    if !root.pawnio-installed : Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
-                    temp-row := SettingRow {
-                        title: "CPU temperature add-on";
-                        description: "Show the CPU temperature (installs the PawnIO driver from its publisher).";
+                    if !root.pawnio-installed && root.temp-row-hit : Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
+                    if root.temp-row-hit : temp-row := SettingRow {
+                        title: root.temp-row-title;
+                        description: root.temp-row-desc;
                         note: root.pawnio-installed ? "PawnIO driver detected and active" : "";
                         available: root.pawnio-installed;
                         Toggle {
@@ -740,18 +817,18 @@ export component SettingsPage inherits VerticalLayout {
                     }
                 }
             }
-            advanced-group := SettingGroup {
+            if root.advanced-hit : advanced-group := SettingGroup {
                 title: "Advanced";
                 summary: "GPU rendering and Windows Task Manager";
-                open: root.groups-open[6];
+                open: root.searching || root.groups-open[6];
                 interactive: root.interactive;
                 toggled => { root.group-toggled(6); }
                 focus-gained => { sv.reveal(advanced-group.absolute-position.y, 44px); }
-                if root.groups-open[6] : VerticalLayout {
+                if root.searching || root.groups-open[6] : VerticalLayout {
                     spacing: 10px;
-                    gpu-row := SettingRow {
-                        title: "Use GPU rendering";
-                        description: "Draw the window with the graphics card: smoother resizing. Turn off if the window shows glitches.";
+                    if root.gpu-row-hit : gpu-row := SettingRow {
+                        title: root.gpu-row-title;
+                        description: root.gpu-row-desc;
                         note: root.gpu-fallback
                             ? "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again."
                             : root.gpu-env-override
@@ -766,9 +843,9 @@ export component SettingsPage inherits VerticalLayout {
                             focus-gained => { sv.reveal(gpu-row.absolute-position.y, gpu-row.height); }
                         }
                     }
-                    taskmgr-row := SettingRow {
-                        title: "Windows Task Manager";
-                        description: "Open the original Task Manager, whatever Ctrl+Shift+Esc does.";
+                    if root.taskmgr-row-hit : taskmgr-row := SettingRow {
+                        title: root.taskmgr-row-title;
+                        description: root.taskmgr-row-desc;
                         ActionButton {
                             label: "Open Windows Task Manager";
                             shown: "Open";
