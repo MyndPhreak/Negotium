@@ -1994,7 +1994,7 @@ fn row_texts(ui: &MainWindow, id: &str) -> Vec<Rect> {
 #[test]
 fn the_settings_page_reports_each_choice() {
     // Tall enough for every row: the testing backend finds only what the page's view shows.
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     ui.set_settings_keep_in_tray(true);
     let log = Rc::new(RefCell::new(Vec::<String>::new()));
     let l = log.clone();
@@ -2039,7 +2039,7 @@ fn choices_and_switches_show_the_current_settings() {
 #[test]
 fn later_version_settings_are_shown_disabled() {
     // Tall enough for the last row: the testing backend finds only what the page's view shows.
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     assert!(text(&ui, "Coming in a later version").is_some());
     let s = switch(&ui, "CPU temperature add-on");
     assert_eq!(s.accessible_enabled(), Some(false));
@@ -2095,7 +2095,7 @@ const INSTALL_ROWS: [&str; 4] = ["Admin mode", "Open on Ctrl+Shift+Esc", "Start 
 
 #[test]
 fn a_dev_build_disables_the_integration_rows_and_says_why() {
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "target\release\negotium.exe".into(), installed: false });
     for label in INSTALL_ROWS {
         let s = switch(&ui, label);
@@ -2112,7 +2112,7 @@ fn a_dev_build_disables_the_integration_rows_and_says_why() {
 
 #[test]
 fn an_installed_copy_offers_the_integration_rows_and_reports_them() {
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "x".into(), installed: true });
     let log = Rc::new(RefCell::new(Vec::<String>::new()));
     let l = log.clone();
@@ -2139,7 +2139,7 @@ fn an_installed_copy_offers_the_integration_rows_and_reports_them() {
 
 #[test]
 fn the_version_line_says_development_build_when_not_installed() {
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     let v = negotium::install::VERSION;
     negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: "x".into(), installed: false });
     assert_eq!(ui.get_version_text().as_str(), format!("Version {v} (development build)"));
@@ -2278,7 +2278,7 @@ fn settings_wired_integrated(
 ) -> (MainWindow, Arc<Controls>, Rc<RefCell<Settings>>, Rc<negotium::settingspage::Integrations>) {
     let ui = shown_window();
     // Tall enough for every row: the testing backend finds only what the page's view shows.
-    ui.window().set_size(PhysicalSize::new(1000, 1700));
+    ui.window().set_size(PhysicalSize::new(1000, 2600));
     ui.set_page(3);
     let controls = Arc::new(Controls::default());
     let settings = Rc::new(RefCell::new(s));
@@ -2449,7 +2449,7 @@ fn start_with_windows_is_the_run_value_without_admin_mode() {
     let path = dir.0.join("settings.json");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     fake.read();
     let checked = || switch(&ui, STARTUP).accessible_checked();
     assert_eq!(checked(), Some(false));
@@ -2495,7 +2495,7 @@ fn start_with_windows_is_the_tasks_trigger_in_admin_mode() {
     // A stray Run value doesn't count in admin mode.
     *fake.run.borrow_mut() = Some(our_run_value());
     let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     let checked = || switch(&ui, STARTUP).accessible_checked();
     assert_eq!(checked(), Some(false), "the saved choice until the task is read");
     fake.read();
@@ -2554,7 +2554,7 @@ fn an_unreadable_trigger_keeps_the_saved_start_with_windows() {
     fake.set_task(TaskState::Broken("it couldn't be read: the service is not running".into()));
     let s = Settings { start_with_windows: true, ..Settings::default() };
     let (ui, _, settings, integrations) = settings_wired_integrated(&dir, s, false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     fake.read();
     integrations.show();
     fake.read();
@@ -2585,7 +2585,7 @@ fn start_with_windows_waits_for_the_first_task_read() {
     let dir = Scratch::new("startup-early");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, _, _) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     switch(&ui, STARTUP).invoke_accessible_default_action();
     assert!(fake.asked.borrow().is_empty(), "nothing runs");
     assert_eq!(switch(&ui, STARTUP).accessible_checked(), Some(false), "snapped back");
@@ -2600,7 +2600,7 @@ fn a_dev_build_never_reads_or_changes_start_with_windows() {
     let (integration, fake) = FakeIntegration::new(false);
     *fake.run.borrow_mut() = Some(our_run_value());
     let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     assert_eq!(switch(&ui, STARTUP).accessible_checked(), Some(false));
     integrations.toggle_start_with_windows(true);
     assert!(fake.asked.borrow().is_empty());
@@ -2621,7 +2621,7 @@ fn the_hotkey_switch_shows_the_machine_state() {
     let dir = Scratch::new("hotkey");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     let checked = || switch(&ui, HOTKEY).accessible_checked();
     assert_eq!(checked(), Some(false), "no redirect");
     for (redirect, on) in [
@@ -2674,7 +2674,7 @@ fn open_windows_task_manager_lifts_only_our_redirect() {
     let dir = Scratch::new("taskmgr");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     // No redirect, or another tool's: Task Manager just starts.
     for redirect in [None, Some(r"C:\Tools\procexp64.exe")] {
         fake.set_redirect(redirect);
@@ -2697,7 +2697,7 @@ fn a_dev_build_never_runs_the_hotkey_command() {
     // Even with the installed copy's redirect on, a dev build's switch is off and asks nothing.
     fake.set_redirect(Some(INSTALLED_EXE));
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
     integrations.toggle_hotkey(true);
     assert!(!ui.get_settings_hotkey());
@@ -2712,7 +2712,7 @@ fn a_dev_build_asks_the_installed_copy_to_lift_its_redirect() {
     let dir = Scratch::new("taskmgr-dev");
     let (integration, fake) = FakeIntegration::new(false);
     let (ui, _, _, _) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     // No redirect, another tool's, or one naming this build: Task Manager just starts.
     for redirect in [None, Some(r"C:\Tools\procexp64.exe"), Some(DEV_EXE)] {
         fake.set_redirect(redirect);
@@ -2738,7 +2738,7 @@ fn the_admin_mode_switch_shows_the_task_and_runs_the_elevated_command() {
     let dir = Scratch::new("admin");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, settings, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     fake.read();
     let checked = || switch(&ui, ADMIN).accessible_checked();
     assert_eq!(checked(), Some(false), "no task");
@@ -2845,7 +2845,7 @@ fn a_command_that_outlasts_the_wait_refreshes_the_switches_when_it_exits() {
     let dir = Scratch::new("hotkey-late");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     integrations.toggle_hotkey(true);
     fake.finish(Err(negotium_actions::ActionError::Other("the elevated command didn't finish within 30 seconds".into())));
     assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
@@ -2862,7 +2862,7 @@ fn admin_mode_needs_repair_when_the_task_is_broken() {
     let (integration, fake) = FakeIntegration::new(true);
     fake.set_task(TaskState::Broken("its exe is gone".into()));
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     for state in [TaskState::Broken("its exe is gone".into()), TaskState::Disabled] {
         fake.set_task(state.clone());
         integrations.show();
@@ -2894,7 +2894,7 @@ fn a_standard_account_cannot_turn_on_admin_mode() {
     let (integration, fake) = FakeIntegration::for_account(true, false);
     fake.set_task(TaskState::Ready);
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     assert_eq!(ui.get_settings_admin_mode_state(), 3);
     let s = switch(&ui, ADMIN);
     assert_eq!(s.accessible_enabled(), Some(false));
@@ -2915,7 +2915,7 @@ fn a_dev_build_never_reads_or_runs_admin_mode() {
     let (integration, fake) = FakeIntegration::new(false);
     fake.set_task(negotium::integrate::TaskState::Ready);
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(false));
     assert_eq!(switch(&ui, ADMIN).accessible_description().as_deref(), Some("Install Negotium to use this"));
     integrations.toggle_admin_mode(true);
@@ -2929,7 +2929,7 @@ fn the_switches_read_the_machine_when_the_settings_page_is_shown() {
     let dir = Scratch::new("integration-refresh");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, _, integrations) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700)); // every row on screen
+    ui.window().set_size(PhysicalSize::new(1000, 2600)); // every row on screen
     fake.read();
     assert_eq!(switch(&ui, HOTKEY).accessible_checked(), Some(false));
     assert_eq!(switch(&ui, ADMIN).accessible_checked(), Some(false));
@@ -3206,7 +3206,7 @@ fn moving_the_opacity_slider_applies_at_once_and_is_saved() {
 
 #[test]
 fn the_tint_controls_report_each_choice() {
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     ui.set_settings_backdrop(1);
     let log = Rc::new(RefCell::new(Vec::<String>::new()));
     let l = log.clone();
@@ -3492,8 +3492,8 @@ fn a_tall_window_leaves_the_settings_their_size_and_place() {
         let ui = settings_window(1000, h);
         (settings_rects(&ui), rect_of(&text(&ui, "Settings").expect("page title")))
     };
-    let (short, short_title) = measure(1700);
-    let (tall, tall_title) = measure(2400);
+    let (short, short_title) = measure(2600);
+    let (tall, tall_title) = measure(3400);
     assert_eq!(short_title, tall_title, "the title stays at the top");
     assert_eq!(short, tall, "no setting moves or grows in a taller window");
     for (label, r) in &tall {
@@ -3506,11 +3506,12 @@ const REFRESH_DESC: &str = "How often numbers update while the window is open. I
 #[test]
 fn settings_rows_wrap_without_overlap_at_the_smallest_window() {
     let ui = settings_window(760, 440);
-    let theme = row_texts(&ui, "title")[1];
-    let desc = row_texts(&ui, "description")[0];
+    // Appearance comes first: Theme, then Backdrop (a long description), then Smooth graphs.
+    let next = row_texts(&ui, "title")[2];
+    let desc = row_texts(&ui, "description")[1];
     assert!(desc.3 > 20.0, "the long description wraps onto more lines: {desc:?}");
-    assert!(desc.1 + desc.3 <= theme.1, "the next row starts below it: {desc:?} {theme:?}");
-    let choice = rect_of(&radio(&ui, "5 s"));
+    assert!(desc.1 + desc.3 <= next.1, "the next row starts below it: {desc:?} {next:?}");
+    let choice = rect_of(&radio(&ui, "Acrylic"));
     assert!(choice.0 >= desc.0 + desc.2, "the choices stay to the right of the text: {choice:?} {desc:?}");
     // Rail 76 px; the page's scrollbar gutter is 14 px.
     assert!(choice.0 + choice.2 <= 760.0 - 14.0, "and clear of the scrollbar gutter: {choice:?}");
@@ -3615,7 +3616,7 @@ fn a_control_reached_with_tab_is_scrolled_into_view() {
 #[test]
 fn screen_readers_hear_each_setting_once_with_its_description() {
     // Tall enough for every row: the testing backend finds only what the page's view shows.
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     let group = El::find_by_accessible_label(&ui, "Refresh rate")
         .find(|e| e.accessible_role() == Some(AccessibleRole::Groupbox))
         .expect("the refresh choices are a labelled group");
@@ -5079,7 +5080,7 @@ fn the_startup_check_follows_the_switch_and_skips_a_dev_build() {
 
 #[test]
 fn check_for_updates_says_what_it_found() {
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: INSTALLED_EXE.into(), installed: true });
     let (_updater, fake) = FakeUpdates::wire(&ui, true);
     let check = || button(&ui, "Check for updates").expect("the button").invoke_accessible_default_action();
@@ -5173,7 +5174,7 @@ fn a_declined_uac_prompt_keeps_negotium_running() {
 
 #[test]
 fn a_check_landing_during_the_download_changes_nothing() {
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     negotium::settingspage::show_install(&ui, &negotium::install::Install { exe: INSTALLED_EXE.into(), installed: true });
     let (updater, fake) = FakeUpdates::wire(&ui, true);
     updater.startup(true);
@@ -5194,7 +5195,7 @@ fn the_startup_check_switch_is_saved() {
     let path = dir.0.join("settings.json");
     let (integration, fake) = FakeIntegration::new(true);
     let (ui, _, settings, _) = settings_wired_integrated(&dir, Settings::default(), false, Renderer::Software, integration);
-    ui.window().set_size(PhysicalSize::new(1000, 1700));
+    ui.window().set_size(PhysicalSize::new(1000, 2600));
     fake.read();
     let label = "Check for updates on startup";
     assert_eq!(switch(&ui, label).accessible_checked(), Some(true), "on by default");
@@ -5288,7 +5289,7 @@ fn the_title_bar_is_always_drawn() {
 
 #[test]
 fn the_settings_page_offers_no_title_bar_switch() {
-    let ui = settings_window(1000, 1700);
+    let ui = settings_window(1000, 2600);
     assert_eq!(El::find_by_accessible_label(&ui, "Use the Negotium title bar").count(), 0);
 }
 

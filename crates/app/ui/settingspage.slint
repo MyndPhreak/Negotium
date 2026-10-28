@@ -214,13 +214,82 @@ export component SettingRow inherits Rectangle {
 }
 
 // A titled group of Settings rows (crate::settings::SETTING_GROUPS) that opens and closes from
-// its header.
+// its header. The owner keeps the open state: the header only asks (`toggled`).
 export component SettingGroup inherits VerticalLayout {
     in property <string> title;
     in property <string> summary;
     in property <bool> open;
     in property <bool> interactive: true;
     callback toggled();
+    // The header got keyboard focus; the scrolling owner brings it into view.
+    callback focus-gained();
+    spacing: 10px;
+    vertical-stretch: 0;
+    header := FocusButton {
+        min-height: 44px;
+        vertical-stretch: 0;
+        border-radius: 4px;
+        interactive: root.interactive;
+        background: self.hovered && root.interactive ? Theme.text.with-alpha(0.06) : transparent;
+        border-width: self.focused ? 2px : 0px;
+        border-color: Theme.text;
+        accessible-label: root.title;
+        accessible-description: root.summary;
+        accessible-expandable: true;
+        accessible-expanded: root.open;
+        accessible-enabled: root.interactive;
+        accessible-action-expand => {
+            if (root.interactive) {
+                root.toggled();
+            }
+        }
+        activated => { root.toggled(); }
+        focus-gained => { root.focus-gained(); }
+        HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 12px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            spacing: 12px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: 16px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                    // The header already carries the title and summary.
+                    accessible-role: none;
+                }
+                summary := Text {
+                    text: root.summary;
+                    color: Theme.muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 0;
+                alignment: center;
+                // Drawn: glyphs render as tofu in Segoe UI Variable (see rail.slint).
+                chevron := Path {
+                    width: 10px;
+                    height: 10px;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    commands: root.open ? "M 1 3 L 5 7 L 9 3" : "M 3 1 L 7 5 L 3 9";
+                    stroke: Theme.muted;
+                    stroke-width: 1.5px;
+                    fill: transparent;
+                }
+            }
+        }
+    }
+    // The owner puts its rows here only while `open` (@children cannot be conditional).
     @children
 }
 
@@ -324,307 +393,384 @@ export component SettingsPage inherits VerticalLayout {
             // Spare height stays empty below the last row.
             alignment: start;
             Text { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 600; vertical-stretch: 0; }
-            refresh-row := SettingRow {
-                title: "Refresh rate";
-                description: "How often numbers update while the window is open. In the tray Negotium updates every 2 s, or slower if you choose a slower rate.";
-                Choice {
-                    label: refresh-row.title;
-                    description: refresh-row.description;
-                    options: ["0.5 s", "1 s", "2 s", "5 s"];
-                    selected: root.refresh;
-                    interactive: root.interactive;
-                    chosen(i) => { root.refresh-chosen(i); }
-                    focus-gained => { sv.reveal(refresh-row.absolute-position.y, refresh-row.height); }
-                }
-            }
-            theme-row := SettingRow {
-                title: "Theme";
-                description: "System follows Windows' light or dark mode.";
-                Choice {
-                    label: theme-row.title;
-                    description: theme-row.description;
-                    options: ["System", "Light", "Dark"];
-                    selected: root.theme;
-                    interactive: root.interactive;
-                    chosen(i) => { root.theme-chosen(i); }
-                    focus-gained => { sv.reveal(theme-row.absolute-position.y, theme-row.height); }
-                }
-            }
-            backdrop-row := SettingRow {
-                title: "Backdrop";
-                description: "Mica takes its colour from the desktop background. Acrylic blurs the windows behind Negotium. Needs GPU rendering.";
-                Choice {
-                    label: backdrop-row.title;
-                    description: backdrop-row.description;
-                    options: ["Mica", "Acrylic"];
-                    selected: root.backdrop;
-                    interactive: root.interactive;
-                    chosen(i) => { root.backdrop-chosen(i); }
-                    focus-gained => { sv.reveal(backdrop-row.absolute-position.y, backdrop-row.height); }
-                }
-            }
-            // The layer Negotium draws over Acrylic (Theme.acrylic-tint); Mica has none.
-            if root.backdrop == 1 : tint-row := SettingRow {
-                title: "Tint colour";
-                description: "The colour on top of Acrylic. Default colour follows light or dark mode.";
-                Rectangle {
-                    accessible-role: groupbox;
-                    accessible-label: tint-row.title;
-                    accessible-description: tint-row.description;
-                    HorizontalLayout {
-                        spacing: 6px;
-                        alignment: start;
-                        max-width: 16384px; // see MetersRow: repeaters must not cap the window width
-                        TintSwatch {
-                            label: "Default colour";
-                            fill: Theme.tint-default;
-                            selected: !Theme.tint-color-set;
+            appearance-group := SettingGroup {
+                title: "Appearance";
+                summary: "Theme, backdrop, tint and graphs";
+                open: root.groups-open[0];
+                interactive: root.interactive;
+                toggled => { root.group-toggled(0); }
+                focus-gained => { sv.reveal(appearance-group.absolute-position.y, 44px); }
+                if root.groups-open[0] : VerticalLayout {
+                    spacing: 10px;
+                    theme-row := SettingRow {
+                        title: "Theme";
+                        description: "System follows Windows' light or dark mode.";
+                        Choice {
+                            label: theme-row.title;
+                            description: theme-row.description;
+                            options: ["System", "Light", "Dark"];
+                            selected: root.theme;
                             interactive: root.interactive;
-                            activated => { root.tint-default-chosen(); }
-                            focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                            chosen(i) => { root.theme-chosen(i); }
+                            focus-gained => { sv.reveal(theme-row.absolute-position.y, theme-row.height); }
                         }
-                        for preset in root.tint-presets : TintSwatch {
-                            label: preset.label;
-                            fill: preset.color;
-                            selected: Theme.tint-color-set && Theme.tint-color == preset.color;
+                    }
+                    backdrop-row := SettingRow {
+                        title: "Backdrop";
+                        description: "Mica takes its colour from the desktop background. Acrylic blurs the windows behind Negotium. Needs GPU rendering.";
+                        Choice {
+                            label: backdrop-row.title;
+                            description: backdrop-row.description;
+                            options: ["Mica", "Acrylic"];
+                            selected: root.backdrop;
                             interactive: root.interactive;
-                            activated => { root.tint-chosen(preset.color); }
-                            focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                            chosen(i) => { root.backdrop-chosen(i); }
+                            focus-gained => { sv.reveal(backdrop-row.absolute-position.y, backdrop-row.height); }
                         }
-                        TintSwatch {
-                            label: "Custom colour";
-                            fill: Theme.tint-color;
-                            plus: !root.tint-custom;
-                            selected: root.tint-custom;
+                    }
+                    // The layer Negotium draws over Acrylic (Theme.acrylic-tint); Mica has none.
+                    if root.backdrop == 1 : tint-row := SettingRow {
+                        title: "Tint colour";
+                        description: "The colour on top of Acrylic. Default colour follows light or dark mode.";
+                        Rectangle {
+                            accessible-role: groupbox;
+                            accessible-label: tint-row.title;
+                            accessible-description: tint-row.description;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                max-width: 16384px; // see MetersRow: repeaters must not cap the window width
+                                TintSwatch {
+                                    label: "Default colour";
+                                    fill: Theme.tint-default;
+                                    selected: !Theme.tint-color-set;
+                                    interactive: root.interactive;
+                                    activated => { root.tint-default-chosen(); }
+                                    focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                                }
+                                for preset in root.tint-presets : TintSwatch {
+                                    label: preset.label;
+                                    fill: preset.color;
+                                    selected: Theme.tint-color-set && Theme.tint-color == preset.color;
+                                    interactive: root.interactive;
+                                    activated => { root.tint-chosen(preset.color); }
+                                    focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                                }
+                                TintSwatch {
+                                    label: "Custom colour";
+                                    fill: Theme.tint-color;
+                                    plus: !root.tint-custom;
+                                    selected: root.tint-custom;
+                                    interactive: root.interactive;
+                                    activated => { root.custom-tint-requested(); }
+                                    focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                                }
+                            }
+                        }
+                    }
+                    if root.backdrop == 1 : opacity-row := SettingRow {
+                        title: "Tint opacity";
+                        description: "Move to the left to see more of the windows behind Negotium. Move to the right for a stronger tint.";
+                        // One-way: a drag breaks the binding, and the opacity is then a saved percent that
+                        // no longer follows the mode, so the two agree. Rust saves only a new percent.
+                        Slider {
+                            width: 200px;
+                            minimum: 0;
+                            maximum: 100;
+                            value: Theme.tint-percent;
+                            enabled: root.interactive;
+                            accessible-label: opacity-row.title;
+                            accessible-description: opacity-row.description;
+                            changed(v) => { root.tint-opacity-chosen(v); }
+                            changed has-focus => {
+                                if (self.has-focus) {
+                                    sv.reveal(opacity-row.absolute-position.y, opacity-row.height);
+                                }
+                            }
+                        }
+                    }
+                    smooth-row := SettingRow {
+                        title: "Smooth graphs";
+                        description: "Graphs scroll continuously between updates instead of stepping. Turn off to use a little less CPU.";
+                        Toggle {
+                            label: smooth-row.title;
+                            description: smooth-row.description;
+                            checked: root.smooth-graphs;
                             interactive: root.interactive;
-                            activated => { root.custom-tint-requested(); }
-                            focus-gained => { sv.reveal(tint-row.absolute-position.y, tint-row.height); }
+                            toggled(on) => { root.smooth-graphs-toggled(on); }
+                            focus-gained => { sv.reveal(smooth-row.absolute-position.y, smooth-row.height); }
                         }
                     }
                 }
             }
-            if root.backdrop == 1 : opacity-row := SettingRow {
-                title: "Tint opacity";
-                description: "Move to the left to see more of the windows behind Negotium. Move to the right for a stronger tint.";
-                // One-way: a drag breaks the binding, and the opacity is then a saved percent that
-                // no longer follows the mode, so the two agree. Rust saves only a new percent.
-                Slider {
-                    width: 200px;
-                    minimum: 0;
-                    maximum: 100;
-                    value: Theme.tint-percent;
-                    enabled: root.interactive;
-                    accessible-label: opacity-row.title;
-                    accessible-description: opacity-row.description;
-                    changed(v) => { root.tint-opacity-chosen(v); }
-                    changed has-focus => {
-                        if (self.has-focus) {
-                            sv.reveal(opacity-row.absolute-position.y, opacity-row.height);
+            window-group := SettingGroup {
+                title: "Window and tray";
+                summary: "Always on top and the tray icon";
+                open: root.groups-open[1];
+                interactive: root.interactive;
+                toggled => { root.group-toggled(1); }
+                focus-gained => { sv.reveal(window-group.absolute-position.y, 44px); }
+                if root.groups-open[1] : VerticalLayout {
+                    spacing: 10px;
+                    top-row := SettingRow {
+                        title: "Always on top";
+                        description: "Keep Negotium above other windows.";
+                        Toggle {
+                            label: top-row.title;
+                            description: top-row.description;
+                            checked: root.always-on-top;
+                            interactive: root.interactive;
+                            toggled(on) => { root.always-on-top-toggled(on); }
+                            focus-gained => { sv.reveal(top-row.absolute-position.y, top-row.height); }
+                        }
+                    }
+                    tray-row := SettingRow {
+                        title: "Keep running in the tray when closed";
+                        description: "Closing the window keeps Negotium in the notification area: history keeps recording and reopening is instant.";
+                        Toggle {
+                            label: tray-row.title;
+                            description: tray-row.description;
+                            checked: root.keep-in-tray;
+                            interactive: root.interactive;
+                            toggled(on) => { root.tray-toggled(on); }
+                            focus-gained => { sv.reveal(tray-row.absolute-position.y, tray-row.height); }
+                        }
+                    }
+                    tray-cpu-row := SettingRow {
+                        title: "Show CPU in tray icon";
+                        description: "The tray icon draws the last minute of CPU use; point at it to see the current value.";
+                        Toggle {
+                            label: tray-cpu-row.title;
+                            description: tray-cpu-row.description;
+                            checked: root.tray-cpu;
+                            interactive: root.interactive;
+                            toggled(on) => { root.tray-cpu-toggled(on); }
+                            focus-gained => { sv.reveal(tray-cpu-row.absolute-position.y, tray-cpu-row.height); }
                         }
                     }
                 }
             }
-            smooth-row := SettingRow {
-                title: "Smooth graphs";
-                description: "Graphs scroll continuously between updates instead of stepping. Turn off to use a little less CPU.";
-                Toggle {
-                    label: smooth-row.title;
-                    description: smooth-row.description;
-                    checked: root.smooth-graphs;
-                    interactive: root.interactive;
-                    toggled(on) => { root.smooth-graphs-toggled(on); }
-                    focus-gained => { sv.reveal(smooth-row.absolute-position.y, smooth-row.height); }
+            processes-group := SettingGroup {
+                title: "Processes";
+                summary: "Refresh rate, grouping and Aequilibrium";
+                open: root.groups-open[2];
+                interactive: root.interactive;
+                toggled => { root.group-toggled(2); }
+                focus-gained => { sv.reveal(processes-group.absolute-position.y, 44px); }
+                if root.groups-open[2] : VerticalLayout {
+                    spacing: 10px;
+                    refresh-row := SettingRow {
+                        title: "Refresh rate";
+                        description: "How often numbers update while the window is open. In the tray Negotium updates every 2 s, or slower if you choose a slower rate.";
+                        Choice {
+                            label: refresh-row.title;
+                            description: refresh-row.description;
+                            options: ["0.5 s", "1 s", "2 s", "5 s"];
+                            selected: root.refresh;
+                            interactive: root.interactive;
+                            chosen(i) => { root.refresh-chosen(i); }
+                            focus-gained => { sv.reveal(refresh-row.absolute-position.y, refresh-row.height); }
+                        }
+                    }
+                    group-row := SettingRow {
+                        title: "Group apps by type";
+                        description: "Apps, background processes and Windows processes under their own headings";
+                        Toggle {
+                            label: group-row.title;
+                            description: group-row.description;
+                            checked: root.group-by-type;
+                            interactive: root.interactive;
+                            toggled(on) => { root.group-by-type-toggled(on); }
+                            focus-gained => { sv.reveal(group-row.absolute-position.y, group-row.height); }
+                        }
+                    }
+                    aequilibrium-row := SettingRow {
+                        title: "Aequilibrium (Runaway CPU restraint)";
+                        description: "Automatically throttles background processes consuming high CPU when the system is under pressure, keeping the desktop responsive.";
+                        Toggle {
+                            label: aequilibrium-row.title;
+                            description: aequilibrium-row.description;
+                            checked: root.aequilibrium-enabled;
+                            interactive: root.interactive;
+                            toggled(on) => { root.aequilibrium-toggled(on); }
+                            focus-gained => { sv.reveal(aequilibrium-row.absolute-position.y, aequilibrium-row.height); }
+                        }
+                    }
                 }
             }
-            aequilibrium-row := SettingRow {
-                title: "Aequilibrium (Runaway CPU restraint)";
-                description: "Automatically throttles background processes consuming high CPU when the system is under pressure, keeping the desktop responsive.";
-                Toggle {
-                    label: aequilibrium-row.title;
-                    description: aequilibrium-row.description;
-                    checked: root.aequilibrium-enabled;
-                    interactive: root.interactive;
-                    toggled(on) => { root.aequilibrium-toggled(on); }
-                    focus-gained => { sv.reveal(aequilibrium-row.absolute-position.y, aequilibrium-row.height); }
+            startup-group := SettingGroup {
+                title: "Startup and shortcuts";
+                summary: "Start with Windows, admin mode and shortcut keys";
+                open: root.groups-open[3];
+                interactive: root.interactive;
+                toggled => { root.group-toggled(3); }
+                focus-gained => { sv.reveal(startup-group.absolute-position.y, 44px); }
+                if root.groups-open[3] : VerticalLayout {
+                    spacing: 10px;
+                    start-row := SettingRow {
+                        title: "Start with Windows";
+                        description: "Open Negotium in the tray when you sign in.";
+                        note: root.installed ? "" : "Install Negotium to use this";
+                        available: root.installed;
+                        Toggle {
+                            label: start-row.title;
+                            description: root.installed ? start-row.description : "Install Negotium to use this";
+                            checked: root.installed && root.start-with-windows;
+                            interactive: root.interactive && root.installed;
+                            toggled(on) => { root.start-with-windows-toggled(on); }
+                            focus-gained => { sv.reveal(start-row.absolute-position.y, start-row.height); }
+                        }
+                    }
+                    admin-row := SettingRow {
+                        title: "Admin mode";
+                        description: "Start with admin rights without a prompt. Anything that can start Negotium can then open it with admin rights, without a prompt.";
+                        note: !root.installed ? "Install Negotium to use this"
+                            : root.admin-mode-state == 2 ? "Needs repair. Turn on again to repair"
+                            : root.admin-mode-state == 3 ? "Needs an administrator account" : "";
+                        available: root.installed && root.admin-mode-state != 3;
+                        Toggle {
+                            label: admin-row.title;
+                            description: !root.installed ? "Install Negotium to use this"
+                                : root.admin-mode-state == 2 ? "Turn on again to repair"
+                                : root.admin-mode-state == 3 ? "Needs an administrator account" : admin-row.description;
+                            checked: root.installed && root.admin-mode-state == 1;
+                            interactive: root.interactive && root.installed && root.admin-mode-state != 3;
+                            toggled(on) => { root.admin-mode-toggled(on); }
+                            focus-gained => { sv.reveal(admin-row.absolute-position.y, admin-row.height); }
+                        }
+                    }
+                    hotkey-row := SettingRow {
+                        title: "Open on Ctrl+Shift+Esc";
+                        description: "Open Negotium instead of Task Manager. Turning this on replaces another tool's Task Manager replacement, such as Process Explorer's.";
+                        note: root.installed ? "" : "Install Negotium to use this";
+                        available: root.installed;
+                        Toggle {
+                            label: hotkey-row.title;
+                            description: root.installed ? hotkey-row.description : "Install Negotium to use this";
+                            checked: root.installed && root.hotkey;
+                            interactive: root.interactive && root.installed;
+                            toggled(on) => { root.hotkey-toggled(on); }
+                            focus-gained => { sv.reveal(hotkey-row.absolute-position.y, hotkey-row.height); }
+                        }
+                    }
+                    picker-row := SettingRow {
+                        title: "Pick a window to end on Ctrl+Alt+Shift+Esc";
+                        description: root.shortcut-taken
+                            ? "Another program uses Ctrl+Alt+Shift+Esc"
+                            : "Press the keys, then click a window to end its app. Shift+click ends it with no question.";
+                        Toggle {
+                            label: picker-row.title;
+                            description: picker-row.description;
+                            checked: root.picker-shortcut;
+                            interactive: root.interactive;
+                            toggled(on) => { root.picker-shortcut-toggled(on); }
+                            focus-gained => { sv.reveal(picker-row.absolute-position.y, picker-row.height); }
+                        }
+                    }
                 }
             }
-            group-row := SettingRow {
-                title: "Group apps by type";
-                description: "Apps, background processes and Windows processes under their own headings";
-                Toggle {
-                    label: group-row.title;
-                    description: group-row.description;
-                    checked: root.group-by-type;
-                    interactive: root.interactive;
-                    toggled(on) => { root.group-by-type-toggled(on); }
-                    focus-gained => { sv.reveal(group-row.absolute-position.y, group-row.height); }
+            updates-group := SettingGroup {
+                title: "Updates";
+                summary: "Update checks";
+                open: root.groups-open[4];
+                interactive: root.interactive;
+                toggled => { root.group-toggled(4); }
+                focus-gained => { sv.reveal(updates-group.absolute-position.y, 44px); }
+                if root.groups-open[4] : VerticalLayout {
+                    spacing: 10px;
+                    updates-row := SettingRow {
+                        title: "Check for updates on startup";
+                        description: "Look for a newer version of Negotium each time it starts.";
+                        note: root.installed ? "" : "Install Negotium to use this";
+                        available: root.installed;
+                        Toggle {
+                            label: updates-row.title;
+                            description: root.installed ? updates-row.description : "Install Negotium to use this";
+                            checked: root.installed && root.check-updates;
+                            interactive: root.interactive && root.installed;
+                            toggled(on) => { root.check-updates-toggled(on); }
+                            focus-gained => { sv.reveal(updates-row.absolute-position.y, updates-row.height); }
+                        }
+                    }
+                    check-row := SettingRow {
+                        title: "Check for updates now";
+                        description: "Look for a newer version of Negotium.";
+                        note: root.installed ? root.update-status : "Install Negotium to use this";
+                        available: root.installed;
+                        ActionButton {
+                            label: "Check for updates";
+                            shown: "Check";
+                            interactive: root.interactive && root.installed;
+                            activated => { root.check-updates-now(); }
+                            focus-gained => { sv.reveal(check-row.absolute-position.y, check-row.height); }
+                        }
+                    }
                 }
             }
-            top-row := SettingRow {
-                title: "Always on top";
-                description: "Keep Negotium above other windows.";
-                Toggle {
-                    label: top-row.title;
-                    description: top-row.description;
-                    checked: root.always-on-top;
-                    interactive: root.interactive;
-                    toggled(on) => { root.always-on-top-toggled(on); }
-                    focus-gained => { sv.reveal(top-row.absolute-position.y, top-row.height); }
+            addons-group := SettingGroup {
+                title: "Add-ons";
+                summary: "CPU temperature";
+                open: root.groups-open[5];
+                interactive: root.interactive;
+                toggled => { root.group-toggled(5); }
+                focus-gained => { sv.reveal(addons-group.absolute-position.y, 44px); }
+                if root.groups-open[5] : VerticalLayout {
+                    spacing: 10px;
+                    if !root.pawnio-installed : Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
+                    temp-row := SettingRow {
+                        title: "CPU temperature add-on";
+                        description: "Show the CPU temperature (installs the PawnIO driver from its publisher).";
+                        note: root.pawnio-installed ? "PawnIO driver detected and active" : "";
+                        available: root.pawnio-installed;
+                        Toggle {
+                            label: temp-row.title;
+                            description: root.pawnio-installed ? temp-row.description : "Coming in a later version";
+                            checked: root.pawnio-installed;
+                            interactive: false;
+                        }
+                    }
                 }
             }
-            tray-row := SettingRow {
-                title: "Keep running in the tray when closed";
-                description: "Closing the window keeps Negotium in the notification area: history keeps recording and reopening is instant.";
-                Toggle {
-                    label: tray-row.title;
-                    description: tray-row.description;
-                    checked: root.keep-in-tray;
-                    interactive: root.interactive;
-                    toggled(on) => { root.tray-toggled(on); }
-                    focus-gained => { sv.reveal(tray-row.absolute-position.y, tray-row.height); }
-                }
-            }
-            tray-cpu-row := SettingRow {
-                title: "Show CPU in tray icon";
-                description: "The tray icon draws the last minute of CPU use; point at it to see the current value.";
-                Toggle {
-                    label: tray-cpu-row.title;
-                    description: tray-cpu-row.description;
-                    checked: root.tray-cpu;
-                    interactive: root.interactive;
-                    toggled(on) => { root.tray-cpu-toggled(on); }
-                    focus-gained => { sv.reveal(tray-cpu-row.absolute-position.y, tray-cpu-row.height); }
-                }
-            }
-            gpu-row := SettingRow {
-                title: "Use GPU rendering";
-                description: "Draw the window with the graphics card: smoother resizing. Turn off if the window shows glitches.";
-                note: root.gpu-fallback
-                    ? "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again."
-                    : root.gpu-env-override
-                    ? "Overridden by SLINT_BACKEND."
-                    : (root.gpu-shown != root.gpu-running ? "Takes effect when Negotium restarts." : "");
-                Toggle {
-                    label: gpu-row.title;
-                    description: gpu-row.description;
-                    checked: root.gpu-shown;
-                    interactive: root.interactive;
-                    toggled(on) => { root.gpu-rendering-toggled(on); }
-                    focus-gained => { sv.reveal(gpu-row.absolute-position.y, gpu-row.height); }
-                }
-            }
-            admin-row := SettingRow {
-                title: "Admin mode";
-                description: "Start with admin rights without a prompt. Anything that can start Negotium can then open it with admin rights, without a prompt.";
-                note: !root.installed ? "Install Negotium to use this"
-                    : root.admin-mode-state == 2 ? "Needs repair. Turn on again to repair"
-                    : root.admin-mode-state == 3 ? "Needs an administrator account" : "";
-                available: root.installed && root.admin-mode-state != 3;
-                Toggle {
-                    label: admin-row.title;
-                    description: !root.installed ? "Install Negotium to use this"
-                        : root.admin-mode-state == 2 ? "Turn on again to repair"
-                        : root.admin-mode-state == 3 ? "Needs an administrator account" : admin-row.description;
-                    checked: root.installed && root.admin-mode-state == 1;
-                    interactive: root.interactive && root.installed && root.admin-mode-state != 3;
-                    toggled(on) => { root.admin-mode-toggled(on); }
-                    focus-gained => { sv.reveal(admin-row.absolute-position.y, admin-row.height); }
-                }
-            }
-            hotkey-row := SettingRow {
-                title: "Open on Ctrl+Shift+Esc";
-                description: "Open Negotium instead of Task Manager. Turning this on replaces another tool's Task Manager replacement, such as Process Explorer's.";
-                note: root.installed ? "" : "Install Negotium to use this";
-                available: root.installed;
-                Toggle {
-                    label: hotkey-row.title;
-                    description: root.installed ? hotkey-row.description : "Install Negotium to use this";
-                    checked: root.installed && root.hotkey;
-                    interactive: root.interactive && root.installed;
-                    toggled(on) => { root.hotkey-toggled(on); }
-                    focus-gained => { sv.reveal(hotkey-row.absolute-position.y, hotkey-row.height); }
-                }
-            }
-            start-row := SettingRow {
-                title: "Start with Windows";
-                description: "Open Negotium in the tray when you sign in.";
-                note: root.installed ? "" : "Install Negotium to use this";
-                available: root.installed;
-                Toggle {
-                    label: start-row.title;
-                    description: root.installed ? start-row.description : "Install Negotium to use this";
-                    checked: root.installed && root.start-with-windows;
-                    interactive: root.interactive && root.installed;
-                    toggled(on) => { root.start-with-windows-toggled(on); }
-                    focus-gained => { sv.reveal(start-row.absolute-position.y, start-row.height); }
-                }
-            }
-            picker-row := SettingRow {
-                title: "Pick a window to end on Ctrl+Alt+Shift+Esc";
-                description: root.shortcut-taken
-                    ? "Another program uses Ctrl+Alt+Shift+Esc"
-                    : "Press the keys, then click a window to end its app. Shift+click ends it with no question.";
-                Toggle {
-                    label: picker-row.title;
-                    description: picker-row.description;
-                    checked: root.picker-shortcut;
-                    interactive: root.interactive;
-                    toggled(on) => { root.picker-shortcut-toggled(on); }
-                    focus-gained => { sv.reveal(picker-row.absolute-position.y, picker-row.height); }
-                }
-            }
-            updates-row := SettingRow {
-                title: "Check for updates on startup";
-                description: "Look for a newer version of Negotium each time it starts.";
-                note: root.installed ? "" : "Install Negotium to use this";
-                available: root.installed;
-                Toggle {
-                    label: updates-row.title;
-                    description: root.installed ? updates-row.description : "Install Negotium to use this";
-                    checked: root.installed && root.check-updates;
-                    interactive: root.interactive && root.installed;
-                    toggled(on) => { root.check-updates-toggled(on); }
-                    focus-gained => { sv.reveal(updates-row.absolute-position.y, updates-row.height); }
-                }
-            }
-            check-row := SettingRow {
-                title: "Check for updates now";
-                description: "Look for a newer version of Negotium.";
-                note: root.installed ? root.update-status : "Install Negotium to use this";
-                available: root.installed;
-                ActionButton {
-                    label: "Check for updates";
-                    shown: "Check";
-                    interactive: root.interactive && root.installed;
-                    activated => { root.check-updates-now(); }
-                    focus-gained => { sv.reveal(check-row.absolute-position.y, check-row.height); }
-                }
-            }
-            taskmgr-row := SettingRow {
-                title: "Windows Task Manager";
-                description: "Open the original Task Manager, whatever Ctrl+Shift+Esc does.";
-                ActionButton {
-                    label: "Open Windows Task Manager";
-                    shown: "Open";
-                    interactive: root.interactive;
-                    activated => { root.open-windows-task-manager(); }
-                    focus-gained => { sv.reveal(taskmgr-row.absolute-position.y, taskmgr-row.height); }
+            advanced-group := SettingGroup {
+                title: "Advanced";
+                summary: "GPU rendering and Windows Task Manager";
+                open: root.groups-open[6];
+                interactive: root.interactive;
+                toggled => { root.group-toggled(6); }
+                focus-gained => { sv.reveal(advanced-group.absolute-position.y, 44px); }
+                if root.groups-open[6] : VerticalLayout {
+                    spacing: 10px;
+                    gpu-row := SettingRow {
+                        title: "Use GPU rendering";
+                        description: "Draw the window with the graphics card: smoother resizing. Turn off if the window shows glitches.";
+                        note: root.gpu-fallback
+                            ? "Switched to CPU rendering because the graphics driver didn't respond. Turn on to try the GPU again."
+                            : root.gpu-env-override
+                            ? "Overridden by SLINT_BACKEND."
+                            : (root.gpu-shown != root.gpu-running ? "Takes effect when Negotium restarts." : "");
+                        Toggle {
+                            label: gpu-row.title;
+                            description: gpu-row.description;
+                            checked: root.gpu-shown;
+                            interactive: root.interactive;
+                            toggled(on) => { root.gpu-rendering-toggled(on); }
+                            focus-gained => { sv.reveal(gpu-row.absolute-position.y, gpu-row.height); }
+                        }
+                    }
+                    taskmgr-row := SettingRow {
+                        title: "Windows Task Manager";
+                        description: "Open the original Task Manager, whatever Ctrl+Shift+Esc does.";
+                        ActionButton {
+                            label: "Open Windows Task Manager";
+                            shown: "Open";
+                            interactive: root.interactive;
+                            activated => { root.open-windows-task-manager(); }
+                            focus-gained => { sv.reveal(taskmgr-row.absolute-position.y, taskmgr-row.height); }
+                        }
+                    }
                 }
             }
             Text { text: root.version-text; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
-            if !root.pawnio-installed : Text { text: "Coming in a later version"; color: Theme.muted; font-size: 12px; vertical-stretch: 0; }
-            temp-row := SettingRow {
-                title: "CPU temperature add-on";
-                description: "Show the CPU temperature (installs the PawnIO driver from its publisher).";
-                note: root.pawnio-installed ? "PawnIO driver detected and active" : "";
-                available: root.pawnio-installed;
-                Toggle {
-                    label: temp-row.title;
-                    description: root.pawnio-installed ? temp-row.description : "Coming in a later version";
-                    checked: root.pawnio-installed;
-                    interactive: false;
-                }
-            }
         }
     }
 }
