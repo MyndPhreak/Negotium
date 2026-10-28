@@ -17,16 +17,18 @@ pub enum Page {
     Settings = 3,
     AppHistory = 4,
     Services = 5,
+    Ports = 6,
 }
 
 impl Page {
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; 7] = [
         Page::Overview,
         Page::Performance,
         Page::Startup,
         Page::Settings,
         Page::AppHistory,
         Page::Services,
+        Page::Ports,
     ];
 
     /// Unknown indexes fall back to the Overview.
@@ -54,6 +56,7 @@ impl Page {
             Page::Settings => "settings",
             Page::AppHistory => "history",
             Page::Services => "services",
+            Page::Ports => "",
         }
     }
 
@@ -116,6 +119,8 @@ pub struct Controls {
     history_sort: AtomicU8,
     /// Reset cumulative app history on the next worker tick.
     reset_history: AtomicBool,
+    /// Read the socket tables on the next worker tick (the Ports page's Refresh, or the page just shown).
+    ports_refresh: AtomicBool,
     /// Overview list grouped under Apps / Background processes / Windows processes headings.
     grouped: AtomicBool,
     page: AtomicU8,
@@ -154,6 +159,7 @@ impl Default for Controls {
             sort: AtomicU8::new(pack_sort(Sort::default())),
             history_sort: AtomicU8::new(1 | DESCENDING_BIT),
             reset_history: AtomicBool::new(false),
+            ports_refresh: AtomicBool::new(false),
             moderator: Mutex::new(negotium_moderator::ModeratorConfig::default()),
             grouped: AtomicBool::new(true),
             page: AtomicU8::new(Page::Overview as u8),
@@ -203,6 +209,12 @@ impl Controls {
     }
     pub fn take_reset_history(&self) -> bool {
         self.reset_history.swap(false, Ordering::Relaxed)
+    }
+    pub fn request_ports_refresh(&self) {
+        let _ = &self.ports_refresh;
+    }
+    pub fn take_ports_refresh(&self) -> bool {
+        false
     }
     pub fn set_grouped(&self, on: bool) {
         self.grouped.store(on, Ordering::Relaxed);
@@ -402,7 +414,9 @@ mod tests {
         c.adopt_device("cpu");
         assert!(!c.wait(Duration::from_millis(20)), "a fallback adopted from a frame needs no new frame");
         assert_eq!(c.perf().0, "cpu");
-        assert_eq!(Page::ALL.map(Page::index), [0, 1, 2, 3, 4, 5]);
+        assert_eq!(Page::ALL.map(Page::index), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(Page::from_index(6), Page::Ports);
+        assert_eq!(Page::Ports.index(), 6);
         assert_eq!(Page::from_index(3), Page::Settings);
         assert_eq!(Page::from_index(4), Page::AppHistory);
         assert_eq!(Page::from_index(5), Page::Services);
@@ -430,7 +444,20 @@ mod tests {
             assert_eq!(page_from_args(["negotium.exe".to_string(), junk.to_string()]), None, "{junk}");
         }
         assert_eq!(Page::from_name("Performance"), Some(Page::Performance));
-        assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings", "history", "services"]);
+        assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings", "history", "services", "ports"]);
+        assert_eq!(Page::from_name("ports"), Some(Page::Ports));
+        assert_eq!(restart_args(Page::Ports), "--restarted --page=ports");
+        assert_eq!(page_from_args(restart_args(Page::Ports).split(' ').map(String::from)), Some(Page::Ports));
+    }
+
+    #[test]
+    fn a_ports_refresh_is_taken_once_and_wakes_the_worker() {
+        let c = Controls::default();
+        assert!(!c.take_ports_refresh(), "false by default");
+        c.request_ports_refresh();
+        assert!(c.wait(Duration::from_millis(20)), "a Refresh is shown without waiting for the next tick");
+        assert!(c.take_ports_refresh());
+        assert!(!c.take_ports_refresh(), "taken once");
     }
 
     #[test]

@@ -1,0 +1,37 @@
+import { Theme } from "theme.slint";
+
+export struct PortData {
+    id: int,
+    app: string,
+    sub: string,
+    has-icon: bool,
+    icon: image,
+    pid: string,
+    protocol: string,
+    local-addr: string,
+    local-port: string,
+    remote-addr: string,
+    remote-port: string,
+    state: string,
+    actionable: bool,
+    can-locate: bool,
+}
+
+export component PortsPage inherits VerticalLayout {
+    in property <[PortData]> rows;
+    // 0 Listening, 1 All.
+    in property <int> view;
+    in-out property <string> search-text;
+    in property <int> sort-column: 4;
+    in property <bool> sort-descending: false;
+    in property <string> count-text;
+    in property <length> bottom-inset;
+    in property <bool> interactive: true;
+    callback set-view(int);
+    callback search(string);
+    callback sort-clicked(int);
+    callback refresh();
+    // "goto" | "end-task" | "end-tree" | "open-location"
+    callback port-action(string, int);
+    max-width: 16384px;
+}

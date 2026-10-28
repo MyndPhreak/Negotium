@@ -5526,3 +5526,194 @@ fn no_slint_file_outside_the_theme_reads_the_mode_for_a_surface() {
     }
     assert!(reads.is_empty(), "Theme.dark is read at {reads:?}; use Theme.palette-dark");
 }
+
+// ---- Ports page ----
+
+use negotium::PortData;
+use negotium::ports::PortRow;
+use negotium::view::{PortsFrame, Target};
+
+fn port_row(id: i32, pid: u32, local_port: u16, listening: bool, actionable: bool) -> PortRow {
+    PortRow {
+        id,
+        app: format!("App{id}"),
+        pid,
+        protocol: "TCP".into(),
+        local_addr: "0.0.0.0".into(),
+        local_port,
+        state: if listening { "Listening" } else { "Established" }.into(),
+        listening,
+        actionable,
+        can_locate: actionable,
+        ..Default::default()
+    }
+}
+
+fn port_target(pid: u32) -> Target {
+    Target { name: format!("App{pid}"), root: Some((pid, 1)), procs: vec![(pid, 1)], ..Default::default() }
+}
+
+fn ports_frame(rows: Vec<PortRow>, error: Option<&str>) -> Frame {
+    let targets = rows.iter().filter(|r| r.actionable).map(|r| (r.id, port_target(r.pid))).collect();
+    Frame {
+        page: Page::Ports,
+        ports: Some(PortsFrame { rows, targets, all_procs: vec![(1, 1, 0)], error: error.map(String::from) }),
+        ..Default::default()
+    }
+}
+
+fn shown_ports(ui: &MainWindow) -> Vec<String> {
+    ui.get_port_rows().iter().map(|r| r.local_port.to_string()).collect()
+}
+
+fn ports_bridged() -> (MainWindow, Rc<RefCell<Bridge>>) {
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Ports);
+    (ui, bridge)
+}
+
+#[test]
+fn a_failed_read_keeps_the_rows_and_toasts_once_per_failure_streak() {
+    let (ui, bridge) = ports_bridged();
+    let rows = vec![port_row(1, 10, 80, true, true), port_row(2, 11, 81, true, true)];
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, ports_frame(rows.clone(), None));
+    assert_eq!(ui.get_port_rows().row_count(), 2);
+    b.apply(&ui, ports_frame(rows.clone(), Some("boom")));
+    assert_eq!(ui.get_port_rows().row_count(), 2, "the rows stay");
+    assert_eq!(ui.get_toast(), "Couldn't list ports: boom.");
+    ui.set_toast("".into());
+    b.apply(&ui, ports_frame(rows.clone(), Some("boom")));
+    assert_eq!(ui.get_toast(), "", "the same streak toasts once");
+    b.apply(&ui, ports_frame(rows.clone(), None));
+    b.apply(&ui, ports_frame(rows, Some("again")));
+    assert_eq!(ui.get_toast(), "Couldn't list ports: again.", "a good frame ended the streak");
+}
+
+#[test]
+fn searching_filters_the_pushed_rows_without_a_new_frame() {
+    let (ui, bridge) = ports_bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, ports_frame(vec![port_row(1, 10, 5173, true, true), port_row(2, 11, 80, true, true)], None));
+    assert_eq!(ui.get_ports_count_text(), "2 ports");
+    b.set_ports_search("5173");
+    assert_eq!(shown_ports(&ui), ["5173"]);
+    assert_eq!(ui.get_ports_count_text(), "1 port matches 5173");
+    b.set_ports_search("");
+    assert_eq!(shown_ports(&ui), ["80", "5173"]);
+}
+
+#[test]
+fn the_all_view_adds_connections_to_the_listening_ones() {
+    let (ui, bridge) = ports_bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, ports_frame(vec![port_row(1, 10, 80, true, true), port_row(2, 11, 50000, false, true)], None));
+    assert_eq!(shown_ports(&ui), ["80"], "Listening is the default view");
+    b.set_ports_view(&ui, 1);
+    assert_eq!(ui.get_ports_view(), 1);
+    assert_eq!(shown_ports(&ui), ["80", "50000"]);
+}
+
+#[test]
+fn a_header_click_sorts_and_the_same_column_again_flips_the_direction() {
+    let (ui, bridge) = ports_bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, ports_frame(vec![port_row(1, 30, 5173, true, true), port_row(2, 10, 80, true, true), port_row(3, 20, 9, true, true)], None));
+    assert_eq!((ui.get_ports_sort_column(), ui.get_ports_sort_descending()), (4, false));
+    assert_eq!(shown_ports(&ui), ["9", "80", "5173"], "local port, ascending, by default");
+    b.sort_ports(&ui, 4);
+    assert!(ui.get_ports_sort_descending());
+    assert_eq!(shown_ports(&ui), ["5173", "80", "9"]);
+    b.sort_ports(&ui, 4);
+    assert!(!ui.get_ports_sort_descending());
+    b.sort_ports(&ui, 1);
+    assert_eq!((ui.get_ports_sort_column(), ui.get_ports_sort_descending()), (1, false));
+    assert_eq!(shown_ports(&ui), ["80", "9", "5173"], "by PID");
+}
+
+#[test]
+fn a_ports_row_has_the_frames_target_unless_it_has_no_owner_to_act_on() {
+    let (ui, bridge) = ports_bridged();
+    let mut b = bridge.borrow_mut();
+    b.apply(&ui, ports_frame(vec![port_row(1, 10, 80, true, true), port_row(2, 4, 81, true, false)], None));
+    assert_eq!(b.port_target(1), Some(port_target(10)));
+    assert_eq!(b.port_pid(1), Some(10));
+    assert_eq!((b.port_target(2), b.port_pid(2)), (None, None), "the PID 4 row has no target");
+    assert_eq!(b.port_procs(), [(1, 1, 0)]);
+}
+
+#[test]
+fn the_rail_has_a_ports_page_button() {
+    let ui = window();
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_select_page(move |i| *p.borrow_mut() = Some(i));
+    let ports = El::find_by_accessible_label(&ui, "Ports page").next().expect("rail item");
+    ports.invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(6));
+    ui.set_page(6);
+    assert_eq!(ports.accessible_checked(), Some(true));
+}
+
+fn port_data(id: i32, actionable: bool) -> PortData {
+    PortData {
+        id,
+        app: "Node.js".into(),
+        pid: "42".into(),
+        protocol: "TCP".into(),
+        local_addr: "0.0.0.0".into(),
+        local_port: format!("{}", 5170 + id).into(),
+        state: "Listening".into(),
+        actionable,
+        can_locate: actionable,
+        ..Default::default()
+    }
+}
+
+fn ports_window(rows: Vec<PortData>) -> MainWindow {
+    let ui = window();
+    ui.set_page(6);
+    ui.set_port_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_ports_count_text("2 ports".into());
+    ui.window().set_size(PhysicalSize::new(1000, 720));
+    ui.show().unwrap();
+    ui
+}
+
+#[test]
+fn the_ports_page_shows_the_view_choice_and_the_count() {
+    let ui = ports_window(vec![port_data(1, true), port_data(2, true)]);
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_set_ports_view(move |v| *p.borrow_mut() = Some(v));
+    let listening = El::find_by_accessible_label(&ui, "Listening").next().expect("Listening control");
+    let all = El::find_by_accessible_label(&ui, "All").next().expect("All control");
+    assert_eq!(listening.accessible_checked(), Some(true));
+    all.invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(1));
+    assert!(El::find_by_accessible_label(&ui, "2 ports").next().is_some(), "the count shows");
+}
+
+#[test]
+fn a_row_with_no_owner_to_act_on_offers_no_end_task() {
+    let ui = ports_window(vec![port_data(1, true), port_data(2, false)]);
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let a = actions.clone();
+    ui.on_port_action(move |name, id| a.borrow_mut().push((name.to_string(), id)));
+    let label = |port: u16| format!("Node.js, TCP port {port}, Listening, PID 42");
+    // Row 2 cannot be acted on: its End task item is disabled, so choosing it does nothing.
+    let row = El::find_by_accessible_label(&ui, &label(5172)).next().expect("second row");
+    let (x, y) = centre(&row);
+    press(&ui, x, y, slint::platform::PointerEventButton::Right);
+    key(&ui, slint::platform::Key::DownArrow);
+    key(&ui, slint::platform::Key::Return);
+    assert!(actions.borrow().is_empty(), "{:?}", actions.borrow());
+    key(&ui, slint::platform::Key::Escape);
+    // Row 1 can: the same keys end its task.
+    let row = El::find_by_accessible_label(&ui, &label(5171)).next().expect("first row");
+    let (x, y) = centre(&row);
+    press(&ui, x, y, slint::platform::PointerEventButton::Right);
+    key(&ui, slint::platform::Key::DownArrow);
+    key(&ui, slint::platform::Key::Return);
+    assert_eq!(*actions.borrow(), [("end-task".to_string(), 1)]);
+}

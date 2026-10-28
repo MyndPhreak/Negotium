@@ -9,7 +9,7 @@ use crate::view::{Frame, RowKind, RowView, SECTION_APPS, Target, close_cards, ro
 use crate::worker::SharedHistory;
 use crate::{
     AppHistoryData, DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData,
-    ServiceData, StartupData, StatData, TileData,
+    PortData, ServiceData, StartupData, StatData, TileData,
 };
 use negotium_actions::startup::StartupEntry;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -392,6 +392,15 @@ pub struct Bridge {
     services_sort_col: i32,
     services_sort_desc: bool,
     service_rows: Rc<VecModel<ServiceData>>,
+    ports_view: crate::ports::PortView,
+    ports_search: String,
+    ports_sort_col: i32,
+    ports_sort_desc: bool,
+    /// The Ports frame as last received (unfiltered, unsorted): the view, search and sort act on it.
+    ports: crate::view::PortsFrame,
+    /// A failed socket read has already been toasted, and no read has succeeded since.
+    ports_failing: bool,
+    port_rows: Rc<VecModel<PortData>>,
     /// Program icons by image path, and where the ones not yet seen are requested (none in
     /// tests that don't set one: rows then show no icons).
     icons: IconCache,
@@ -455,6 +464,13 @@ impl Bridge {
             services_sort_col: 0,
             services_sort_desc: false,
             service_rows: Rc::new(VecModel::default()),
+            ports_view: crate::ports::PortView::Listening,
+            ports_search: String::new(),
+            ports_sort_col: 4,
+            ports_sort_desc: false,
+            ports: crate::view::PortsFrame::default(),
+            ports_failing: false,
+            port_rows: Rc::new(VecModel::default()),
             icons: IconCache::default(),
             icon_loader: None,
             icons_pending: false,
@@ -475,6 +491,7 @@ impl Bridge {
         ui.set_startup_rows(ModelRc::from(b.startup_rows.clone()));
         ui.set_history_rows(ModelRc::from(b.history_rows.clone()));
         ui.set_service_rows(ModelRc::from(b.service_rows.clone()));
+        ui.set_port_rows(ModelRc::from(b.port_rows.clone()));
         let epoch = b.epoch.clone();
         smooth::install(ui, move || epoch.get().elapsed());
         Rc::new(RefCell::new(b))
@@ -519,7 +536,31 @@ impl Bridge {
             Page::AppHistory => self.apply_history(ui, frame),
             // The worker builds no frame for these (nothing on them changes per tick).
             Page::Startup | Page::Settings | Page::Services => {}
+            Page::Ports => {}
         }
+    }
+
+    /// The Ports view (0 Listening, 1 All) the user picked.
+    pub fn set_ports_view(&mut self, _ui: &MainWindow, _view: i32) {}
+
+    pub fn set_ports_search(&mut self, _text: &str) {}
+
+    /// A header click: the same column flips its direction, another starts ascending.
+    pub fn sort_ports(&mut self, _ui: &MainWindow, _col: i32) {}
+
+    /// The action target of a Ports row, as of the latest frame.
+    pub fn port_target(&self, _id: i32) -> Option<Target> {
+        None
+    }
+
+    /// The owner PID of a Ports row that can be acted on (Go to process).
+    pub fn port_pid(&self, _id: i32) -> Option<u32> {
+        None
+    }
+
+    /// Every process as of the latest Ports frame (End process tree).
+    pub fn port_procs(&self) -> &[(u32, i64, u32)] {
+        &self.ports.all_procs
     }
 
     fn apply_perf(&mut self, ui: &MainWindow, p: PerfFrame) {
