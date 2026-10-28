@@ -39,6 +39,7 @@ impl Page {
             3 => Page::Settings,
             4 => Page::AppHistory,
             5 => Page::Services,
+            6 => Page::Ports,
             _ => Page::Overview,
         }
     }
@@ -56,7 +57,7 @@ impl Page {
             Page::Settings => "settings",
             Page::AppHistory => "history",
             Page::Services => "services",
-            Page::Ports => "",
+            Page::Ports => "ports",
         }
     }
 
@@ -211,10 +212,11 @@ impl Controls {
         self.reset_history.swap(false, Ordering::Relaxed)
     }
     pub fn request_ports_refresh(&self) {
-        let _ = &self.ports_refresh;
+        self.ports_refresh.store(true, Ordering::Relaxed);
+        self.poke();
     }
     pub fn take_ports_refresh(&self) -> bool {
-        false
+        self.ports_refresh.swap(false, Ordering::Relaxed)
     }
     pub fn set_grouped(&self, on: bool) {
         self.grouped.store(on, Ordering::Relaxed);

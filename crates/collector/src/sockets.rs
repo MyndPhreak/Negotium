@@ -2,10 +2,13 @@
 //! IPv4 and IPv6). No admin rights needed. Ports in the MIB rows are in network byte order in the
 //! low 16 bits of a `u32`; `port_from_mib` is the one place that reads them.
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows::Win32::NetworkManagement::IpHelper::{
-    MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
+    GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_UDP6ROW_OWNER_PID,
+    MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
+use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Protocol {
@@ -52,7 +55,7 @@ pub struct Socket {
 
 impl Socket {
     pub fn key(&self) -> SocketKey {
-        SocketKey { protocol: Protocol::Tcp, local: SocketAddr::from(([0, 0, 0, 0], 0)), remote: None, pid: 0 }
+        SocketKey { protocol: self.protocol, local: self.local, remote: self.remote, pid: self.pid }
     }
 }
 
@@ -64,53 +67,150 @@ pub enum SocketError {
 
 impl fmt::Display for SocketError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("")
+        match self {
+            SocketError::Api { table, code } => write!(f, "{table} failed: 0x{code:X}"),
+            SocketError::KeptGrowing { table } => write!(f, "{table} kept growing"),
+        }
     }
 }
 
 /// Most tries `read_table` makes while a table keeps growing under it.
 pub const MAX_TABLE_TRIES: usize = 4;
 
-pub fn port_from_mib(_dw: u32) -> u16 {
-    0
+/// The first buffer: room for a few thousand sockets, so a normal read is one call.
+const FIRST_BUFFER: usize = 64 * 1024;
+
+/// A MIB port: network byte order in the low 16 bits (the high 16 are undefined).
+pub fn port_from_mib(dw: u32) -> u16 {
+    u16::from_be(dw as u16)
 }
 
-pub fn tcp_state(_dw: u32) -> TcpState {
-    TcpState::Unknown(0)
+/// A `MIB_TCP_STATE` value.
+pub fn tcp_state(dw: u32) -> TcpState {
+    match dw {
+        1 => TcpState::Closed,
+        2 => TcpState::Listen,
+        3 => TcpState::SynSent,
+        4 => TcpState::SynReceived,
+        5 => TcpState::Established,
+        6 => TcpState::FinWait1,
+        7 => TcpState::FinWait2,
+        8 => TcpState::CloseWait,
+        9 => TcpState::Closing,
+        10 => TcpState::LastAck,
+        11 => TcpState::TimeWait,
+        12 => TcpState::DeleteTcb,
+        other => TcpState::Unknown(other),
+    }
 }
 
-fn empty() -> Socket {
-    Socket { protocol: Protocol::Tcp, local: SocketAddr::from(([0, 0, 0, 0], 0)), remote: None, state: None, pid: 0 }
+/// An IPv4 address as a MIB row holds it: the four bytes in memory order.
+fn v4(dw: u32) -> Ipv4Addr {
+    Ipv4Addr::from(dw.to_le_bytes())
 }
 
-pub fn tcp4_row(_row: &MIB_TCPROW_OWNER_PID) -> Socket {
-    empty()
+fn v6(octets: [u8; 16], scope: u32, port: u32) -> SocketAddr {
+    SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(octets), port_from_mib(port), 0, scope))
 }
 
-pub fn tcp6_row(_row: &MIB_TCP6ROW_OWNER_PID) -> Socket {
-    empty()
+/// A listening TCP socket reports the remote `0.0.0.0:0` (or `[::]:0`): no remote.
+fn remote_of(addr: SocketAddr) -> Option<SocketAddr> {
+    (!(addr.ip().is_unspecified() && addr.port() == 0)).then_some(addr)
 }
 
-pub fn udp4_row(_row: &MIB_UDPROW_OWNER_PID) -> Socket {
-    empty()
+pub fn tcp4_row(row: &MIB_TCPROW_OWNER_PID) -> Socket {
+    Socket {
+        protocol: Protocol::Tcp,
+        local: SocketAddr::new(IpAddr::V4(v4(row.dwLocalAddr)), port_from_mib(row.dwLocalPort)),
+        remote: remote_of(SocketAddr::new(IpAddr::V4(v4(row.dwRemoteAddr)), port_from_mib(row.dwRemotePort))),
+        state: Some(tcp_state(row.dwState)),
+        pid: row.dwOwningPid,
+    }
 }
 
-pub fn udp6_row(_row: &MIB_UDP6ROW_OWNER_PID) -> Socket {
-    empty()
+pub fn tcp6_row(row: &MIB_TCP6ROW_OWNER_PID) -> Socket {
+    Socket {
+        protocol: Protocol::Tcp,
+        local: v6(row.ucLocalAddr, row.dwLocalScopeId, row.dwLocalPort),
+        remote: remote_of(v6(row.ucRemoteAddr, row.dwRemoteScopeId, row.dwRemotePort)),
+        state: Some(tcp_state(row.dwState)),
+        pid: row.dwOwningPid,
+    }
+}
+
+pub fn udp4_row(row: &MIB_UDPROW_OWNER_PID) -> Socket {
+    Socket {
+        protocol: Protocol::Udp,
+        local: SocketAddr::new(IpAddr::V4(v4(row.dwLocalAddr)), port_from_mib(row.dwLocalPort)),
+        remote: None,
+        state: None,
+        pid: row.dwOwningPid,
+    }
+}
+
+pub fn udp6_row(row: &MIB_UDP6ROW_OWNER_PID) -> Socket {
+    Socket {
+        protocol: Protocol::Udp,
+        local: v6(row.ucLocalAddr, row.dwLocalScopeId, row.dwLocalPort),
+        remote: None,
+        state: None,
+        pid: row.dwOwningPid,
+    }
 }
 
 /// Calls `read(buf, &mut size)` until it returns NO_ERROR, growing `buf` to the size asked for on
 /// ERROR_INSUFFICIENT_BUFFER, at most MAX_TABLE_TRIES times.
 pub fn read_table(
-    _table: &'static str,
-    _read: impl FnMut(*mut core::ffi::c_void, &mut u32) -> u32,
+    table: &'static str,
+    mut read: impl FnMut(*mut core::ffi::c_void, &mut u32) -> u32,
 ) -> Result<Vec<u8>, SocketError> {
-    Ok(Vec::new())
+    let mut buf = vec![0u8; FIRST_BUFFER];
+    let mut size = buf.len() as u32;
+    for _ in 0..MAX_TABLE_TRIES {
+        match read(buf.as_mut_ptr().cast(), &mut size) {
+            0 => {
+                buf.truncate(size as usize);
+                return Ok(buf);
+            }
+            code if code == ERROR_INSUFFICIENT_BUFFER.0 => buf.resize(size as usize, 0),
+            code => return Err(SocketError::Api { table, code }),
+        }
+    }
+    Err(SocketError::KeptGrowing { table })
+}
+
+/// The rows of a `MIB_*TABLE_OWNER_PID` buffer: a `u32` count, then that many rows. A count that
+/// does not fit the buffer reads as the rows that do.
+fn rows<T: Copy>(buf: &[u8]) -> Vec<T> {
+    let Some(count) = buf.first_chunk::<4>().map(|c| u32::from_le_bytes(*c) as usize) else { return Vec::new() };
+    let size = size_of::<T>();
+    let fit = (buf.len() - 4) / size;
+    (0..count.min(fit))
+        // SAFETY: the row lies inside `buf` (`fit`), and the buffer's alignment is not assumed.
+        .map(|i| unsafe { std::ptr::read_unaligned(buf.as_ptr().add(4 + i * size).cast::<T>()) })
+        .collect()
 }
 
 /// TCP v4 + v6 (TCP_TABLE_OWNER_PID_ALL) and UDP v4 + v6 (UDP_TABLE_OWNER_PID). All or nothing.
 pub fn list_sockets() -> Result<Vec<Socket>, SocketError> {
-    Ok(Vec::new())
+    let tcp = |table, family: u32| {
+        read_table(table, |buf, size| {
+            // SAFETY: `buf` holds `*size` bytes, as `read_table` promises.
+            unsafe { GetExtendedTcpTable(Some(buf), size, false, family, TCP_TABLE_OWNER_PID_ALL, 0) }
+        })
+    };
+    let udp = |table, family: u32| {
+        read_table(table, |buf, size| {
+            // SAFETY: as above.
+            unsafe { GetExtendedUdpTable(Some(buf), size, false, family, UDP_TABLE_OWNER_PID, 0) }
+        })
+    };
+    let mut out = Vec::new();
+    out.extend(rows::<MIB_TCPROW_OWNER_PID>(&tcp("GetExtendedTcpTable (IPv4)", AF_INET.0 as u32)?).iter().map(tcp4_row));
+    out.extend(rows::<MIB_TCP6ROW_OWNER_PID>(&tcp("GetExtendedTcpTable (IPv6)", AF_INET6.0 as u32)?).iter().map(tcp6_row));
+    out.extend(rows::<MIB_UDPROW_OWNER_PID>(&udp("GetExtendedUdpTable (IPv4)", AF_INET.0 as u32)?).iter().map(udp4_row));
+    out.extend(rows::<MIB_UDP6ROW_OWNER_PID>(&udp("GetExtendedUdpTable (IPv6)", AF_INET6.0 as u32)?).iter().map(udp6_row));
+    Ok(out)
 }
 
 #[cfg(test)]

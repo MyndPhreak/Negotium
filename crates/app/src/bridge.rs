@@ -514,7 +514,7 @@ impl Bridge {
             // Likewise the hidden graphs: end any scrub.
             self.scrub(ui, -1.0);
         }
-        if matches!(page, Page::Startup | Page::Settings | Page::AppHistory | Page::Services) {
+        if matches!(page, Page::Startup | Page::Settings | Page::AppHistory | Page::Services | Page::Ports) {
             // No graphs there, and no frames: the view rests on the newest sample (PF3).
             self.rest(ui);
         }
@@ -536,26 +536,95 @@ impl Bridge {
             Page::AppHistory => self.apply_history(ui, frame),
             // The worker builds no frame for these (nothing on them changes per tick).
             Page::Startup | Page::Settings | Page::Services => {}
-            Page::Ports => {}
+            Page::Ports => {
+                if let Some(ports) = frame.ports {
+                    self.apply_ports(ui, ports);
+                }
+            }
         }
     }
 
-    /// The Ports view (0 Listening, 1 All) the user picked.
-    pub fn set_ports_view(&mut self, _ui: &MainWindow, _view: i32) {}
+    /// A Ports frame landed. A failed read keeps the last rows (the worker sends them again) and
+    /// toasts once per failure streak.
+    fn apply_ports(&mut self, ui: &MainWindow, ports: crate::view::PortsFrame) {
+        match &ports.error {
+            Some(e) if !self.ports_failing => {
+                ui.set_toast(format!("Couldn't list ports: {e}.").into());
+                self.ports_failing = true;
+            }
+            Some(_) => {}
+            None => self.ports_failing = false,
+        }
+        self.ports = ports;
+        self.sync_port_rows();
+    }
 
-    pub fn set_ports_search(&mut self, _text: &str) {}
+    /// The Ports view (0 Listening, 1 All) the user picked.
+    pub fn set_ports_view(&mut self, ui: &MainWindow, view: i32) {
+        self.ports_view = if view == 1 { crate::ports::PortView::All } else { crate::ports::PortView::Listening };
+        ui.set_ports_view(view.clamp(0, 1));
+        self.sync_port_rows();
+    }
+
+    pub fn set_ports_search(&mut self, text: &str) {
+        self.ports_search = text.to_string();
+        self.sync_port_rows();
+    }
 
     /// A header click: the same column flips its direction, another starts ascending.
-    pub fn sort_ports(&mut self, _ui: &MainWindow, _col: i32) {}
+    pub fn sort_ports(&mut self, ui: &MainWindow, col: i32) {
+        if col == self.ports_sort_col {
+            self.ports_sort_desc = !self.ports_sort_desc;
+        } else {
+            self.ports_sort_col = col;
+            self.ports_sort_desc = false;
+        }
+        ui.set_ports_sort_column(self.ports_sort_col);
+        ui.set_ports_sort_descending(self.ports_sort_desc);
+        self.sync_port_rows();
+    }
+
+    /// Filters and sorts the last frame's rows into the page, with their icons.
+    fn sync_port_rows(&mut self) {
+        let mut rows = crate::ports::filter_port_rows(&self.ports.rows, self.ports_view, &self.ports_search);
+        crate::ports::sort_port_rows(&mut rows, self.ports_sort_col, self.ports_sort_desc);
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_ports_count_text(crate::ports::count_text(rows.len(), &self.ports_search).into());
+        }
+        let loader = self.icon_loader.as_deref();
+        let data = rows.iter().map(|r| {
+            let icon = match loader {
+                Some(l) if !r.icon.is_empty() => self.icons.get(&r.icon, l),
+                _ => None,
+            };
+            PortData {
+                id: r.id,
+                app: r.app.as_str().into(),
+                sub: r.sub.as_str().into(),
+                has_icon: icon.is_some(),
+                icon: icon.unwrap_or_else(|| self.no_icon.clone()),
+                pid: r.pid.to_string().into(),
+                protocol: r.protocol.as_str().into(),
+                local_addr: r.local_addr.as_str().into(),
+                local_port: r.local_port.to_string().into(),
+                remote_addr: r.remote_addr.as_str().into(),
+                remote_port: r.remote_port.map(|p| p.to_string()).unwrap_or_default().into(),
+                state: r.state.as_str().into(),
+                actionable: r.actionable,
+                can_locate: r.can_locate,
+            }
+        }).collect();
+        sync_model(&*self.port_rows, data);
+    }
 
     /// The action target of a Ports row, as of the latest frame.
-    pub fn port_target(&self, _id: i32) -> Option<Target> {
-        None
+    pub fn port_target(&self, id: i32) -> Option<Target> {
+        self.ports.targets.get(&id).cloned()
     }
 
     /// The owner PID of a Ports row that can be acted on (Go to process).
-    pub fn port_pid(&self, _id: i32) -> Option<u32> {
-        None
+    pub fn port_pid(&self, id: i32) -> Option<u32> {
+        self.ports.rows.iter().find(|r| r.id == id && r.actionable).map(|r| r.pid)
     }
 
     /// Every process as of the latest Ports frame (End process tree).
@@ -898,7 +967,8 @@ impl Bridge {
     /// Stores an icon from the loader; true when a row on show waits for it. The Windows group
     /// never does (it draws its own glyph). The rows are pushed later, gathered (`icon_arrived`).
     pub fn put_icon(&mut self, path: String, px: Option<IconPixels>) -> bool {
-        let shown = self.layout.rows().iter().any(|r| !r.windows && r.icon == path);
+        let shown = self.layout.rows().iter().any(|r| !r.windows && r.icon == path)
+            || (self.controls.page() == Page::Ports && self.ports.rows.iter().any(|r| r.icon == path));
         self.icons.put(path, px);
         shown
     }
@@ -908,6 +978,7 @@ impl Bridge {
     fn flush_icons(&mut self) {
         if self.icons_pending {
             self.push_rows();
+            self.sync_port_rows();
         }
     }
 

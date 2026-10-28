@@ -12,6 +12,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// A socket read longer than this is logged (spec: a refresh stays under 20 ms).
+const PORTS_READ_BUDGET: Duration = Duration::from_millis(20);
+
 pub trait Source {
     fn next_frame(&mut self, controls: &Controls) -> Option<Frame>;
 }
@@ -333,7 +336,21 @@ impl Source for LiveSource {
             }
             // Nothing on these pages changes per tick.
             Page::Startup | Page::Settings | Page::Services => None,
-            Page::Ports => Some(Frame { page: Page::Ports, ports: Some(PortsFrame::default()), ..Default::default() }),
+            Page::Ports => {
+                let force = controls.take_ports_refresh();
+                let (sockets, services, error) = self.ports.sockets(Instant::now(), force);
+                let owners = crate::ports::owners_from(&snap.processes, services);
+                let rows = crate::ports::build_port_rows(sockets, &owners, &mut self.port_ids);
+                let targets = rows.iter().filter_map(|r| crate::ports::port_target(r, &owners).map(|t| (r.id, t))).collect();
+                let all_procs = snap.processes.iter().map(|p| (p.pid, p.create_time, p.parent_pid)).collect();
+                if let Some(took) = self.ports.took().filter(|t| *t > PORTS_READ_BUDGET) {
+                    self.log.warn(&format!("ports read took {} ms", took.as_millis()));
+                }
+                if let Some(e) = self.ports.take_services_failure() {
+                    self.log.warn(&format!("ports: couldn't list services: {e}"));
+                }
+                Some(Frame { page: Page::Ports, ports: Some(PortsFrame { rows, targets, all_procs, error }), ..Default::default() })
+            }
         }
     }
 }

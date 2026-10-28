@@ -2,14 +2,19 @@
 //! filter, search, sorting and the count text. Pure data; the Windows reads live in the collector
 //! (`negotium_collector::sockets`) and the worker.
 use crate::view::Target;
-use negotium_collector::sockets::{Socket, SocketError, SocketKey};
+use negotium_collector::sockets::{Protocol, Socket, SocketError, SocketKey, TcpState};
 use negotium_snapshot::ProcessSample;
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 /// The socket tables are read again after this long (or on Refresh).
 pub const PORTS_REFRESH: Duration = Duration::from_secs(2);
+
+/// The kernel's own sockets (HTTP.sys and others) belong to PID 4; PID 0 is a socket that no
+/// longer has an owner (a TCP connection in Time wait).
+const SYSTEM_PID: u32 = 4;
+const NO_OWNER_PID: u32 = 0;
 
 /// What the Ports page knows of a socket's owner process.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,11 +71,17 @@ pub struct PortIds {
 }
 
 impl PortIds {
-    pub fn id(&mut self, _key: SocketKey) -> i32 {
-        0
+    pub fn id(&mut self, key: SocketKey) -> i32 {
+        let next = &mut self.next;
+        *self.ids.entry(key).or_insert_with(|| {
+            *next += 1;
+            *next
+        })
     }
 
-    pub fn retain(&mut self, _live: &HashSet<SocketKey>) {}
+    pub fn retain(&mut self, live: &HashSet<SocketKey>) {
+        self.ids.retain(|k, _| live.contains(k));
+    }
 }
 
 type SocketSource = Box<dyn FnMut() -> Result<Vec<Socket>, SocketError> + Send>;
@@ -83,68 +94,253 @@ pub struct PortReader {
     read_at: Option<Instant>,
     last: Vec<Socket>,
     last_services: HashMap<u32, Vec<String>>,
+    /// Why the latest socket read failed; kept until one succeeds.
+    error: Option<String>,
+    /// The latest services failure, until `take_services_failure` hands it out.
+    services_failure: Option<String>,
+    /// The services read failed last time: a failure now is the same streak.
+    services_failing: bool,
+    took: Option<Duration>,
 }
 
 impl PortReader {
     pub fn new(sockets: SocketSource, services: ServiceSource) -> Self {
-        Self { sockets, services, read_at: None, last: Vec::new(), last_services: HashMap::new() }
+        Self {
+            sockets,
+            services,
+            read_at: None,
+            last: Vec::new(),
+            last_services: HashMap::new(),
+            error: None,
+            services_failure: None,
+            services_failing: false,
+            took: None,
+        }
     }
 
     pub fn live() -> Self {
-        Self::new(Box::new(|| Ok(Vec::new())), Box::new(|| Ok(HashMap::new())))
+        Self::new(
+            Box::new(negotium_collector::sockets::list_sockets),
+            Box::new(|| {
+                let mut by_pid: HashMap<u32, Vec<String>> = HashMap::new();
+                for s in negotium_actions::services::list_services().map_err(|e| e.to_string())? {
+                    if let Some(pid) = s.pid.filter(|&p| p > 0) {
+                        by_pid.entry(pid).or_default().push(s.name);
+                    }
+                }
+                Ok(by_pid)
+            }),
+        )
     }
 
     /// Reads again when due (first call, PORTS_REFRESH passed, or `force`); otherwise the last list.
-    pub fn sockets(&mut self, _now: Instant, _force: bool) -> (&[Socket], &HashMap<u32, Vec<String>>, Option<String>) {
-        let _ = (&mut self.sockets, &mut self.services, &self.read_at);
-        (&self.last, &self.last_services, None)
+    pub fn sockets(&mut self, now: Instant, force: bool) -> (&[Socket], &HashMap<u32, Vec<String>>, Option<String>) {
+        self.took = None;
+        let due = force || self.read_at.is_none_or(|t| now.saturating_duration_since(t) >= PORTS_REFRESH);
+        if due {
+            let started = Instant::now();
+            self.read_at = Some(now);
+            match (self.sockets)() {
+                Ok(list) => {
+                    self.last = list;
+                    self.error = None;
+                    self.read_services();
+                }
+                // The last list and services stay; the failure shows until a read succeeds.
+                Err(e) => self.error = Some(e.to_string()),
+            }
+            self.took = Some(started.elapsed());
+        }
+        (&self.last, &self.last_services, self.error.clone())
+    }
+
+    fn read_services(&mut self) {
+        match (self.services)() {
+            Ok(map) => {
+                self.last_services = map;
+                self.services_failing = false;
+            }
+            Err(e) => {
+                self.last_services.clear();
+                if !self.services_failing {
+                    self.services_failure = Some(e);
+                }
+                self.services_failing = true;
+            }
+        }
     }
 
     /// How long the latest `sockets` call spent reading, when it read.
     pub fn took(&self) -> Option<Duration> {
-        None
+        self.took
     }
 
     /// The services failure to log: once per failure streak.
     pub fn take_services_failure(&mut self) -> Option<String> {
-        None
+        self.services_failure.take()
     }
 }
 
-pub fn owners_from(_processes: &[ProcessSample], _services: &HashMap<u32, Vec<String>>) -> HashMap<u32, PortOwner> {
-    HashMap::new()
+pub fn owners_from(processes: &[ProcessSample], services: &HashMap<u32, Vec<String>>) -> HashMap<u32, PortOwner> {
+    processes
+        .iter()
+        .map(|p| {
+            let name = p.description.as_deref().filter(|d| !d.is_empty()).unwrap_or(&p.name);
+            let owner = PortOwner {
+                pid: p.pid,
+                create_time: p.create_time,
+                name: name.to_string(),
+                process_name: p.name.clone(),
+                image_path: p.image_path.clone(),
+                services: services.get(&p.pid).cloned().unwrap_or_default(),
+            };
+            (p.pid, owner)
+        })
+        .collect()
 }
 
-pub fn build_port_rows(_sockets: &[Socket], _owners: &HashMap<u32, PortOwner>, _ids: &mut PortIds) -> Vec<PortRow> {
-    Vec::new()
+pub fn build_port_rows(sockets: &[Socket], owners: &HashMap<u32, PortOwner>, ids: &mut PortIds) -> Vec<PortRow> {
+    let mut live = HashSet::with_capacity(sockets.len());
+    let rows = sockets
+        .iter()
+        .map(|s| {
+            let key = s.key();
+            live.insert(key);
+            port_row(s, ids.id(key), owners)
+        })
+        .collect();
+    ids.retain(&live);
+    rows
 }
 
-pub fn state_label(_s: &Socket) -> &'static str {
-    ""
+fn port_row(s: &Socket, id: i32, owners: &HashMap<u32, PortOwner>) -> PortRow {
+    let owner = owners.get(&s.pid).filter(|_| s.pid != SYSTEM_PID && s.pid != NO_OWNER_PID);
+    let (app, sub, process_name) = match (s.pid, owner) {
+        (SYSTEM_PID, _) => ("System".to_string(), "Kernel driver (for example HTTP.sys)".to_string(), "System".to_string()),
+        (NO_OWNER_PID, _) => ("No owner".to_string(), String::new(), String::new()),
+        (_, Some(o)) => (o.name.clone(), o.services.join(", "), o.process_name.clone()),
+        (_, None) => ("Ended".to_string(), String::new(), String::new()),
+    };
+    let local_addr = address_text(&s.local);
+    let remote_addr = s.remote.map(|a| address_text(&a)).unwrap_or_default();
+    let state = state_label(s);
+    let search_text = format!("{app} {process_name} {sub} {local_addr} {remote_addr} {state}").to_lowercase();
+    PortRow {
+        id,
+        app,
+        sub,
+        icon: owner.and_then(|o| o.image_path.clone()).unwrap_or_default(),
+        pid: s.pid,
+        protocol: if s.protocol == Protocol::Tcp { "TCP" } else { "UDP" }.to_string(),
+        local_addr,
+        local_port: s.local.port(),
+        remote_addr,
+        remote_port: s.remote.map(|a| a.port()),
+        state: state.to_string(),
+        listening: is_listening(s),
+        actionable: owner.is_some(),
+        can_locate: owner.is_some_and(|o| o.image_path.is_some()),
+        search_text,
+    }
 }
 
-pub fn address_text(_a: &SocketAddr) -> String {
-    String::new()
+pub fn state_label(s: &Socket) -> &'static str {
+    match s.state {
+        None => "Open",
+        Some(TcpState::Closed) => "Closed",
+        Some(TcpState::Listen) => "Listening",
+        Some(TcpState::SynSent) => "SYN sent",
+        Some(TcpState::SynReceived) => "SYN received",
+        Some(TcpState::Established) => "Established",
+        Some(TcpState::FinWait1) => "FIN wait 1",
+        Some(TcpState::FinWait2) => "FIN wait 2",
+        Some(TcpState::CloseWait) => "Close wait",
+        Some(TcpState::Closing) => "Closing",
+        Some(TcpState::LastAck) => "Last ACK",
+        Some(TcpState::TimeWait) => "Time wait",
+        Some(TcpState::DeleteTcb) => "Delete TCB",
+        Some(TcpState::Unknown(_)) => "Unknown",
+    }
 }
 
-pub fn is_listening(_s: &Socket) -> bool {
-    false
+/// The address without its port (the port has its own column); an IPv6 scope id shows as `%12`.
+pub fn address_text(a: &SocketAddr) -> String {
+    match a {
+        SocketAddr::V6(v6) if v6.scope_id() != 0 => format!("{}%{}", v6.ip(), v6.scope_id()),
+        _ => a.ip().to_string(),
+    }
 }
 
-pub fn filter_port_rows(_rows: &[PortRow], _view: PortView, _query: &str) -> Vec<PortRow> {
-    Vec::new()
+/// A TCP socket in LISTEN, or any UDP socket (a bound UDP socket is what holds its port).
+pub fn is_listening(s: &Socket) -> bool {
+    s.protocol == Protocol::Udp || s.state == Some(TcpState::Listen)
+}
+
+pub fn filter_port_rows(rows: &[PortRow], view: PortView, query: &str) -> Vec<PortRow> {
+    let q = query.trim().to_lowercase();
+    // Digits only: a port or PID, exactly (80 is not 8080).
+    let number = (!q.is_empty() && q.bytes().all(|b| b.is_ascii_digit())).then(|| q.parse::<u64>().ok());
+    rows.iter()
+        .filter(|r| view == PortView::All || r.listening)
+        .filter(|r| match number {
+            Some(n) => n.is_some_and(|n| u64::from(r.local_port) == n || r.remote_port.is_some_and(|p| u64::from(p) == n) || u64::from(r.pid) == n),
+            None => q.is_empty() || r.search_text.contains(&q),
+        })
+        .cloned()
+        .collect()
+}
+
+/// An address column's sort key: parsed (IPv4 before IPv6, numbers as numbers), none first.
+fn addr_key(s: &str) -> Option<IpAddr> {
+    s.split('%').next().and_then(|a| a.parse().ok())
 }
 
 /// Columns: 0 App, 1 PID, 2 Protocol, 3 Local address, 4 Local port, 5 Remote address,
 /// 6 Remote port, 7 State. Ties: local port, protocol, PID, id.
-pub fn sort_port_rows(_rows: &mut [PortRow], _col: i32, _desc: bool) {}
-
-pub fn count_text(_n: usize, _query: &str) -> String {
-    String::new()
+pub fn sort_port_rows(rows: &mut [PortRow], col: i32, desc: bool) {
+    rows.sort_by(|a, b| {
+        let ord = match col {
+            0 => a.app.to_lowercase().cmp(&b.app.to_lowercase()),
+            1 => a.pid.cmp(&b.pid),
+            2 => a.protocol.cmp(&b.protocol),
+            3 => addr_key(&a.local_addr).cmp(&addr_key(&b.local_addr)),
+            5 => addr_key(&a.remote_addr).cmp(&addr_key(&b.remote_addr)),
+            6 => a.remote_port.cmp(&b.remote_port),
+            7 => a.state.cmp(&b.state),
+            _ => a.local_port.cmp(&b.local_port),
+        };
+        let ord = if desc { ord.reverse() } else { ord };
+        ord.then(a.local_port.cmp(&b.local_port))
+            .then_with(|| a.protocol.cmp(&b.protocol))
+            .then(a.pid.cmp(&b.pid))
+            .then(a.id.cmp(&b.id))
+    });
 }
 
-pub fn port_target(_row: &PortRow, _owners: &HashMap<u32, PortOwner>) -> Option<Target> {
-    None
+pub fn count_text(n: usize, query: &str) -> String {
+    let q = query.trim();
+    let ports = if n == 1 { "port" } else { "ports" };
+    match (q.is_empty(), n == 1) {
+        (true, _) => format!("{n} {ports}"),
+        (false, true) => format!("{n} {ports} matches {q}"),
+        (false, false) => format!("{n} {ports} match {q}"),
+    }
+}
+
+/// The action target of a row: its owner as a single process. None for the kernel, an ended
+/// owner and an unowned socket.
+pub fn port_target(row: &PortRow, owners: &HashMap<u32, PortOwner>) -> Option<Target> {
+    let o = owners.get(&row.pid).filter(|_| row.actionable)?;
+    Some(Target {
+        name: o.name.clone(),
+        process_name: o.process_name.clone(),
+        root: Some((o.pid, o.create_time)),
+        procs: vec![(o.pid, o.create_time)],
+        hung_pid: None,
+        image_path: o.image_path.clone(),
+        critical: negotium_actions::is_critical(&o.process_name),
+        group: false,
+    })
 }
 
 #[cfg(test)]
