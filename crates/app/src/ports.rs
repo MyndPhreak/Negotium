@@ -664,6 +664,20 @@ mod tests {
     }
 
     #[test]
+    fn identical_sockets_get_their_own_rows_and_ids() {
+        // Address reuse: one process with two UDP sockets on the same address and port.
+        let mut ids = PortIds::default();
+        let s = udp("0.0.0.0:5353", 1);
+        let first = build_port_rows(&[s, s], &HashMap::new(), &mut ids);
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].id, first[1].id, "each socket has its own row id");
+        let second = build_port_rows(&[s, s], &HashMap::new(), &mut ids);
+        assert_eq!((second[0].id, second[1].id), (first[0].id, first[1].id), "ids stay across frames");
+        let third = build_port_rows(&[s], &HashMap::new(), &mut ids);
+        assert_eq!(third[0].id, first[0].id, "the one left keeps the first id");
+    }
+
+    #[test]
     fn a_known_owner_is_an_action_target_for_its_one_process() {
         let o = owners(vec![owner(200, "Node.js", "node.exe", Some("C:\\node.exe"), &[])]);
         let row = one_row(tcp("0.0.0.0:5173", None, TcpState::Listen, 200), &o);
