@@ -186,11 +186,19 @@ impl Settings {
 
     /// Which of `SETTING_GROUPS` are open.
     pub fn groups_open(&self) -> [bool; 7] {
-        [false; 7]
+        SETTING_GROUPS.map(|id| !self.collapsed_groups.iter().any(|c| c == id))
     }
 
     /// Opens or closes the group at `index` in `SETTING_GROUPS`; an out-of-range index does nothing.
-    pub fn toggle_group(&mut self, _index: usize) {}
+    pub fn toggle_group(&mut self, index: usize) {
+        let Some(id) = SETTING_GROUPS.get(index) else { return };
+        match self.collapsed_groups.iter().position(|c| c == id) {
+            Some(i) => {
+                self.collapsed_groups.remove(i);
+            }
+            None => self.collapsed_groups.push(id.to_string()),
+        }
+    }
 
     pub fn refresh_index(&self) -> i32 {
         REFRESH_CHOICES_MS.iter().position(|&c| c == nearest_refresh(self.refresh_ms)).unwrap_or(1) as i32
@@ -199,8 +207,9 @@ impl Settings {
 
 /// Whether a Settings row with `title` and `description` matches the search `query`: an empty
 /// query matches everything; otherwise a case-insensitive substring of either.
-pub fn setting_matches(_query: &str, _title: &str, _description: &str) -> bool {
-    false
+pub fn setting_matches(query: &str, title: &str, description: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty() || title.to_lowercase().contains(&q) || description.to_lowercase().contains(&q)
 }
 
 pub fn nearest_refresh(ms: u32) -> u32 {
@@ -334,6 +343,7 @@ pub fn load_with(writes: &Writes, path: &Path) -> (Settings, Loaded) {
     field!(window_geometry);
     field!(acrylic_tint);
     field!(acrylic_opacity);
+    field!(collapsed_groups);
     // A well-formed number can still be more than 100%.
     if s.acrylic_opacity.is_some_and(|o| o > 100) {
         s.acrylic_opacity = None;
