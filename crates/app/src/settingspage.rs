@@ -54,6 +54,7 @@ fn show_settings(ui: &MainWindow, s: &Settings) {
     ui.set_col_handles(s.col_handles);
     ui.set_col_publisher(s.col_publisher);
     ui.set_settings_aequilibrium_enabled(s.moderator.aequilibrium_enabled);
+    ui.set_settings_groups_open(slint::ModelRc::new(slint::VecModel::from(s.groups_open().to_vec())));
     // Off: GraphClock rests the view on the newest sample at once (PF3).
     ui.global::<crate::GraphClock>().set_smooth(s.smooth_graphs);
 }
@@ -663,6 +664,14 @@ impl SettingsWiring {
             let change = change.clone();
             ui.on_tray_toggled(move |on| {
                 change.apply(|s| s.keep_in_tray = on);
+            });
+        }
+        {
+            let change = change.clone();
+            ui.on_setting_matches(|q, t, d| crate::settings::setting_matches(&q, &t, &d));
+            // A negative index wraps to one past every group: toggle_group ignores it.
+            ui.on_settings_group_toggled(move |i| {
+                change.apply(|s| s.toggle_group(i as usize));
             });
         }
         {
