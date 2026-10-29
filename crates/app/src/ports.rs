@@ -63,23 +63,32 @@ pub struct PortRow {
 }
 
 /// Row ids that stay the same across frames for the same socket. Ids only grow and are never
-/// reused, so the selection, focus and scroll position survive a refresh.
+/// reused, so the selection, focus and scroll position survive a refresh. Identical sockets
+/// (address reuse) are told apart by their order in the table: `nth` is 0 for the first.
 #[derive(Default)]
 pub struct PortIds {
-    ids: HashMap<SocketKey, i32>,
+    ids: HashMap<(SocketKey, usize), i32>,
     next: i32,
 }
 
 impl PortIds {
     pub fn id(&mut self, key: SocketKey) -> i32 {
+        self.nth_id(key, 0)
+    }
+
+    pub fn nth_id(&mut self, key: SocketKey, nth: usize) -> i32 {
         let next = &mut self.next;
-        *self.ids.entry(key).or_insert_with(|| {
+        *self.ids.entry((key, nth)).or_insert_with(|| {
             *next += 1;
             *next
         })
     }
 
     pub fn retain(&mut self, live: &HashSet<SocketKey>) {
+        self.ids.retain(|(k, _), _| live.contains(k));
+    }
+
+    fn retain_nth(&mut self, live: &HashSet<(SocketKey, usize)>) {
         self.ids.retain(|k, _| live.contains(k));
     }
 }
@@ -201,15 +210,19 @@ pub fn owners_from(processes: &[ProcessSample], services: &HashMap<u32, Vec<Stri
 
 pub fn build_port_rows(sockets: &[Socket], owners: &HashMap<u32, PortOwner>, ids: &mut PortIds) -> Vec<PortRow> {
     let mut live = HashSet::with_capacity(sockets.len());
+    let mut seen: HashMap<SocketKey, usize> = HashMap::new();
     let rows = sockets
         .iter()
         .map(|s| {
             let key = s.key();
-            live.insert(key);
-            port_row(s, ids.id(key), owners)
+            let nth = seen.entry(key).or_default();
+            let id = ids.nth_id(key, *nth);
+            live.insert((key, *nth));
+            *nth += 1;
+            port_row(s, id, owners)
         })
         .collect();
-    ids.retain(&live);
+    ids.retain_nth(&live);
     rows
 }
 
