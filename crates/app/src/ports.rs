@@ -148,16 +148,23 @@ impl PortReader {
                 Ok(by_pid)
             }),
         )
+        .with_ending(Box::new(|pids| pids.iter().copied().filter(|&p| negotium_actions::is_ending(p)).collect()))
     }
 
     /// Also asks `ending` on each socket read which owners are stuck while they end.
-    pub fn with_ending(self, _ending: EndingSource) -> Self {
+    pub fn with_ending(mut self, ending: EndingSource) -> Self {
+        self.ending = Some(ending);
         self
     }
 
     /// The owners found stuck while ending at the latest socket read.
     pub fn ending(&self) -> &HashSet<u32> {
         &self.last_ending
+    }
+
+    /// The latest sockets, their services and the owners stuck while ending, without reading.
+    pub fn last(&self) -> (&[Socket], &HashMap<u32, Vec<String>>, &HashSet<u32>) {
+        (&self.last, &self.last_services, &self.last_ending)
     }
 
     /// Reads again when due (first call, PORTS_REFRESH passed, or `force`); otherwise the last list.
@@ -172,6 +179,7 @@ impl PortReader {
                     self.last = list;
                     self.error = None;
                     self.read_services();
+                    self.read_ending();
                 }
                 // The last list and services stay; the failure shows until a read succeeds.
                 Err(e) => self.error = Some(e.to_string()),
@@ -179,6 +187,14 @@ impl PortReader {
             self.took = Some(started.elapsed());
         }
         (&self.last, &self.last_services, self.error.clone())
+    }
+
+    fn read_ending(&mut self) {
+        let Some(ending) = self.ending.as_mut() else { return };
+        let mut pids: Vec<u32> = self.last.iter().map(|s| s.pid).filter(|&p| p != SYSTEM_PID && p != NO_OWNER_PID).collect();
+        pids.sort_unstable();
+        pids.dedup();
+        self.last_ending = ending(&pids);
     }
 
     fn read_services(&mut self) {
@@ -228,7 +244,13 @@ pub fn owners_from(processes: &[ProcessSample], services: &HashMap<u32, Vec<Stri
 }
 
 /// Marks the owners `ending` names as stuck while they end.
-pub fn mark_ending(_owners: &mut HashMap<u32, PortOwner>, _ending: &HashSet<u32>) {}
+pub fn mark_ending(owners: &mut HashMap<u32, PortOwner>, ending: &HashSet<u32>) {
+    for pid in ending {
+        if let Some(o) = owners.get_mut(pid) {
+            o.ending = true;
+        }
+    }
+}
 
 pub fn build_port_rows(sockets: &[Socket], owners: &HashMap<u32, PortOwner>, ids: &mut PortIds) -> Vec<PortRow> {
     let mut live = HashSet::with_capacity(sockets.len());
@@ -253,6 +275,7 @@ fn port_row(s: &Socket, id: i32, owners: &HashMap<u32, PortOwner>) -> PortRow {
     let (app, sub, process_name) = match (s.pid, owner) {
         (SYSTEM_PID, _) => ("System".to_string(), "Kernel driver (for example HTTP.sys)".to_string(), "System".to_string()),
         (NO_OWNER_PID, _) => ("No owner".to_string(), String::new(), String::new()),
+        (_, Some(o)) if o.ending => (o.name.clone(), "Ending: Windows did not finish closing it".to_string(), o.process_name.clone()),
         (_, Some(o)) => (o.name.clone(), o.services.join(", "), o.process_name.clone()),
         (_, None) => ("Ended".to_string(), String::new(), String::new()),
     };

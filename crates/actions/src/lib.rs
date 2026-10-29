@@ -31,10 +31,10 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBreakOnTermination};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, STILL_ACTIVE,
 };
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,7 +60,7 @@ impl std::fmt::Display for ActionError {
             ActionError::AccessDenied => f.write_str("access denied"),
             ActionError::Critical => f.write_str("Windows marks the process as critical"),
             ActionError::Cancelled => f.write_str("it was cancelled"),
-            ActionError::Ending => f.write_str(""),
+            ActionError::Ending => f.write_str("it is already ending"),
             ActionError::Other(detail) => f.write_str(detail),
         }
     }
@@ -78,7 +78,9 @@ impl ActionError {
                 "Windows marks this process as critical \u{2014} ending it would crash the PC.".to_string()
             }
             ActionError::Cancelled => format!("Couldn't change {what}: it was cancelled."),
-            ActionError::Ending => String::new(),
+            ActionError::Ending => format!(
+                "{what} is already ending, but Windows did not finish closing it. It keeps its ports and files until it closes."
+            ),
             ActionError::Other(detail) => format!("Couldn't change {what}: {detail}."),
         }
     }
@@ -129,19 +131,14 @@ pub(crate) fn open_verified(pid: u32, create_time: i64, access: PROCESS_ACCESS_R
     let handle = unsafe { OpenProcess(access | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
         .map(OwnedHandle)
         .map_err(|e| open_error(&e))?;
-    let (mut created, mut exited, mut kernel, mut user) =
-        (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
-    // SAFETY: valid handle and four writable FILETIMEs.
-    unsafe { GetProcessTimes(handle.0, &mut created, &mut exited, &mut kernel, &mut user) }
-        .map_err(|e| ActionError::from_win(&e))?;
-    // A zombie (exited, but still held open by someone) has a nonzero exit time; acting on it
-    // would fail with a misleading access-denied, so report it as exited.
-    if exited.dwHighDateTime != 0 || exited.dwLowDateTime != 0 {
+    let (actual, state) = read_state(&handle)?;
+    // A zombie (exited, but still held open by someone) and a process stuck while ending would both
+    // fail with a misleading access-denied, so each is reported as what it is.
+    if state == ProcessState::Exited || actual != create_time {
         return Err(ActionError::AlreadyExited);
     }
-    let actual = ((created.dwHighDateTime as i64) << 32) | created.dwLowDateTime as i64;
-    if actual != create_time {
-        return Err(ActionError::AlreadyExited);
+    if state == ProcessState::Ending {
+        return Err(ActionError::Ending);
     }
     Ok(handle)
 }
@@ -156,13 +153,37 @@ pub enum ProcessState {
     Exited,
 }
 
-pub fn process_state(_exit_time: i64, _exit_code: u32) -> ProcessState {
-    ProcessState::Running
+pub fn process_state(exit_time: i64, exit_code: u32) -> ProcessState {
+    if exit_time != 0 {
+        ProcessState::Exited
+    } else if exit_code == STILL_ACTIVE.0 as u32 {
+        ProcessState::Running
+    } else {
+        ProcessState::Ending
+    }
 }
 
 /// Whether `pid` is stuck while it ends. False when it can't be opened or read.
-pub fn is_ending(_pid: u32) -> bool {
-    false
+pub fn is_ending(pid: u32) -> bool {
+    // SAFETY: plain Win32 call; the handle is owned by OwnedHandle.
+    let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }).map(OwnedHandle) else {
+        return false;
+    };
+    matches!(read_state(&handle), Ok((_, ProcessState::Ending)))
+}
+
+/// The creation time and state of an open process.
+fn read_state(handle: &OwnedHandle) -> Result<(i64, ProcessState), ActionError> {
+    let (mut created, mut exited, mut kernel, mut user) =
+        (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    // SAFETY: valid handle and four writable FILETIMEs.
+    unsafe { GetProcessTimes(handle.0, &mut created, &mut exited, &mut kernel, &mut user) }
+        .map_err(|e| ActionError::from_win(&e))?;
+    let mut code = 0u32;
+    // SAFETY: valid handle with query rights; `code` is a writable u32.
+    unsafe { GetExitCodeProcess(handle.0, &mut code) }.map_err(|e| ActionError::from_win(&e))?;
+    let time = |t: FILETIME| ((t.dwHighDateTime as i64) << 32) | t.dwLowDateTime as i64;
+    Ok((time(created), process_state(time(exited), code)))
 }
 
 /// Whether Windows marks the process BreakOnTermination (ending it bugchecks the machine).
