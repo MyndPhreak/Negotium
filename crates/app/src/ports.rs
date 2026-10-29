@@ -26,6 +26,8 @@ pub struct PortOwner {
     pub process_name: String,
     pub image_path: Option<String>,
     pub services: Vec<String>,
+    /// Told to end but not closed yet (`negotium_actions::is_ending`): it keeps its sockets.
+    pub ending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,11 +97,15 @@ impl PortIds {
 
 type SocketSource = Box<dyn FnMut() -> Result<Vec<Socket>, SocketError> + Send>;
 type ServiceSource = Box<dyn FnMut() -> Result<HashMap<u32, Vec<String>>, String> + Send>;
+/// Of the PIDs given, the ones stuck while they end.
+type EndingSource = Box<dyn FnMut(&[u32]) -> HashSet<u32> + Send>;
 
 /// Reads the socket tables at most every [`PORTS_REFRESH`] and keeps the last list.
 pub struct PortReader {
     sockets: SocketSource,
     services: ServiceSource,
+    ending: Option<EndingSource>,
+    last_ending: HashSet<u32>,
     read_at: Option<Instant>,
     last: Vec<Socket>,
     last_services: HashMap<u32, Vec<String>>,
@@ -117,6 +123,8 @@ impl PortReader {
         Self {
             sockets,
             services,
+            ending: None,
+            last_ending: HashSet::new(),
             read_at: None,
             last: Vec::new(),
             last_services: HashMap::new(),
@@ -140,6 +148,16 @@ impl PortReader {
                 Ok(by_pid)
             }),
         )
+    }
+
+    /// Also asks `ending` on each socket read which owners are stuck while they end.
+    pub fn with_ending(self, _ending: EndingSource) -> Self {
+        self
+    }
+
+    /// The owners found stuck while ending at the latest socket read.
+    pub fn ending(&self) -> &HashSet<u32> {
+        &self.last_ending
     }
 
     /// Reads again when due (first call, PORTS_REFRESH passed, or `force`); otherwise the last list.
@@ -202,11 +220,15 @@ pub fn owners_from(processes: &[ProcessSample], services: &HashMap<u32, Vec<Stri
                 process_name: p.name.clone(),
                 image_path: p.image_path.clone(),
                 services: services.get(&p.pid).cloned().unwrap_or_default(),
+                ending: false,
             };
             (p.pid, owner)
         })
         .collect()
 }
+
+/// Marks the owners `ending` names as stuck while they end.
+pub fn mark_ending(_owners: &mut HashMap<u32, PortOwner>, _ending: &HashSet<u32>) {}
 
 pub fn build_port_rows(sockets: &[Socket], owners: &HashMap<u32, PortOwner>, ids: &mut PortIds) -> Vec<PortRow> {
     let mut live = HashSet::with_capacity(sockets.len());
@@ -384,6 +406,7 @@ mod tests {
             process_name: process.into(),
             image_path: path.map(String::from),
             services: services.iter().map(|s| s.to_string()).collect(),
+            ending: false,
         }
     }
 
@@ -819,5 +842,51 @@ mod tests {
         assert_eq!((got[&1].create_time, got[&1].image_path.as_deref(), got[&1].process_name.as_str()), (51, Some("C:\\a.exe"), "a.exe"));
         assert_eq!(got[&2].name, "b.exe");
         assert_eq!((got[&3].name.as_str(), got[&3].services.clone()), ("c.exe", vec!["Dnscache".to_string()]));
+    }
+
+    #[test]
+    fn an_owner_stuck_while_ending_says_so_and_keeps_its_actions() {
+        let mut o = owner(118960, "Node.js", "node.exe", Some("C:\node.exe"), &["Svc"]);
+        o.ending = true;
+        let o = owners(vec![o]);
+        let r = one_row(tcp("0.0.0.0:8080", None, TcpState::Listen, 118960), &o);
+        assert_eq!((r.app.as_str(), r.sub.as_str()), ("Node.js", "Ending: Windows did not finish closing it"));
+        assert!(r.actionable && r.can_locate, "End task explains why it can't end it");
+        assert_eq!(filter_port_rows(&[r], PortView::Listening, "ending").len(), 1, "the search finds it");
+    }
+
+    #[test]
+    fn marking_sets_ending_only_on_the_owners_named() {
+        let mut o = owners(vec![owner(1, "A", "a.exe", None, &[]), owner(2, "B", "b.exe", None, &[])]);
+        mark_ending(&mut o, &HashSet::from([2, 99]));
+        assert!(!o[&1].ending && o[&2].ending);
+        assert!(!o.contains_key(&99));
+    }
+
+    #[test]
+    fn the_ending_check_runs_on_each_socket_read_with_the_owner_pids() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<Vec<u32>>::new()));
+        let log = asked.clone();
+        let sockets = vec![
+            tcp("0.0.0.0:80", None, TcpState::Listen, 7),
+            udp("0.0.0.0:53", 7),
+            udp("0.0.0.0:54", 3),
+            tcp("0.0.0.0:445", None, TcpState::Listen, SYSTEM_PID),
+            tcp("10.0.0.1:5000", Some("10.0.0.2:80"), TcpState::TimeWait, NO_OWNER_PID),
+        ];
+        let (r, _, _) = reader(vec![Ok(sockets), Err(SocketError::KeptGrowing { table: "t" })], vec![Ok(HashMap::new())]);
+        let mut r = r.with_ending(Box::new(move |pids| {
+            log.lock().unwrap().push(pids.to_vec());
+            HashSet::from([7])
+        }));
+        let t0 = Instant::now();
+        r.sockets(t0, false);
+        assert_eq!(*asked.lock().unwrap(), vec![vec![3, 7]], "distinct owners, sorted, not PID 0 or 4");
+        assert_eq!(r.ending(), &HashSet::from([7]));
+        r.sockets(t0 + Duration::from_secs(1), false);
+        assert_eq!(asked.lock().unwrap().len(), 1, "not asked between reads");
+        r.sockets(t0 + PORTS_REFRESH, false);
+        assert_eq!(asked.lock().unwrap().len(), 1, "a failed socket read asks nothing");
+        assert_eq!(r.ending(), &HashSet::from([7]), "and keeps the last answer");
     }
 }

@@ -86,6 +86,7 @@ pub fn end_summary(name: &str, total: usize, failures: &[ActionError], elevated:
         ActionError::AlreadyExited => "already exited".to_string(),
         ActionError::Critical => "Windows marks it as critical".to_string(),
         ActionError::Cancelled => "cancelled".to_string(),
+        ActionError::Ending => String::new(),
         ActionError::Other(detail) => detail.trim_end_matches('.').to_string(),
     };
     let failed = failures.len();
@@ -224,6 +225,18 @@ mod tests {
         assert_eq!(
             end_summary("X", 2, &[ActionError::Other("busy".into())], true),
             "Ended 1 of 2 processes in X; 1 couldn't be ended: busy."
+        );
+    }
+
+    #[test]
+    fn end_summary_reports_a_process_stuck_while_ending() {
+        assert_eq!(
+            end_summary("Node.js", 1, &[ActionError::Ending], true),
+            "Node.js is already ending, but Windows did not finish closing it. It keeps its ports and files until it closes."
+        );
+        assert_eq!(
+            end_summary("Node.js", 3, &[ActionError::Ending], true),
+            "Ended 2 of 3 processes in Node.js; 1 couldn't be ended: already ending."
         );
     }
 
