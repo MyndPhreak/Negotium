@@ -605,6 +605,7 @@ mod tests {
         assert_eq!(got, [5173], "the Established and Time wait rows on 5173 stay hidden");
     }
 
+    #[allow(clippy::too_many_arguments)] // one argument per column keeps the sort fixtures readable
     fn r(id: i32, app: &str, pid: u32, proto: &str, la: &str, lp: u16, ra: &str, rp: Option<u16>, state: &str) -> PortRow {
         PortRow {
             id,
