@@ -151,6 +151,18 @@ pub struct Frame {
     pub graph_end_ms: u64,
     pub history_rows: Vec<AppHistoryView>,
     pub history_elapsed_s: u64,
+    pub ports: Option<PortsFrame>,
+}
+
+/// The Ports page for one tick: every socket as a row, and the action target of each row that has one.
+#[derive(Clone, Debug, Default)]
+pub struct PortsFrame {
+    pub rows: Vec<crate::ports::PortRow>,
+    pub targets: HashMap<i32, Target>,
+    /// Every process (pid, create time, parent pid): End process tree needs the descendants.
+    pub all_procs: Vec<(u32, i64, u32)>,
+    /// Why the sockets could not be read; the rows are then the last list.
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -563,6 +575,7 @@ pub fn build_frame(
         graph_end_ms: graph::end_of(history, snap.taken_at_ms),
         history_rows: Vec::new(),
         history_elapsed_s: 0,
+        ports: None,
     }
 }
 

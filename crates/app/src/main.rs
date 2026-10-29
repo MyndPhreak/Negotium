@@ -690,6 +690,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Every page change: a rail click, and the page a restart comes back on.
     let show_page = {
         let (weak, b, load_startup, load_services) = (weak.clone(), bridge.clone(), load_startup.clone(), load_services.clone());
+        let controls = controls.clone();
         let integrations = tray_wiring.integrations.clone();
         move |page: negotium::controls::Page| {
             if let Some(ui) = weak.upgrade() {
@@ -700,6 +701,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 load_startup();
             } else if page == negotium::controls::Page::Services {
                 load_services();
+            } else if page == negotium::controls::Page::Ports {
+                // Read the sockets on the next tick, not up to 2 s from now.
+                controls.request_ports_refresh();
             }
             // The Settings switches read the machine again (a change made outside Negotium).
             integrations.page_shown(page);
@@ -758,6 +762,30 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_reset_history(move || controls.request_reset_history());
     }
     ui.on_refresh_services(load_services.clone());
+    {
+        let controls = controls.clone();
+        ui.on_refresh_ports(move || controls.request_ports_refresh());
+    }
+    {
+        let b = bridge.clone();
+        ui.on_search_ports(move |text| b.borrow_mut().set_ports_search(&text));
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_sort_ports(move |col| {
+            if let Some(ui) = weak.upgrade() {
+                b.borrow_mut().sort_ports(&ui, col);
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_set_ports_view(move |view| {
+            if let Some(ui) = weak.upgrade() {
+                b.borrow_mut().set_ports_view(&ui, view);
+            }
+        });
+    }
     {
         let b = bridge.clone();
         ui.on_search_services(move |text| b.borrow_mut().set_services_search(&text));
@@ -1082,11 +1110,27 @@ fn main() -> Result<(), slint::PlatformError> {
             });
         }
     };
+    // Plans an action on a target and runs it, asks first, or does nothing: the Overview and the
+    // Ports page share it, so they confirm and fail alike.
+    let run_plan = {
+        let (weak, pending, start_job) = (weak.clone(), pending.clone(), start_job.clone());
+        move |action: &str, target: &negotium::view::Target, procs: &[(u32, i64, u32)]| {
+            match negotium::dispatch::plan(action, target, procs) {
+                negotium::dispatch::Plan::Run(job) => start_job(job),
+                negotium::dispatch::Plan::Confirm(text, job) => {
+                    *pending.borrow_mut() = Some(job);
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_show_confirm(text.into());
+                    }
+                }
+                negotium::dispatch::Plan::Nothing => {}
+            }
+        }
+    };
     {
         let b = bridge.clone();
         let weak = weak.clone();
-        let pending = pending.clone();
-        let start_job = start_job.clone();
+        let run_plan = run_plan.clone();
         let (settings, controls, saver) = (settings.clone(), controls.clone(), saver.clone());
         let (active_affinity, active_priority) = (active_affinity.clone(), active_priority.clone());
         ui.on_row_action(move |action, id| {
@@ -1183,16 +1227,27 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 return;
             }
-            match negotium::dispatch::plan(action.as_str(), &target, &procs) {
-                negotium::dispatch::Plan::Run(job) => start_job(job),
-                negotium::dispatch::Plan::Confirm(text, job) => {
-                    *pending.borrow_mut() = Some(job);
-                    if let Some(ui) = weak.upgrade() {
-                        ui.invoke_show_confirm(text.into());
-                    }
+            run_plan(action.as_str(), &target, &procs);
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_port_action(move |action, id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if action.as_str() == "goto" {
+                let pid = b.borrow().port_pid(id);
+                if let Some(pid) = pid {
+                    b.borrow_mut().select_pid(&ui, pid);
                 }
-                negotium::dispatch::Plan::Nothing => {}
+                return;
             }
+            // Clone out of the borrow and release it before doing anything else.
+            let (target, procs) = {
+                let b = b.borrow();
+                (b.port_target(id), b.port_procs().to_vec())
+            };
+            let Some(target) = target else { return };
+            run_plan(action.as_str(), &target, &procs);
         });
     }
     {

@@ -48,7 +48,10 @@ export component Rail inherits VerticalLayout {
     callback select(int);
     width: 76px;
     padding: 6px;
-    spacing: 4px;
+    // Seven buttons must fit the window's minimum height (440 less the 32 px caption).
+    padding-top: 4px;
+    padding-bottom: 4px;
+    spacing: 1px;
     // The buttons keep their fixed height; spare height stays empty below them.
     alignment: start;
     RailButton {
@@ -85,6 +88,13 @@ export component Rail inherits VerticalLayout {
         selected: root.page == 5;
         interactive: root.interactive;
         activated => { root.select(5); }
+    }
+    RailButton {
+        label: "Ports";
+        icon: "M 3 7 L 17 7 M 3 13 L 17 13 M 7 3 L 5 17 M 15 3 L 13 17";
+        selected: root.page == 6;
+        interactive: root.interactive;
+        activated => { root.select(6); }
     }
     RailButton {
         label: "Settings";

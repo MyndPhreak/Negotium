@@ -15,6 +15,7 @@ pub mod nav;
 pub mod perf;
 pub mod picker;
 pub mod platform;
+pub mod ports;
 pub mod renderer;
 pub mod scrub;
 pub mod settings;

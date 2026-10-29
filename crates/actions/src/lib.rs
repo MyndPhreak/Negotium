@@ -3,6 +3,7 @@
 mod affinity;
 mod close;
 mod details;
+pub mod drivers;
 mod efficiency;
 mod elevation;
 pub mod integration;
@@ -31,10 +32,10 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBreakOnTermination};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, STILL_ACTIVE,
 };
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +46,9 @@ pub enum ActionError {
     Critical,
     /// The user declined a prompt (ERROR_CANCELLED), such as the UAC prompt.
     Cancelled,
+    /// Already ending (it has an exit code) but not closed yet: a thread is stuck, often in a
+    /// driver. Windows refuses every action on it with access denied until it closes.
+    Ending,
     Other(String),
 }
 
@@ -57,6 +61,7 @@ impl std::fmt::Display for ActionError {
             ActionError::AccessDenied => f.write_str("access denied"),
             ActionError::Critical => f.write_str("Windows marks the process as critical"),
             ActionError::Cancelled => f.write_str("it was cancelled"),
+            ActionError::Ending => f.write_str("it is already ending"),
             ActionError::Other(detail) => f.write_str(detail),
         }
     }
@@ -74,6 +79,9 @@ impl ActionError {
                 "Windows marks this process as critical \u{2014} ending it would crash the PC.".to_string()
             }
             ActionError::Cancelled => format!("Couldn't change {what}: it was cancelled."),
+            ActionError::Ending => format!(
+                "{what} is already ending, but Windows did not finish closing it. It keeps its ports and files until it closes."
+            ),
             ActionError::Other(detail) => format!("Couldn't change {what}: {detail}."),
         }
     }
@@ -124,21 +132,59 @@ pub(crate) fn open_verified(pid: u32, create_time: i64, access: PROCESS_ACCESS_R
     let handle = unsafe { OpenProcess(access | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
         .map(OwnedHandle)
         .map_err(|e| open_error(&e))?;
+    let (actual, state) = read_state(&handle)?;
+    // A zombie (exited, but still held open by someone) and a process stuck while ending would both
+    // fail with a misleading access-denied, so each is reported as what it is.
+    if state == ProcessState::Exited || actual != create_time {
+        return Err(ActionError::AlreadyExited);
+    }
+    if state == ProcessState::Ending {
+        return Err(ActionError::Ending);
+    }
+    Ok(handle)
+}
+
+/// Where a process is in its life, from `GetProcessTimes`' exit time and `GetExitCodeProcess`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    Running,
+    /// It has an exit code but no exit time: told to end, not closed yet.
+    Ending,
+    /// Closed (a zombie when something still holds it open).
+    Exited,
+}
+
+pub fn process_state(exit_time: i64, exit_code: u32) -> ProcessState {
+    if exit_time != 0 {
+        ProcessState::Exited
+    } else if exit_code == STILL_ACTIVE.0 as u32 {
+        ProcessState::Running
+    } else {
+        ProcessState::Ending
+    }
+}
+
+/// Whether `pid` is stuck while it ends. False when it can't be opened or read.
+pub fn is_ending(pid: u32) -> bool {
+    // SAFETY: plain Win32 call; the handle is owned by OwnedHandle.
+    let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }).map(OwnedHandle) else {
+        return false;
+    };
+    matches!(read_state(&handle), Ok((_, ProcessState::Ending)))
+}
+
+/// The creation time and state of an open process.
+fn read_state(handle: &OwnedHandle) -> Result<(i64, ProcessState), ActionError> {
     let (mut created, mut exited, mut kernel, mut user) =
         (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     // SAFETY: valid handle and four writable FILETIMEs.
     unsafe { GetProcessTimes(handle.0, &mut created, &mut exited, &mut kernel, &mut user) }
         .map_err(|e| ActionError::from_win(&e))?;
-    // A zombie (exited, but still held open by someone) has a nonzero exit time; acting on it
-    // would fail with a misleading access-denied, so report it as exited.
-    if exited.dwHighDateTime != 0 || exited.dwLowDateTime != 0 {
-        return Err(ActionError::AlreadyExited);
-    }
-    let actual = ((created.dwHighDateTime as i64) << 32) | created.dwLowDateTime as i64;
-    if actual != create_time {
-        return Err(ActionError::AlreadyExited);
-    }
-    Ok(handle)
+    let mut code = 0u32;
+    // SAFETY: valid handle with query rights; `code` is a writable u32.
+    unsafe { GetExitCodeProcess(handle.0, &mut code) }.map_err(|e| ActionError::from_win(&e))?;
+    let time = |t: FILETIME| ((t.dwHighDateTime as i64) << 32) | t.dwLowDateTime as i64;
+    Ok((time(created), process_state(time(exited), code)))
 }
 
 /// Whether Windows marks the process BreakOnTermination (ending it bugchecks the machine).
@@ -215,6 +261,30 @@ mod tests {
         assert_eq!(ActionError::from_win(&cancelled), ActionError::Cancelled);
         assert_eq!(ActionError::Cancelled.to_string(), "it was cancelled");
         assert_eq!(ActionError::Cancelled.message("Zoom", false), "Couldn't change Zoom: it was cancelled.");
+    }
+
+    #[test]
+    fn exit_time_and_exit_code_tell_running_ending_and_exited_apart() {
+        const STILL_ACTIVE: u32 = 259;
+        assert_eq!(process_state(0, STILL_ACTIVE), ProcessState::Running);
+        assert_eq!(process_state(0, 1), ProcessState::Ending);
+        assert_eq!(process_state(0, 0), ProcessState::Ending);
+        assert_eq!(process_state(134_377_003_838_014_588, 1), ProcessState::Exited);
+        assert_eq!(process_state(134_377_003_838_014_588, STILL_ACTIVE), ProcessState::Exited);
+    }
+
+    #[test]
+    fn a_process_stuck_while_ending_gets_its_own_message() {
+        assert_eq!(ActionError::Ending.to_string(), "it is already ending");
+        let text = "Node.js is already ending, but Windows did not finish closing it. It keeps its ports and files until it closes.";
+        assert_eq!(ActionError::Ending.message("Node.js", true), text);
+        assert_eq!(ActionError::Ending.message("Node.js", false), text);
+    }
+
+    #[test]
+    fn a_running_or_missing_process_is_not_ending() {
+        assert!(!is_ending(std::process::id()));
+        assert!(!is_ending(u32::MAX - 3));
     }
 
     #[test]

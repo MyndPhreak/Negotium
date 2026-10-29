@@ -86,6 +86,7 @@ pub fn end_summary(name: &str, total: usize, failures: &[ActionError], elevated:
         ActionError::AlreadyExited => "already exited".to_string(),
         ActionError::Critical => "Windows marks it as critical".to_string(),
         ActionError::Cancelled => "cancelled".to_string(),
+        ActionError::Ending => "already ending".to_string(),
         ActionError::Other(detail) => detail.trim_end_matches('.').to_string(),
     };
     let failed = failures.len();
@@ -95,14 +96,51 @@ pub fn end_summary(name: &str, total: usize, failures: &[ActionError], elevated:
     )
 }
 
+/// What to do about a process stuck while ending, when it still holds sockets: name the network
+/// filter drivers that likely hold it, else point to a restart. `None` when it holds no sockets.
+pub fn ending_hint(holds_sockets: bool, filters: &[String]) -> Option<String> {
+    if !holds_sockets {
+        return None;
+    }
+    if filters.is_empty() {
+        return Some("If it does not close, restart the computer.".to_string());
+    }
+    Some(format!(
+        "A network filter driver likely holds it: {}. Restart that app or its service. If that does not help, restart the computer.",
+        filters.join(", ")
+    ))
+}
+
+/// `text` with `hint` after it.
+pub fn with_hint(text: String, hint: Option<String>) -> String {
+    match hint {
+        Some(hint) if !text.is_empty() => format!("{text} {hint}"),
+        _ => text,
+    }
+}
+
+/// The hint for the stuck processes among `ending`: whether any holds a socket, and if so which
+/// network filter drivers run. Reads the socket tables and the drivers; call off the UI thread.
+fn stuck_hint(ending: &[u32]) -> Option<String> {
+    if ending.is_empty() {
+        return None;
+    }
+    let holds = negotium_collector::sockets::list_sockets().is_ok_and(|s| s.iter().any(|s| ending.contains(&s.pid)));
+    let filters = if holds { negotium_actions::drivers::network_filters() } else { Vec::new() };
+    ending_hint(holds, &filters)
+}
+
 /// Blocking; call on an action thread. Returns the notification text ("" = silent success),
 /// or `details:`-prefixed details text for [`JobKind::Details`].
 pub fn run(job: Job, elevated: bool) -> String {
     let fail = |e: ActionError| e.message(&job.name, elevated);
     match job.kind {
         JobKind::EndMany => {
-            let failures: Vec<_> = end_many(&job.targets).into_iter().filter_map(|(_, r)| r.err()).collect();
-            end_summary(&job.name, job.targets.len(), &failures, elevated)
+            let results = end_many(&job.targets);
+            let ending: Vec<u32> =
+                results.iter().filter(|(_, r)| *r == Err(ActionError::Ending)).map(|&((pid, _), _)| pid).collect();
+            let failures: Vec<_> = results.into_iter().filter_map(|(_, r)| r.err()).collect();
+            with_hint(end_summary(&job.name, job.targets.len(), &failures, elevated), stuck_hint(&ending))
         }
         JobKind::ForceClose => match job.targets.first() {
             Some(&(pid, ct)) => match force_close(pid, ct) {
@@ -225,6 +263,39 @@ mod tests {
             end_summary("X", 2, &[ActionError::Other("busy".into())], true),
             "Ended 1 of 2 processes in X; 1 couldn't be ended: busy."
         );
+    }
+
+    #[test]
+    fn end_summary_reports_a_process_stuck_while_ending() {
+        assert_eq!(
+            end_summary("Node.js", 1, &[ActionError::Ending], true),
+            "Node.js is already ending, but Windows did not finish closing it. It keeps its ports and files until it closes."
+        );
+        assert_eq!(
+            end_summary("Node.js", 3, &[ActionError::Ending], true),
+            "Ended 2 of 3 processes in Node.js; 1 couldn't be ended: already ending."
+        );
+    }
+
+    #[test]
+    fn a_stuck_process_with_sockets_names_the_network_filters() {
+        assert_eq!(
+            ending_hint(true, &["Portmaster".into()]).as_deref(),
+            Some("A network filter driver likely holds it: Portmaster. Restart that app or its service. If that does not help, restart the computer.")
+        );
+        assert_eq!(
+            ending_hint(true, &["NordVPN".into(), "Portmaster".into()]).as_deref(),
+            Some("A network filter driver likely holds it: NordVPN, Portmaster. Restart that app or its service. If that does not help, restart the computer.")
+        );
+        assert_eq!(ending_hint(true, &[]).as_deref(), Some("If it does not close, restart the computer."));
+        assert_eq!(ending_hint(false, &["Portmaster".into()]), None);
+    }
+
+    #[test]
+    fn a_hint_follows_the_message() {
+        assert_eq!(with_hint("A.".into(), Some("B.".into())), "A. B.");
+        assert_eq!(with_hint("A.".into(), None), "A.");
+        assert_eq!(with_hint(String::new(), Some("B.".into())), "", "no message, no hint");
     }
 
     #[test]

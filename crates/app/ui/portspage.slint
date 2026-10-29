@@ -1,0 +1,364 @@
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ScrollIndicator } from "scrollindicator.slint";
+import { SortHeader, RowIcon } from "applist.slint";
+import { FocusButton } from "focusbutton.slint";
+
+export struct PortData {
+    id: int,
+    app: string,
+    sub: string,
+    has-icon: bool,
+    icon: image,
+    pid: string,
+    protocol: string,
+    local-addr: string,
+    local-port: string,
+    remote-addr: string,
+    remote-port: string,
+    state: string,
+    actionable: bool,
+    can-locate: bool,
+}
+
+// One choice of the Listening / All control; the chosen one is filled with the accent.
+component ViewButton inherits FocusButton {
+    in property <string> label;
+    in property <bool> selected;
+    height: 28px;
+    width: 92px;
+    border-radius: 4px;
+    background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card : transparent);
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.text : (root.selected ? Theme.accent : Theme.card-border);
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    Text {
+        text: root.label;
+        color: root.selected ? Theme.accent : Theme.text;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+export component PortsPage inherits VerticalLayout {
+    in property <[PortData]> rows;
+    // 0 Listening, 1 All.
+    in property <int> view;
+    in-out property <string> search-text;
+    in property <int> sort-column: 4;
+    in property <bool> sort-descending: false;
+    in property <string> count-text;
+    in property <length> bottom-inset;
+    in property <bool> interactive: true;
+    out property <int> menu-target: -1;
+    out property <bool> menu-actionable: false;
+    out property <bool> menu-can-locate: false;
+    callback set-view(int);
+    callback search(string);
+    callback sort-clicked(int);
+    callback refresh();
+    // "goto" | "end-task" | "end-tree" | "open-location"
+    callback port-action(string, int);
+    property <length> pid-w: 52px;
+    property <length> proto-w: 50px;
+    property <length> addr-w: 110px;
+    property <length> port-w: 58px;
+    property <length> state-w: 84px;
+    property <length> gutter: 14px;
+    max-width: 16384px;
+    padding: 12px;
+    padding-bottom: 12px + root.bottom-inset;
+    spacing: 10px;
+
+    HorizontalLayout {
+        vertical-stretch: 0;
+        spacing: 12px;
+        Text {
+            text: "Ports";
+            color: Theme.text;
+            font-size: 24px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Button { text: "Refresh"; enabled: root.interactive; clicked => { root.refresh(); } }
+    }
+    HorizontalLayout {
+        vertical-stretch: 0;
+        spacing: 8px;
+        ViewButton {
+            label: "Listening";
+            selected: root.view == 0;
+            interactive: root.interactive;
+            activated => { root.set-view(0); }
+        }
+        ViewButton {
+            label: "All";
+            selected: root.view == 1;
+            interactive: root.interactive;
+            activated => { root.set-view(1); }
+        }
+        LineEdit {
+            horizontal-stretch: 1;
+            text <=> root.search-text;
+            placeholder-text: "Search by port, PID, app, or address";
+            accessible-label: "Search ports";
+            enabled: root.interactive;
+            edited(text) => { root.search(text); }
+        }
+    }
+    Text {
+        vertical-stretch: 0;
+        text: root.count-text;
+        color: Theme.muted;
+        font-size: 12px;
+    }
+    HorizontalLayout {
+        vertical-stretch: 0;
+        height: 24px;
+        padding-left: 8px;
+        padding-right: 8px + root.gutter;
+        spacing: 6px;
+        SortHeader {
+            label: "App";
+            left: true;
+            horizontal-stretch: 1;
+            sorted: root.sort-column == 0;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(0); }
+        }
+        SortHeader {
+            label: "PID";
+            width: root.pid-w;
+            sorted: root.sort-column == 1;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(1); }
+        }
+        SortHeader {
+            label: "Proto";
+            left: true;
+            width: root.proto-w;
+            sorted: root.sort-column == 2;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(2); }
+        }
+        SortHeader {
+            label: "Local address";
+            left: true;
+            width: root.addr-w;
+            sorted: root.sort-column == 3;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(3); }
+        }
+        SortHeader {
+            label: "Port";
+            width: root.port-w;
+            sorted: root.sort-column == 4;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(4); }
+        }
+        SortHeader {
+            label: "Remote address";
+            left: true;
+            width: root.addr-w;
+            sorted: root.sort-column == 5;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(5); }
+        }
+        SortHeader {
+            label: "Port";
+            width: root.port-w;
+            sorted: root.sort-column == 6;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(6); }
+        }
+        SortHeader {
+            label: "State";
+            left: true;
+            width: root.state-w;
+            sorted: root.sort-column == 7;
+            descending: root.sort-descending;
+            interactive: root.interactive;
+            activated => { root.sort-clicked(7); }
+        }
+    }
+    Rectangle {
+        vertical-stretch: 1;
+        port-menu := ContextMenuArea {
+            enabled: false;
+            Menu {
+                MenuItem {
+                    title: "End task";
+                    enabled: root.menu-actionable;
+                    activated => { root.port-action("end-task", root.menu-target); }
+                }
+                MenuItem {
+                    title: "End process tree";
+                    enabled: root.menu-actionable;
+                    activated => { root.port-action("end-tree", root.menu-target); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: "Open file location";
+                    enabled: root.menu-can-locate;
+                    activated => { root.port-action("open-location", root.menu-target); }
+                }
+                MenuItem {
+                    title: "Go to process";
+                    enabled: root.menu-actionable;
+                    activated => { root.port-action("goto", root.menu-target); }
+                }
+            }
+        }
+        lv := ScrollView {
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            content-width: max(0px, self.visible-width - root.gutter);
+            content-height: column.preferred-height;
+            changed content-height => {
+                self.content-y = max(self.content-y, min(0px, self.visible-height - self.content-height));
+            }
+            column := VerticalLayout {
+                width: lv.content-width;
+                height: self.preferred-height;
+                for r in root.rows : slot := Rectangle {
+                    height: 44px;
+                    property <bool> built: self.y + self.height > -lv.content-y && self.y < -lv.content-y + lv.visible-height;
+                    if slot.built : Rectangle {
+                        border-radius: 4px;
+                        background: ta.has-hover ? Theme.card : transparent;
+                        accessible-role: list-item;
+                        accessible-label: r.app + ", " + r.protocol + " port " + r.local-port + ", " + r.state + ", PID " + r.pid;
+                        ta := TouchArea {
+                            enabled: root.interactive;
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                    root.menu-target = r.id;
+                                    root.menu-actionable = r.actionable;
+                                    root.menu-can-locate = r.can-locate;
+                                    port-menu.show({ x: self.mouse-x, y: slot.y + lv.content-y + self.mouse-y });
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 6px;
+                            HorizontalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 8px;
+                                RowIcon {
+                                    size: 20px;
+                                    source: r.icon;
+                                    has-icon: r.has-icon;
+                                    windows: false;
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: r.app;
+                                        color: Theme.text;
+                                        font-size: 12.5px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                        accessible-role: none;
+                                    }
+                                    if r.sub != "" : Text {
+                                        text: r.sub;
+                                        color: Theme.muted;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                        accessible-role: none;
+                                    }
+                                }
+                            }
+                            Text {
+                                text: r.pid;
+                                width: root.pid-w;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: r.protocol;
+                                width: root.proto-w;
+                                color: Theme.text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: r.local-addr;
+                                width: root.addr-w;
+                                color: Theme.text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: r.local-port;
+                                width: root.port-w;
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: r.remote-addr;
+                                width: root.addr-w;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: r.remote-port;
+                                width: root.port-w;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: r.state;
+                                width: root.state-w;
+                                color: r.state == "Listening" || r.state == "Open" ? Theme.accent : Theme.muted;
+                                font-size: 11.5px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if lv.content-height > lv.visible-height : ScrollIndicator {
+            x: lv.width - self.width;
+            height: lv.height;
+            interactive: root.interactive;
+            content-y <=> lv.content-y;
+            visible-height: lv.visible-height;
+            content-height: lv.content-height;
+        }
+    }
+}

@@ -3,13 +3,17 @@
 use crate::controls::{Controls, Page};
 use crate::perf::{LastSeen, PerfInput, build_perf};
 use crate::tray::TraySample;
-use crate::view::{Frame, FrameOptions, IdMap, IdSeed, TOP_TILES, build_frame};
+use crate::ports::{PortIds, PortReader};
+use crate::view::{Frame, FrameOptions, IdMap, IdSeed, PortsFrame, TOP_TILES, build_frame};
 use negotium_collector::{Collector, SystemInfo};
 use negotium_history::History;
 use negotium_model::{Model, Ranker, TopPicker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// A socket read longer than this is logged (spec: a refresh stays under 20 ms).
+const PORTS_READ_BUDGET: Duration = Duration::from_millis(20);
 
 pub trait Source {
     fn next_frame(&mut self, controls: &Controls) -> Option<Frame>;
@@ -126,6 +130,9 @@ pub struct LiveSource {
     log: crate::log::Log,
     tray: Option<TraySink>,
     moderator: negotium_moderator::Moderator,
+    /// The Ports page: the socket tables, read only while that page is on screen.
+    ports: PortReader,
+    port_ids: PortIds,
 }
 
 impl LiveSource {
@@ -153,6 +160,8 @@ impl LiveSource {
             log: crate::log::Log::new(crate::log::Log::default_path()),
             tray: None,
             moderator: negotium_moderator::Moderator::new(),
+            ports: PortReader::live(),
+            port_ids: PortIds::default(),
         }
     }
 
@@ -327,6 +336,23 @@ impl Source for LiveSource {
             }
             // Nothing on these pages changes per tick.
             Page::Startup | Page::Settings | Page::Services => None,
+            Page::Ports => {
+                let force = controls.take_ports_refresh();
+                let error = self.ports.sockets(Instant::now(), force).2;
+                let (sockets, services, ending, filters) = self.ports.last();
+                let mut owners = crate::ports::owners_from(&snap.processes, services);
+                crate::ports::mark_ending(&mut owners, ending, filters);
+                let rows = crate::ports::build_port_rows(sockets, &owners, &mut self.port_ids);
+                let targets = rows.iter().filter_map(|r| crate::ports::port_target(r, &owners).map(|t| (r.id, t))).collect();
+                let all_procs = snap.processes.iter().map(|p| (p.pid, p.create_time, p.parent_pid)).collect();
+                if let Some(took) = self.ports.took().filter(|t| *t > PORTS_READ_BUDGET) {
+                    self.log.warn(&format!("ports read took {} ms", took.as_millis()));
+                }
+                if let Some(e) = self.ports.take_services_failure() {
+                    self.log.warn(&format!("ports: couldn't list services: {e}"));
+                }
+                Some(Frame { page: Page::Ports, ports: Some(PortsFrame { rows, targets, all_procs, error }), ..Default::default() })
+            }
         }
     }
 }
@@ -504,6 +530,89 @@ mod tests {
         let f = source.next_frame(&controls).expect("visible again");
         assert!(f.perf.is_none() && !f.rows.is_empty(), "switching back stops building Performance");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A source on the Ports page whose socket reads are counted; each read gives the next result
+    /// (the last repeats). The one socket is ours, so its owner is in the snapshot.
+    fn ports_source(results: Vec<Result<Vec<negotium_collector::sockets::Socket>, negotium_collector::sockets::SocketError>>) -> (LiveSource, Arc<AtomicU32>) {
+        let mut source = LiveSource::new(SharedHistory::default(), Instant::now(), IdSeed::default());
+        let dir = std::env::temp_dir().join(format!("negotium-worker-ports-{}-{:?}", std::process::id(), std::thread::current().id()));
+        source.log = crate::log::Log::with_writes(dir.join("negotium.log"), crate::appdata::Writes::Plain);
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        source.ports = PortReader::new(
+            Box::new(move || results[(c.fetch_add(1, Ordering::SeqCst) as usize).min(results.len() - 1)].clone()),
+            Box::new(|| Ok(Default::default())),
+        );
+        (source, calls)
+    }
+
+    fn our_socket() -> negotium_collector::sockets::Socket {
+        use negotium_collector::sockets::{Protocol, Socket};
+        Socket { protocol: Protocol::Udp, local: "127.0.0.1:5353".parse().unwrap(), remote: None, state: None, pid: std::process::id() }
+    }
+
+    #[test]
+    fn the_ports_page_builds_rows_and_targets_and_no_other_page() {
+        let (mut source, _) = ports_source(vec![Ok(vec![our_socket()])]);
+        let controls = Controls::default();
+        controls.set_page(Page::Ports);
+        let f = source.next_frame(&controls).expect("visible: a frame");
+        assert_eq!(f.page, Page::Ports);
+        let ports = f.ports.expect("the Ports page is built");
+        assert_eq!(ports.rows.len(), 1);
+        assert!(ports.rows[0].actionable, "our own process is in the snapshot: {:?}", ports.rows[0]);
+        assert!(ports.targets.contains_key(&ports.rows[0].id), "an owned row has an action target");
+        assert!(ports.error.is_none() && !ports.all_procs.is_empty());
+        assert!(f.rows.is_empty() && f.meters.is_empty() && f.perf.is_none(), "no Overview or Performance view on Ports");
+    }
+
+    #[test]
+    fn sockets_are_read_only_while_the_ports_page_is_on_screen() {
+        let (mut source, calls) = ports_source(vec![Ok(vec![our_socket()])]);
+        let controls = Controls::default();
+        controls.set_page(Page::Ports);
+        controls.set_visible(false);
+        assert!(source.next_frame(&controls).is_none(), "hidden: no frame");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "hidden: no read");
+        controls.set_visible(true);
+        controls.set_page(Page::Overview);
+        let f = source.next_frame(&controls).expect("visible: a frame");
+        assert!(f.ports.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "another page: no read");
+        controls.set_page(Page::Ports);
+        let f = source.next_frame(&controls).expect("visible: a frame");
+        assert_eq!(f.ports.map(|p| p.rows.len()), Some(1));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn two_ticks_read_the_sockets_once_unless_refresh_was_clicked() {
+        let (mut source, calls) = ports_source(vec![Ok(vec![our_socket()])]);
+        let controls = Controls::default();
+        controls.set_page(Page::Ports);
+        source.next_frame(&controls);
+        source.next_frame(&controls);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "within 2 s: the last list");
+        controls.request_ports_refresh();
+        source.next_frame(&controls);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "Refresh reads at once");
+        source.next_frame(&controls);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "and is taken once");
+    }
+
+    #[test]
+    fn a_failed_socket_read_gives_the_error_and_the_previous_rows() {
+        use negotium_collector::sockets::SocketError;
+        let (mut source, _) = ports_source(vec![Ok(vec![our_socket()]), Err(SocketError::Api { table: "GetExtendedUdpTable (IPv4)", code: 5 })]);
+        let controls = Controls::default();
+        controls.set_page(Page::Ports);
+        let first = source.next_frame(&controls).and_then(|f| f.ports).expect("ports");
+        assert_eq!(first.error, None);
+        controls.request_ports_refresh();
+        let second = source.next_frame(&controls).and_then(|f| f.ports).expect("ports");
+        assert_eq!(second.error.as_deref(), Some("GetExtendedUdpTable (IPv4) failed: 0x5"));
+        assert_eq!(second.rows, first.rows, "the previous rows stay");
     }
 
     #[test]

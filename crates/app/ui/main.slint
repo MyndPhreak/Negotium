@@ -10,10 +10,11 @@ import { SettingsPage } from "settingspage.slint";
 import { StartupPage, StartupData } from "startuppage.slint";
 import { AppHistoryPage, AppHistoryData } from "apphistorypage.slint";
 import { ServicesPage, ServiceData } from "servicespage.slint";
+import { PortsPage, PortData } from "portspage.slint";
 import { GraphData, ScrubRow, GraphClock } from "graph.slint";
 import { Caption, TitleBar } from "titlebar.slint";
 export { NegotiumTray } from "tray.slint";
-export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, GraphClock, Caption }
+export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, PortData, GraphClock, Caption }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -34,7 +35,7 @@ export component MainWindow inherits Window {
     callback caption-maximise();
     callback caption-close();
 
-    // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings, 4 AppHistory, 5 Services (crate::controls::Page).
+    // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings, 4 AppHistory, 5 Services, 6 Ports (crate::controls::Page).
     in-out property <int> page: 0;
     in property <[MeterData]> meters;
     in property <int> selected-metric;
@@ -218,6 +219,19 @@ export component MainWindow inherits Window {
     callback sort-services(int);
     callback refresh-services();
     callback service-action(string, int);
+
+    // Ports (crate::ports): the view is 0 Listening, 1 All; the sort column 4 is the local port.
+    in property <[PortData]> port-rows;
+    in-out property <int> ports-view: 0;
+    in-out property <string> ports-search-text;
+    in-out property <int> ports-sort-column: 4;
+    in-out property <bool> ports-sort-descending: false;
+    in-out property <string> ports-count-text;
+    callback search-ports(string);
+    callback sort-ports(int);
+    callback set-ports-view(int);
+    callback refresh-ports();
+    callback port-action(string, int);
 
     // Settings (crate::settings::Settings, shown by crate::settingspage): refresh index (0.5 / 1 /
     // 2 / 5 s), theme index (System / Light / Dark), the switches. `on-top` is both the window's
@@ -603,6 +617,28 @@ export component MainWindow inherits Window {
                         sort-clicked(c) => { root.sort-services(c); }
                         refresh => { root.refresh-services(); }
                         service-action(act, id) => { root.service-action(act, id); }
+                    }
+                }
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 6;
+                    PortsPage {
+                        rows: root.port-rows;
+                        view: root.ports-view;
+                        search-text <=> root.ports-search-text;
+                        sort-column: root.ports-sort-column;
+                        sort-descending: root.ports-sort-descending;
+                        count-text: root.ports-count-text;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        set-view(v) => { root.set-ports-view(v); }
+                        search(text) => { root.search-ports(text); }
+                        sort-clicked(c) => { root.sort-ports(c); }
+                        refresh => { root.refresh-ports(); }
+                        port-action(act, id) => { root.port-action(act, id); }
                     }
                 }
                 // Over every page: a result (a failed startup toggle, an action's message) shows
