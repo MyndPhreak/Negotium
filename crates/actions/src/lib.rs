@@ -3,6 +3,7 @@
 mod affinity;
 mod close;
 mod details;
+pub mod drivers;
 mod efficiency;
 mod elevation;
 pub mod integration;

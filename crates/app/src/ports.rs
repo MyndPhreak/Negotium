@@ -26,8 +26,9 @@ pub struct PortOwner {
     pub process_name: String,
     pub image_path: Option<String>,
     pub services: Vec<String>,
-    /// Told to end but not closed yet (`negotium_actions::is_ending`): it keeps its sockets.
-    pub ending: bool,
+    /// Told to end but not closed yet (`negotium_actions::is_ending`): it keeps its sockets. Holds
+    /// the row's second line ([`ending_text`]).
+    pub ending: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -99,6 +100,8 @@ type SocketSource = Box<dyn FnMut() -> Result<Vec<Socket>, SocketError> + Send>;
 type ServiceSource = Box<dyn FnMut() -> Result<HashMap<u32, Vec<String>>, String> + Send>;
 /// Of the PIDs given, the ones stuck while they end.
 type EndingSource = Box<dyn FnMut(&[u32]) -> HashSet<u32> + Send>;
+/// The running network filter drivers, by name (`negotium_actions::drivers::network_filters`).
+type FilterSource = Box<dyn FnMut() -> Vec<String> + Send>;
 
 /// Reads the socket tables at most every [`PORTS_REFRESH`] and keeps the last list.
 pub struct PortReader {
@@ -106,6 +109,8 @@ pub struct PortReader {
     services: ServiceSource,
     ending: Option<EndingSource>,
     last_ending: HashSet<u32>,
+    filters: Option<FilterSource>,
+    last_filters: Vec<String>,
     read_at: Option<Instant>,
     last: Vec<Socket>,
     last_services: HashMap<u32, Vec<String>>,
@@ -125,6 +130,8 @@ impl PortReader {
             services,
             ending: None,
             last_ending: HashSet::new(),
+            filters: None,
+            last_filters: Vec::new(),
             read_at: None,
             last: Vec::new(),
             last_services: HashMap::new(),
@@ -157,14 +164,21 @@ impl PortReader {
         self
     }
 
+    /// Also asks `filters` for the network filter drivers when an owner is first found stuck while
+    /// ending, and keeps the answer while any stays stuck.
+    pub fn with_filters(self, _filters: FilterSource) -> Self {
+        self
+    }
+
     /// The owners found stuck while ending at the latest socket read.
     pub fn ending(&self) -> &HashSet<u32> {
         &self.last_ending
     }
 
-    /// The latest sockets, their services and the owners stuck while ending, without reading.
-    pub fn last(&self) -> (&[Socket], &HashMap<u32, Vec<String>>, &HashSet<u32>) {
-        (&self.last, &self.last_services, &self.last_ending)
+    /// The latest sockets, their services, the owners stuck while ending and the network filter
+    /// drivers, without reading.
+    pub fn last(&self) -> (&[Socket], &HashMap<u32, Vec<String>>, &HashSet<u32>, &[String]) {
+        (&self.last, &self.last_services, &self.last_ending, &self.last_filters)
     }
 
     /// Reads again when due (first call, PORTS_REFRESH passed, or `force`); otherwise the last list.
@@ -236,18 +250,23 @@ pub fn owners_from(processes: &[ProcessSample], services: &HashMap<u32, Vec<Stri
                 process_name: p.name.clone(),
                 image_path: p.image_path.clone(),
                 services: services.get(&p.pid).cloned().unwrap_or_default(),
-                ending: false,
+                ending: None,
             };
             (p.pid, owner)
         })
         .collect()
 }
 
+/// The second line of a row whose owner is stuck while ending.
+pub fn ending_text(_filters: &[String]) -> String {
+    String::new()
+}
+
 /// Marks the owners `ending` names as stuck while they end.
-pub fn mark_ending(owners: &mut HashMap<u32, PortOwner>, ending: &HashSet<u32>) {
+pub fn mark_ending(owners: &mut HashMap<u32, PortOwner>, ending: &HashSet<u32>, filters: &[String]) {
     for pid in ending {
         if let Some(o) = owners.get_mut(pid) {
-            o.ending = true;
+            o.ending = Some(ending_text(filters));
         }
     }
 }
@@ -275,7 +294,7 @@ fn port_row(s: &Socket, id: i32, owners: &HashMap<u32, PortOwner>) -> PortRow {
     let (app, sub, process_name) = match (s.pid, owner) {
         (SYSTEM_PID, _) => ("System".to_string(), "Kernel driver (for example HTTP.sys)".to_string(), "System".to_string()),
         (NO_OWNER_PID, _) => ("No owner".to_string(), String::new(), String::new()),
-        (_, Some(o)) if o.ending => (o.name.clone(), "Ending: Windows did not finish closing it".to_string(), o.process_name.clone()),
+        (_, Some(PortOwner { ending: Some(note), name, process_name, .. })) => (name.clone(), note.clone(), process_name.clone()),
         (_, Some(o)) => (o.name.clone(), o.services.join(", "), o.process_name.clone()),
         (_, None) => ("Ended".to_string(), String::new(), String::new()),
     };
@@ -429,7 +448,7 @@ mod tests {
             process_name: process.into(),
             image_path: path.map(String::from),
             services: services.iter().map(|s| s.to_string()).collect(),
-            ending: false,
+            ending: None,
         }
     }
 
@@ -871,10 +890,10 @@ mod tests {
     #[test]
     fn an_owner_stuck_while_ending_says_so_and_keeps_its_actions() {
         let mut o = owner(118960, "Node.js", "node.exe", Some("C:\node.exe"), &["Svc"]);
-        o.ending = true;
+        o.ending = Some(ending_text(&["Portmaster".into()]));
         let o = owners(vec![o]);
         let r = one_row(tcp("0.0.0.0:8080", None, TcpState::Listen, 118960), &o);
-        assert_eq!((r.app.as_str(), r.sub.as_str()), ("Node.js", "Ending: Windows did not finish closing it"));
+        assert_eq!((r.app.as_str(), r.sub.as_str()), ("Node.js", "Ending: a network filter driver likely holds it (Portmaster)"));
         assert!(r.actionable && r.can_locate, "End task explains why it can't end it");
         assert_eq!(filter_port_rows(&[r], PortView::Listening, "ending").len(), 1, "the search finds it");
     }
@@ -882,8 +901,9 @@ mod tests {
     #[test]
     fn marking_sets_ending_only_on_the_owners_named() {
         let mut o = owners(vec![owner(1, "A", "a.exe", None, &[]), owner(2, "B", "b.exe", None, &[])]);
-        mark_ending(&mut o, &HashSet::from([2, 99]));
-        assert!(!o[&1].ending && o[&2].ending);
+        mark_ending(&mut o, &HashSet::from([2, 99]), &["Portmaster".into()]);
+        assert_eq!(o[&1].ending, None);
+        assert_eq!(o[&2].ending.as_deref(), Some("Ending: a network filter driver likely holds it (Portmaster)"));
         assert!(!o.contains_key(&99));
     }
 
@@ -912,5 +932,37 @@ mod tests {
         r.sockets(t0 + PORTS_REFRESH, false);
         assert_eq!(asked.lock().unwrap().len(), 1, "a failed socket read asks nothing");
         assert_eq!(r.ending(), &HashSet::from([7]), "and keeps the last answer");
+    }
+
+    #[test]
+    fn the_ending_line_names_the_network_filters_or_says_windows_did_not_finish() {
+        assert_eq!(
+            ending_text(&["NordVPN".into(), "Portmaster".into()]),
+            "Ending: a network filter driver likely holds it (NordVPN, Portmaster)"
+        );
+        assert_eq!(ending_text(&[]), "Ending: Windows did not finish closing it");
+    }
+
+    #[test]
+    fn the_filters_are_asked_once_while_owners_stay_stuck() {
+        let (r, _, _) = reader(vec![Ok(vec![udp("0.0.0.0:53", 7)])], vec![Ok(HashMap::new())]);
+        let answers = Arc::new(std::sync::Mutex::new(vec![HashSet::from([7]), HashSet::from([7]), HashSet::new(), HashSet::from([7])]));
+        let filter_calls = Arc::new(AtomicUsize::new(0));
+        let fc = filter_calls.clone();
+        let mut r = r
+            .with_ending(Box::new(move |_| answers.lock().unwrap().remove(0)))
+            .with_filters(Box::new(move || {
+                fc.fetch_add(1, Ordering::SeqCst);
+                vec!["Portmaster".to_string()]
+            }));
+        let t0 = Instant::now();
+        r.sockets(t0, true);
+        assert_eq!((filter_calls.load(Ordering::SeqCst), r.last().3), (1, &["Portmaster".to_string()][..]));
+        r.sockets(t0, true);
+        assert_eq!(filter_calls.load(Ordering::SeqCst), 1, "still stuck: the last answer is kept");
+        r.sockets(t0, true);
+        assert!(r.last().3.is_empty(), "none stuck: no filters to show");
+        r.sockets(t0, true);
+        assert_eq!(filter_calls.load(Ordering::SeqCst), 2, "stuck again: asked again");
     }
 }

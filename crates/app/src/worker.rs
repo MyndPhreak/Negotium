@@ -339,9 +339,9 @@ impl Source for LiveSource {
             Page::Ports => {
                 let force = controls.take_ports_refresh();
                 let error = self.ports.sockets(Instant::now(), force).2;
-                let (sockets, services, ending) = self.ports.last();
+                let (sockets, services, ending, filters) = self.ports.last();
                 let mut owners = crate::ports::owners_from(&snap.processes, services);
-                crate::ports::mark_ending(&mut owners, ending);
+                crate::ports::mark_ending(&mut owners, ending, filters);
                 let rows = crate::ports::build_port_rows(sockets, &owners, &mut self.port_ids);
                 let targets = rows.iter().filter_map(|r| crate::ports::port_target(r, &owners).map(|t| (r.id, t))).collect();
                 let all_procs = snap.processes.iter().map(|p| (p.pid, p.create_time, p.parent_pid)).collect();
