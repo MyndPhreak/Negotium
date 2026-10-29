@@ -98,13 +98,36 @@ pub fn end_summary(name: &str, total: usize, failures: &[ActionError], elevated:
 
 /// What to do about a process stuck while ending, when it still holds sockets: name the network
 /// filter drivers that likely hold it, else point to a restart. `None` when it holds no sockets.
-pub fn ending_hint(_holds_sockets: bool, _filters: &[String]) -> Option<String> {
-    None
+pub fn ending_hint(holds_sockets: bool, filters: &[String]) -> Option<String> {
+    if !holds_sockets {
+        return None;
+    }
+    if filters.is_empty() {
+        return Some("If it does not close, restart the computer.".to_string());
+    }
+    Some(format!(
+        "A network filter driver likely holds it: {}. Restart that app or its service. If that does not help, restart the computer.",
+        filters.join(", ")
+    ))
 }
 
 /// `text` with `hint` after it.
-pub fn with_hint(text: String, _hint: Option<String>) -> String {
-    text
+pub fn with_hint(text: String, hint: Option<String>) -> String {
+    match hint {
+        Some(hint) if !text.is_empty() => format!("{text} {hint}"),
+        _ => text,
+    }
+}
+
+/// The hint for the stuck processes among `ending`: whether any holds a socket, and if so which
+/// network filter drivers run. Reads the socket tables and the drivers; call off the UI thread.
+fn stuck_hint(ending: &[u32]) -> Option<String> {
+    if ending.is_empty() {
+        return None;
+    }
+    let holds = negotium_collector::sockets::list_sockets().is_ok_and(|s| s.iter().any(|s| ending.contains(&s.pid)));
+    let filters = if holds { negotium_actions::drivers::network_filters() } else { Vec::new() };
+    ending_hint(holds, &filters)
 }
 
 /// Blocking; call on an action thread. Returns the notification text ("" = silent success),
@@ -113,8 +136,11 @@ pub fn run(job: Job, elevated: bool) -> String {
     let fail = |e: ActionError| e.message(&job.name, elevated);
     match job.kind {
         JobKind::EndMany => {
-            let failures: Vec<_> = end_many(&job.targets).into_iter().filter_map(|(_, r)| r.err()).collect();
-            end_summary(&job.name, job.targets.len(), &failures, elevated)
+            let results = end_many(&job.targets);
+            let ending: Vec<u32> =
+                results.iter().filter(|(_, r)| *r == Err(ActionError::Ending)).map(|&((pid, _), _)| pid).collect();
+            let failures: Vec<_> = results.into_iter().filter_map(|(_, r)| r.err()).collect();
+            with_hint(end_summary(&job.name, job.targets.len(), &failures, elevated), stuck_hint(&ending))
         }
         JobKind::ForceClose => match job.targets.first() {
             Some(&(pid, ct)) => match force_close(pid, ct) {

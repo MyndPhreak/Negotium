@@ -4,7 +4,8 @@ use crate::ActionError;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::ERROR_MORE_DATA;
 use windows::Win32::System::Services::{
-    CloseServiceHandle, ControlService, ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, OpenSCManagerW,
+    CloseServiceHandle, ControlService, ENUM_SERVICE_STATE, ENUM_SERVICE_STATUS_PROCESSW, ENUM_SERVICE_TYPE,
+    EnumServicesStatusExW, OpenSCManagerW, SERVICE_ACTIVE, SERVICE_DRIVER,
     OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW, QueryServiceStatusEx, SC_ENUM_PROCESS_INFO, SC_HANDLE,
     SC_MANAGER_CONNECT, SC_MANAGER_ENUMERATE_SERVICE, SC_STATUS_PROCESS_INFO, SERVICE_AUTO_START, SERVICE_BOOT_START,
     SERVICE_CONTINUE_PENDING, SERVICE_CONTROL_STOP, SERVICE_DEMAND_START, SERVICE_DISABLED,
@@ -86,11 +87,59 @@ unsafe fn pwstr_to_string(ptr: PWSTR) -> String {
 
 /// Enumerates all Win32 services on the local machine.
 pub fn list_services() -> Result<Vec<ServiceEntry>, ActionError> {
-    // SAFETY: connects to local SCM for enumeration.
-    let scm = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE) }
-        .map(ScHandle)
-        .map_err(|e| ActionError::from_win(&e))?;
+    let scm = open_scm()?;
+    let mut config_buf = vec![0u8; 8192];
+    let out = enumerate(&scm, SERVICE_WIN32, SERVICE_STATE_ALL, |item| {
+        // SAFETY: pointers in `item` point into the enumeration buffer.
+        let name = unsafe { pwstr_to_string(item.lpServiceName) };
+        // SAFETY: pointers in `item` point into the enumeration buffer.
+        let display_name = unsafe { pwstr_to_string(item.lpDisplayName) };
+        let st = item.ServiceStatusProcess;
+        let state = st.dwCurrentState.0;
+        let running = st.dwCurrentState == SERVICE_RUNNING;
+        let pid = (st.dwProcessId != 0).then_some(st.dwProcessId);
+        let (start_type, group, _) = query_config(scm.0, PCWSTR(item.lpServiceName.0), &mut config_buf);
+        ServiceEntry {
+            name,
+            display_name,
+            status: state_label(state).to_string(),
+            running,
+            pid,
+            start_type,
+            group,
+        }
+    })?;
+    Ok(out)
+}
 
+/// The running kernel and file-system drivers: (display name, `ImagePath` as the service manager
+/// gives it). A driver whose configuration can't be read is left out.
+pub(crate) fn running_drivers() -> Result<Vec<(String, String)>, ActionError> {
+    let scm = open_scm()?;
+    let mut config_buf = vec![0u8; 8192];
+    let all = enumerate(&scm, SERVICE_DRIVER, SERVICE_ACTIVE, |item| {
+        // SAFETY: pointers in `item` point into the enumeration buffer.
+        let display_name = unsafe { pwstr_to_string(item.lpDisplayName) };
+        let (_, _, bin) = query_config(scm.0, PCWSTR(item.lpServiceName.0), &mut config_buf);
+        (display_name, bin)
+    })?;
+    Ok(all.into_iter().filter(|(_, bin)| !bin.is_empty()).collect())
+}
+
+fn open_scm() -> Result<ScHandle, ActionError> {
+    // SAFETY: connects to local SCM for enumeration.
+    unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE) }
+        .map(ScHandle)
+        .map_err(|e| ActionError::from_win(&e))
+}
+
+/// Enumerates the services of `kind` in `state`, mapping each with `f`.
+fn enumerate<T>(
+    scm: &ScHandle,
+    kind: ENUM_SERVICE_TYPE,
+    state: ENUM_SERVICE_STATE,
+    mut f: impl FnMut(&ENUM_SERVICE_STATUS_PROCESSW) -> T,
+) -> Result<Vec<T>, ActionError> {
     let mut needed = 0u32;
     let mut count = 0u32;
     let mut resume = 0u32;
@@ -99,8 +148,8 @@ pub fn list_services() -> Result<Vec<ServiceEntry>, ActionError> {
         EnumServicesStatusExW(
             scm.0,
             SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_STATE_ALL,
+            kind,
+            state,
             None,
             &mut needed,
             &mut count,
@@ -124,8 +173,8 @@ pub fn list_services() -> Result<Vec<ServiceEntry>, ActionError> {
         EnumServicesStatusExW(
             scm.0,
             SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_STATE_ALL,
+            kind,
+            state,
             Some(&mut buf),
             &mut needed,
             &mut count,
@@ -137,36 +186,14 @@ pub fn list_services() -> Result<Vec<ServiceEntry>, ActionError> {
 
     // SAFETY: `buf` begins with `count` contiguous `ENUM_SERVICE_STATUS_PROCESSW` structs.
     let raw = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW, count as usize) };
-    let mut config_buf = vec![0u8; 8192];
-    let mut out = Vec::with_capacity(count as usize);
-
-    for item in raw {
-        // SAFETY: pointers in `item` point into `buf`.
-        let name = unsafe { pwstr_to_string(item.lpServiceName) };
-        // SAFETY: pointers in `item` point into `buf`.
-        let display_name = unsafe { pwstr_to_string(item.lpDisplayName) };
-        let st = item.ServiceStatusProcess;
-        let state = st.dwCurrentState.0;
-        let running = st.dwCurrentState == SERVICE_RUNNING;
-        let pid = (st.dwProcessId != 0).then_some(st.dwProcessId);
-        let (start_type, group) = query_config(scm.0, PCWSTR(item.lpServiceName.0), &mut config_buf);
-        out.push(ServiceEntry {
-            name,
-            display_name,
-            status: state_label(state).to_string(),
-            running,
-            pid,
-            start_type,
-            group,
-        });
-    }
-    Ok(out)
+    Ok(raw.iter().map(&mut f).collect())
 }
 
-fn query_config(scm: SC_HANDLE, service_name: PCWSTR, buf: &mut Vec<u8>) -> (String, String) {
+/// Start type, group and binary path; "—" and empty strings when the configuration can't be read.
+fn query_config(scm: SC_HANDLE, service_name: PCWSTR, buf: &mut Vec<u8>) -> (String, String, String) {
     // SAFETY: opens service for config query.
     let Ok(svc) = (unsafe { OpenServiceW(scm, service_name, SERVICE_QUERY_CONFIG) }).map(ScHandle) else {
-        return ("—".into(), String::new());
+        return ("—".into(), String::new(), String::new());
     };
     let mut needed = 0u32;
     // SAFETY: queries config into `buf`; resizes once if needed.
@@ -181,7 +208,7 @@ fn query_config(scm: SC_HANDLE, service_name: PCWSTR, buf: &mut Vec<u8>) -> (Str
         };
     }
     if ok.is_err() {
-        return ("—".into(), String::new());
+        return ("—".into(), String::new(), String::new());
     }
     // SAFETY: `buf` holds a valid `QUERY_SERVICE_CONFIGW`.
     let cfg = unsafe { &*(buf.as_ptr() as *const QUERY_SERVICE_CONFIGW) };
@@ -189,7 +216,7 @@ fn query_config(scm: SC_HANDLE, service_name: PCWSTR, buf: &mut Vec<u8>) -> (Str
     // SAFETY: `lpBinaryPathName` and `lpLoadOrderGroup` point into `buf`.
     let bin = unsafe { pwstr_to_string(cfg.lpBinaryPathName) };
     let group = extract_svchost_group(&bin).unwrap_or_else(|| unsafe { pwstr_to_string(cfg.lpLoadOrderGroup) });
-    (start, group)
+    (start, group, bin)
 }
 
 /// Starts a stopped service.

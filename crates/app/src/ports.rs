@@ -102,6 +102,8 @@ type ServiceSource = Box<dyn FnMut() -> Result<HashMap<u32, Vec<String>>, String
 type EndingSource = Box<dyn FnMut(&[u32]) -> HashSet<u32> + Send>;
 /// The running network filter drivers, by name (`negotium_actions::drivers::network_filters`).
 type FilterSource = Box<dyn FnMut() -> Vec<String> + Send>;
+/// Sockets, services by PID, owners stuck while ending, network filter drivers.
+pub type LastRead<'a> = (&'a [Socket], &'a HashMap<u32, Vec<String>>, &'a HashSet<u32>, &'a [String]);
 
 /// Reads the socket tables at most every [`PORTS_REFRESH`] and keeps the last list.
 pub struct PortReader {
@@ -156,6 +158,7 @@ impl PortReader {
             }),
         )
         .with_ending(Box::new(|pids| pids.iter().copied().filter(|&p| negotium_actions::is_ending(p)).collect()))
+        .with_filters(Box::new(negotium_actions::drivers::network_filters))
     }
 
     /// Also asks `ending` on each socket read which owners are stuck while they end.
@@ -166,7 +169,8 @@ impl PortReader {
 
     /// Also asks `filters` for the network filter drivers when an owner is first found stuck while
     /// ending, and keeps the answer while any stays stuck.
-    pub fn with_filters(self, _filters: FilterSource) -> Self {
+    pub fn with_filters(mut self, filters: FilterSource) -> Self {
+        self.filters = Some(filters);
         self
     }
 
@@ -177,7 +181,7 @@ impl PortReader {
 
     /// The latest sockets, their services, the owners stuck while ending and the network filter
     /// drivers, without reading.
-    pub fn last(&self) -> (&[Socket], &HashMap<u32, Vec<String>>, &HashSet<u32>, &[String]) {
+    pub fn last(&self) -> LastRead<'_> {
         (&self.last, &self.last_services, &self.last_ending, &self.last_filters)
     }
 
@@ -208,7 +212,13 @@ impl PortReader {
         let mut pids: Vec<u32> = self.last.iter().map(|s| s.pid).filter(|&p| p != SYSTEM_PID && p != NO_OWNER_PID).collect();
         pids.sort_unstable();
         pids.dedup();
+        let was_stuck = !self.last_ending.is_empty();
         self.last_ending = ending(&pids);
+        if self.last_ending.is_empty() {
+            self.last_filters.clear();
+        } else if !was_stuck && let Some(filters) = self.filters.as_mut() {
+            self.last_filters = filters();
+        }
     }
 
     fn read_services(&mut self) {
@@ -258,8 +268,12 @@ pub fn owners_from(processes: &[ProcessSample], services: &HashMap<u32, Vec<Stri
 }
 
 /// The second line of a row whose owner is stuck while ending.
-pub fn ending_text(_filters: &[String]) -> String {
-    String::new()
+pub fn ending_text(filters: &[String]) -> String {
+    if filters.is_empty() {
+        "Ending: Windows did not finish closing it".to_string()
+    } else {
+        format!("Ending: a network filter driver likely holds it ({})", filters.join(", "))
+    }
 }
 
 /// Marks the owners `ending` names as stuck while they end.

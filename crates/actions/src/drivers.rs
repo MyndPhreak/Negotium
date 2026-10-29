@@ -13,25 +13,68 @@ pub struct DriverInfo {
 
 /// Whether a driver image imports the WFP kernel client (`fwpkclnt.sys`). Import names are plain
 /// ASCII in the image, so a case-insensitive search finds them.
-pub fn references_wfp(_image: &[u8]) -> bool {
-    false
+pub fn references_wfp(image: &[u8]) -> bool {
+    const NAME: &[u8] = b"fwpkclnt.sys";
+    image.windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
 }
 
 /// A driver's `ImagePath` as the service manager gives it, as a file path.
-pub fn driver_path(_raw: &str, _windir: &Path) -> PathBuf {
-    PathBuf::new()
+pub fn driver_path(raw: &str, windir: &Path) -> PathBuf {
+    let raw = raw.trim().trim_matches('"');
+    if let Some(rest) = raw.strip_prefix(r"\??\") {
+        return PathBuf::from(rest);
+    }
+    let lower = raw.to_ascii_lowercase();
+    if lower.starts_with(r"\systemroot\") {
+        return windir.join(&raw[r"\SystemRoot\".len()..]);
+    }
+    if lower.starts_with(r"system32\") {
+        return windir.join(raw);
+    }
+    PathBuf::from(raw)
 }
 
 /// The names to show: product name, else the service's display name; Microsoft's own drivers left
 /// out; sorted, without repeats.
-pub fn filter_names(_drivers: &[DriverInfo]) -> Vec<String> {
-    Vec::new()
+pub fn filter_names(drivers: &[DriverInfo]) -> Vec<String> {
+    let mut names: Vec<String> = drivers
+        .iter()
+        .filter(|d| !d.company.as_deref().is_some_and(|c| c.contains("Microsoft")))
+        .map(|d| {
+            let product = d.product.as_deref().map(str::trim).filter(|p| !p.is_empty());
+            product.unwrap_or(d.display_name.trim()).to_string()
+        })
+        .filter(|n| !n.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// The running third-party WFP callout drivers, by name. Empty when none, or when the drivers
 /// can't be listed.
 pub fn network_filters() -> Vec<String> {
-    Vec::new()
+    let Ok(drivers) = crate::services::running_drivers() else { return Vec::new() };
+    let windir = PathBuf::from(negotium_collector::windows_dir());
+    let infos: Vec<DriverInfo> = drivers
+        .into_iter()
+        .filter_map(|(display_name, raw)| {
+            let path = driver_path(&raw, &windir);
+            let version = negotium_collector::VersionInfo::read(path.to_str()?);
+            let company = version.as_ref().and_then(|v| v.string("CompanyName"));
+            // Windows' own drivers are left out anyway: skip reading their images.
+            if company.as_deref().is_some_and(|c| c.contains("Microsoft")) {
+                return None;
+            }
+            let image = std::fs::read(&path).ok()?;
+            references_wfp(&image).then(|| DriverInfo {
+                display_name,
+                company,
+                product: version.as_ref().and_then(|v| v.string("ProductName")),
+            })
+        })
+        .collect();
+    filter_names(&infos)
 }
 
 #[cfg(test)]
