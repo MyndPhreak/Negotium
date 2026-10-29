@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0](https://github.com/MyndPhreak/Negotium/compare/v0.11.0...v0.12.0) (2026-10-29)
+
+
+### Features
+
+* **app:** group the Settings page and add search ([#36](https://github.com/MyndPhreak/Negotium/issues/36)) ([0d22433](https://github.com/MyndPhreak/Negotium/commit/0d2243362cbb861497b2cdf148dc9a15532aa82e))
+* **app:** Ports page to see which app holds each port ([#38](https://github.com/MyndPhreak/Negotium/issues/38)) ([7ef17c1](https://github.com/MyndPhreak/Negotium/commit/7ef17c18b7ac98c62dbbc68a58ee8f633009d258))
+
 ## [0.11.0](https://github.com/MyndPhreak/Negotium/compare/v0.10.0...v0.11.0) (2026-10-25)
 
 
