@@ -514,7 +514,7 @@ impl Bridge {
             // Likewise the hidden graphs: end any scrub.
             self.scrub(ui, -1.0);
         }
-        if matches!(page, Page::Startup | Page::Settings | Page::AppHistory | Page::Services | Page::Ports) {
+        if matches!(page, Page::Startup | Page::Settings | Page::AppHistory | Page::Services | Page::Ports | Page::Users) {
             // No graphs there, and no frames: the view rests on the newest sample (PF3).
             self.rest(ui);
         }

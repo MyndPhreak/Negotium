@@ -335,8 +335,7 @@ impl Source for LiveSource {
                 Some(crate::view::build_history_frame(&self.usage, sort_col, sort_desc))
             }
             // Nothing on these pages changes per tick.
-            Page::Startup | Page::Settings | Page::Services => None,
-            Page::Users => Some(Frame { page: Page::Users, ..Default::default() }),
+            Page::Startup | Page::Settings | Page::Services | Page::Users => None,
             Page::Ports => {
                 let force = controls.take_ports_refresh();
                 let error = self.ports.sockets(Instant::now(), force).2;

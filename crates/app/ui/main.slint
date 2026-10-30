@@ -11,6 +11,7 @@ import { StartupPage, StartupData } from "startuppage.slint";
 import { AppHistoryPage, AppHistoryData } from "apphistorypage.slint";
 import { ServicesPage, ServiceData } from "servicespage.slint";
 import { PortsPage, PortData } from "portspage.slint";
+import { UsersPage } from "userspage.slint";
 import { GraphData, ScrubRow, GraphClock } from "graph.slint";
 import { Caption, TitleBar } from "titlebar.slint";
 export { NegotiumTray } from "tray.slint";
@@ -35,7 +36,7 @@ export component MainWindow inherits Window {
     callback caption-maximise();
     callback caption-close();
 
-    // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings, 4 AppHistory, 5 Services, 6 Ports (crate::controls::Page).
+    // Page shown: 0 Overview, 1 Performance, 2 Startup, 3 Settings, 4 AppHistory, 5 Services, 6 Ports, 7 Users (crate::controls::Page).
     in-out property <int> page: 0;
     in property <[MeterData]> meters;
     in property <int> selected-metric;
@@ -640,6 +641,14 @@ export component MainWindow inherits Window {
                         refresh => { root.refresh-ports(); }
                         port-action(act, id) => { root.port-action(act, id); }
                     }
+                }
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == 7;
+                    UsersPage { }
                 }
                 // Over every page: a result (a failed startup toggle, an action's message) shows
                 // wherever the user is. Its host is empty (zero height) without a toast.

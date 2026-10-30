@@ -42,6 +42,7 @@ impl Page {
             4 => Page::AppHistory,
             5 => Page::Services,
             6 => Page::Ports,
+            7 => Page::Users,
             _ => Page::Overview,
         }
     }
@@ -60,7 +61,7 @@ impl Page {
             Page::AppHistory => "history",
             Page::Services => "services",
             Page::Ports => "ports",
-            Page::Users => "",
+            Page::Users => "users",
         }
     }
 
