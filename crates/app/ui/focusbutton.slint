@@ -4,13 +4,19 @@
 export component FocusButton inherits Rectangle {
     in property <bool> interactive: true;
     out property <bool> focused: fs.has-focus;
+    // Focus that came from the keyboard: draw the focus ring from this, not from `focused`, so a
+    // mouse click leaves no ring behind. A key press on the control shows it again.
+    out property <bool> focus-visible: fs.has-focus && !pointer-focus;
     out property <bool> hovered: ta.has-hover;
+    property <bool> pointer-focus;
     callback activated();
     // Keyboard (or click) focus arrived; a scrolling owner brings the control into view.
     callback focus-gained();
     changed focused => {
         if (root.focused) {
             root.focus-gained();
+        } else {
+            root.pointer-focus = false;
         }
     }
     accessible-role: button;
@@ -23,6 +29,7 @@ export component FocusButton inherits Rectangle {
     fs := FocusScope {
         enabled: root.interactive;
         key-pressed(event) => {
+            root.pointer-focus = false;
             if (event.text == " " || event.text == Key.Return) {
                 root.activated();
                 return accept;
@@ -32,6 +39,10 @@ export component FocusButton inherits Rectangle {
     }
     ta := TouchArea {
         enabled: root.interactive;
-        clicked => { fs.focus(); root.activated(); }
+        clicked => {
+            root.pointer-focus = true;
+            fs.focus();
+            root.activated();
+        }
     }
 }

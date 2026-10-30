@@ -228,7 +228,7 @@ component EndTaskButton inherits FocusButton {
     height: 22px;
     border-radius: 4px;
     background: root.hovered ? Theme.danger : transparent;
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     Path {
         width: 10px;
@@ -252,7 +252,7 @@ export component SortHeader inherits FocusButton {
     in property <bool> descending;
     in property <bool> left;
     border-radius: 4px;
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     // "Sort by <column>" first (what activating it does), then which way the sorted one runs.
     accessible-label: "Sort by " + root.label + (root.sorted ? (root.descending ? ", sorted descending" : ", sorted ascending") : "");

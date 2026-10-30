@@ -29,8 +29,8 @@ component ViewButton inherits FocusButton {
     width: 92px;
     border-radius: 4px;
     background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card : transparent);
-    border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.text : (root.selected ? Theme.accent : Theme.card-border);
+    border-width: root.focus-visible ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : (root.selected ? Theme.accent : Theme.card-border);
     accessible-label: root.label;
     accessible-checkable: true;
     accessible-checked: root.selected;

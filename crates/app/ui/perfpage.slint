@@ -14,7 +14,7 @@ component DeviceButton inherits FocusButton {
     height: 60px;
     border-radius: Theme.radius;
     background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card : transparent);
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     accessible-label: root.data.title + " performance";
     accessible-checkable: true;
@@ -54,8 +54,8 @@ component RangeButton inherits FocusButton {
     height: 28px;
     border-radius: 4px;
     background: root.selected ? Theme.accent : (root.hovered ? Theme.card : transparent);
-    border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.text : Theme.card-border;
+    border-width: root.focus-visible ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : Theme.card-border;
     accessible-label: root.label + " range";
     accessible-checkable: true;
     accessible-checked: root.selected;
