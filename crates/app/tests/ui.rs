@@ -6063,6 +6063,25 @@ fn empty_lists_say_so() {
     assert!(found(&ui, "No services run in this process."));
 }
 
+#[test]
+fn a_live_frame_for_another_selection_is_dropped() {
+    use negotium::details::{DetailsFrame, Opened, ProcFacts};
+    let (ui, _controls, bridge, _) = wired_list(vec![row_view(7, "Editor", "")]);
+    let fact = |pid| ProcFacts { pid, create_time: 1, name: "a.exe".into(), role: None, details: None };
+    let opened = Opened {
+        name: "App".into(), publisher: None, version: None, signature: negotium_actions::Signature::Unknown,
+        image_path: None, procs: vec![fact(10), fact(11)], selected: 0,
+    };
+    bridge.borrow_mut().open_details(&ui, opened);
+    bridge.borrow_mut().select_details(&ui, 1);
+    let stale = DetailsFrame { selected: (10, 1), parent: Some((4, "System".into())), ..Default::default() };
+    let mut f = frame(vec![row_view(7, "Editor", "")]);
+    f.details = Some(stale);
+    bridge.borrow_mut().apply(&ui, f);
+    let parent = ui.get_details_identity().iter().find(|f| f.label == "Parent").map(|f| f.value.to_string());
+    assert_eq!(parent.as_deref(), Some("\u{2014}"), "the frame was built for process 10, not the selected 11");
+}
+
 // ---- Row menu: Search online, Properties, Go to service(s), Create memory dump file ----
 
 /// The row menu opens as a native popup the testing backend cannot search: its items are

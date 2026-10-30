@@ -344,6 +344,13 @@ impl Controls {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_new_details_watch_wakes_the_worker() {
+        let c = super::Controls::default();
+        c.set_details_watch(Some(crate::details::DetailsWatch { procs: vec![(1, 2)], selected: (1, 2) }));
+        assert!(c.wait(std::time::Duration::from_millis(1)), "the worker builds the new selection at once");
+    }
+
+    #[test]
     fn a_details_watch_is_kept_until_cleared() {
         let c = super::Controls::default();
         let w = crate::details::DetailsWatch { procs: vec![(1, 2)], selected: (1, 2) };

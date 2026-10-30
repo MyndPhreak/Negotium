@@ -721,9 +721,13 @@ mod tests {
             ]),
             ..Default::default()
         };
-        mark_service_hosts(&mut frame, &HashSet::from([11]));
-        assert!(frame.targets[&1].hosts_services && !frame.targets[&2].hosts_services);
-        assert!(frame.rows[0].hosts_services && !frame.rows[1].hosts_services);
+        frame.targets.get_mut(&1).unwrap().root = Some((10, 1));
+        mark_service_hosts(&mut frame, &HashSet::from([11, 20]));
+        assert!(!frame.targets[&1].hosts_services, "only a child hosts a service: Services would show nothing for the main PID");
+        assert!(frame.targets[&2].hosts_services, "no root: the first process is the main one");
+        assert!(!frame.rows[0].hosts_services && frame.rows[1].hosts_services);
+        mark_service_hosts(&mut frame, &HashSet::from([10]));
+        assert!(frame.targets[&1].hosts_services && frame.rows[0].hosts_services);
     }
     use negotium_model::TopPicker;
 

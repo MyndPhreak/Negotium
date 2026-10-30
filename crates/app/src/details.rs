@@ -65,6 +65,8 @@ pub struct Connection {
 /// The live part, built by the worker each tick while a watch is set.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DetailsFrame {
+    /// The selection this was built for: a frame for an earlier selection is dropped.
+    pub selected: (u32, i64),
     pub procs: Vec<LiveProc>,
     /// Peak working set of the selected process.
     pub peak_bytes: Option<u64>,
@@ -139,6 +141,7 @@ pub fn build_details_frame(
         None => Vec::new(),
     };
     DetailsFrame {
+        selected: watch.selected,
         procs,
         peak_bytes: selected.and(peak),
         parent,
