@@ -156,4 +156,20 @@ mod tests {
         assert_eq!(hung(14_400), "Not responding · 14s");
         assert_eq!(hung(65_000), "Not responding · 1m 05s");
     }
+
+    #[test]
+    fn span_shows_the_two_largest_units() {
+        for (secs, want) in [
+            (0, "Less than 1 min"),
+            (59, "Less than 1 min"),
+            (60, "1 min"),
+            (3_599, "59 min"),
+            (3_600, "1 h 0 min"),
+            (7_500, "2 h 5 min"),
+            (86_400, "1 d 0 h"),
+            (280_800, "3 d 6 h"),
+        ] {
+            assert_eq!(span(secs), want, "{secs} s");
+        }
+    }
 }
