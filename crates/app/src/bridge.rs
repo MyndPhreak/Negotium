@@ -847,6 +847,30 @@ impl Bridge {
         usize::try_from(id).ok().and_then(|i| self.services.get(i)).cloned()
     }
 
+    /// A Users read landed: the card and the rows (stub).
+    pub fn set_users(&mut self, _ui: &MainWindow, _read: crate::users::UsersRead, _elevated: bool) {}
+
+    /// A Users read failed outright (the job panicked): the note says so (stub).
+    pub fn users_read_failed(&mut self, _ui: &MainWindow) {}
+
+    /// Claims the one Users read at a time (stub).
+    pub fn begin_users_read(&mut self) -> bool {
+        false
+    }
+
+    /// The profile folder to walk, when a walk is due (stub).
+    pub fn begin_profile_size(&mut self, _now: Instant) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// A profile walk ended; None: it failed (stub).
+    pub fn set_profile_size(&mut self, _ui: &MainWindow, _size: Option<negotium_actions::users::DirSize>, _now: Instant) {}
+
+    /// The user name of an other-session row (stub).
+    pub fn user_name(&self, _id: i32) -> Option<String> {
+        None
+    }
+
     /// Switches to Overview and filters to `pid` ("Go to process" from Services).
     pub fn select_pid(&mut self, ui: &MainWindow, pid: u32) {
         let query = pid.to_string();

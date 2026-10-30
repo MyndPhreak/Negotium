@@ -1,1 +1,36 @@
-export component UsersPage inherits VerticalLayout { }
+export struct YouData {
+    initial: string,
+    name: string,
+    subtitle: string,
+    account-type: string,
+    signed-in: string,
+    place: string,
+    profile-path: string,
+    profile-size: string,
+    sign-in: string,
+    password-set: string,
+    groups: string,
+    negotium-admin: string,
+}
+
+export struct UserRowData {
+    id: int,
+    name: string,
+    account-type: string,
+    state: string,
+    idle: string,
+}
+
+export component UsersPage inherits VerticalLayout {
+    in property <YouData> you;
+    in property <image> picture;
+    in property <bool> has-picture;
+    in property <[UserRowData]> rows;
+    in property <bool> need-admin;
+    in property <string> read-note;
+    in property <length> bottom-inset;
+    in property <bool> interactive: true;
+    // "lock" | "switch-user" | "sign-out" | "account-settings" (id -1) | "sign-out-session" | "disconnect" (the row's session id)
+    callback act(string, int);
+    callback restart-admin();
+}
