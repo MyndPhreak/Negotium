@@ -166,6 +166,7 @@ export component MainWindow inherits Window {
     in property <length> current-row-h;
     in property <int> current-id: -1;
     in property <bool> current-actionable;
+    in property <bool> current-hosts-services;
     out property <length> list-scroll-y: list.scroll-y;
 
     callback select-page(int);
@@ -202,6 +203,8 @@ export component MainWindow inherits Window {
     callback dismiss-toast();
     // The toast's optional second button and what it does (set with the toast, cleared with it).
     in-out property <string> toast-action;
+    // The toast text the button belongs to: any other toast shows without it.
+    in-out property <string> toast-action-for;
     callback toast-action-clicked();
     callback select-device(string);
     callback select-range(int);
@@ -489,6 +492,7 @@ export component MainWindow inherits Window {
                             current-row-h: root.current-row-h;
                             current-id: root.current-id;
                             current-actionable: root.current-actionable;
+                            current-hosts-services: root.current-hosts-services;
                             list-focus(f) => { root.list-focus(f); }
                             list-key(k) => { return root.list-key(k); }
                             park-focus => { parking.focus(); }
@@ -673,7 +677,7 @@ export component MainWindow inherits Window {
                     if root.toast != "" : Toast {
                         text: root.toast;
                         interactive: !root.modal-open;
-                        action-label: root.toast-action;
+                        action-label: root.toast == root.toast-action-for ? root.toast-action : "";
                         action => { root.toast-action-clicked(); }
                         dismiss => { root.dismiss-toast(); }
                     }

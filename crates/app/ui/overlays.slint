@@ -42,6 +42,7 @@ export component Toast inherits Rectangle {
         padding: 8px;
         spacing: 8px;
         Text { text: root.text; color: Theme.text; vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1; }
+        if root.action-label != "" : Button { text: root.action-label; enabled: root.interactive; clicked => { root.action(); } }
         Button { text: "OK"; enabled: root.interactive; clicked => { root.dismiss(); } }
     }
 }

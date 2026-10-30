@@ -6117,6 +6117,11 @@ fn a_toast_action_shows_its_button() {
     ui.set_toast("Memory dump of Editor saved.".into());
     assert!(!found(&ui, "Open folder"), "no action: no button");
     ui.set_toast_action("Open folder".into());
+    ui.set_toast_action_for("Another toast.".into());
+    slint::platform::update_timers_and_animations();
+    assert!(!found(&ui, "Open folder"), "another toast: no button");
+    ui.set_toast_action_for("Memory dump of Editor saved.".into());
+    slint::platform::update_timers_and_animations();
     let clicked = Rc::new(RefCell::new(0));
     let c = clicked.clone();
     ui.on_toast_action_clicked(move || *c.borrow_mut() += 1);

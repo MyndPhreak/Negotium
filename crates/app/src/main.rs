@@ -1104,6 +1104,12 @@ fn main() -> Result<(), slint::PlatformError> {
                         negotium::dispatch::Outcome::Details(opened) => {
                             negotium::bridge::with_bridge(|b| b.open_details(&ui, *opened));
                         }
+                        negotium::dispatch::Outcome::Dumped { text, file } => {
+                            ui.set_toast(text.as_str().into());
+                            ui.set_toast_action("Open folder".into());
+                            ui.set_toast_action_for(text.into());
+                            negotium::bridge::with_bridge(|b| b.set_toast_file(Some(file.to_string_lossy().into_owned())));
+                        }
                         other => {
                             let text = other.toast();
                             if !text.is_empty() {
@@ -1225,6 +1231,17 @@ fn main() -> Result<(), slint::PlatformError> {
             if action.as_str() == "set-priority" {
                 open_priority(&target);
                 return;
+            }
+            if action.as_str() == "goto-services" {
+                if let (Some(query), Some(ui)) = (negotium::dispatch::services_search(&target), weak.upgrade()) {
+                    b.borrow_mut().go_to_services(&ui, &query);
+                }
+                return;
+            }
+            if action.as_str() == "dump"
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.set_toast(format!("Creating a memory dump of {}\u{2026}", target.name).into());
             }
             if action.as_str() == "toggle-aequilibrium-exclusion" {
                 // The moderator matches image names, not an app card's friendly name.
@@ -1498,6 +1515,15 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_dismiss_toast(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_toast("".into());
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_toast_action_clicked(move || {
+            let Some(file) = b.borrow().toast_file() else { return };
+            if let (Err(e), Some(ui)) = (negotium_actions::open_file_location(&file), weak.upgrade()) {
+                ui.set_toast(e.message("the dump folder", elevated).into());
             }
         });
     }

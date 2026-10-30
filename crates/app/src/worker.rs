@@ -133,7 +133,12 @@ pub struct LiveSource {
     /// The Ports page: the socket tables, read only while that page is on screen.
     ports: PortReader,
     port_ids: PortIds,
+    /// PIDs that host Windows services, for the Overview menu's Go to service(s); read again
+    /// when older than SERVICE_HOSTS_REFRESH.
+    service_hosts: (Option<Instant>, std::collections::HashSet<u32>),
 }
+
+const SERVICE_HOSTS_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl LiveSource {
     /// `history`, `epoch` and `ids` outlive a restart after a panic, so the graphs keep their past
@@ -162,6 +167,7 @@ impl LiveSource {
             moderator: negotium_moderator::Moderator::new(),
             ports: PortReader::live(),
             port_ids: PortIds::default(),
+            service_hosts: (None, Default::default()),
         }
     }
 
@@ -322,6 +328,19 @@ impl Source for LiveSource {
 }
 
 impl LiveSource {
+    /// The PIDs that host services, read again when stale. A failed read keeps the last set.
+    fn service_hosts(&mut self) -> &std::collections::HashSet<u32> {
+        let (read_at, pids) = &mut self.service_hosts;
+        if read_at.is_none_or(|t| t.elapsed() >= SERVICE_HOSTS_REFRESH) {
+            *read_at = Some(Instant::now());
+            match negotium_actions::services::list_services() {
+                Ok(list) => *pids = list.iter().filter_map(|s| s.pid).filter(|&p| p > 0).collect(),
+                Err(e) => self.log.warn(&format!("couldn't list services for Go to service(s): {e}")),
+            }
+        }
+        &self.service_hosts.1
+    }
+
     /// The frame for the page on screen; `None` for a page that does not change per tick.
     fn page_frame(&mut self, controls: &Controls, snap: &negotium_snapshot::Snapshot, rows: &[negotium_model::AppRow]) -> Option<Frame> {
         // Only the page on screen is built (spec section 8).
@@ -339,7 +358,9 @@ impl LiveSource {
                     .collect();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped(), resorted, restrained };
                 let ids = &mut self.ids;
-                Some(read_history(&self.history, |h| build_frame(ids, snap, rows, &order, &top, h, &opts)))
+                let mut frame = read_history(&self.history, |h| build_frame(ids, snap, rows, &order, &top, h, &opts));
+                crate::view::mark_service_hosts(&mut frame, self.service_hosts());
+                Some(frame)
             }
             Page::Performance => {
                 let (device, range) = controls.perf();

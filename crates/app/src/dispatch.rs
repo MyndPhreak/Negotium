@@ -1,7 +1,8 @@
 //! Turns a row action into a job (pure), and runs jobs on action threads.
 use crate::view::Target;
 use negotium_actions::{
-    ActionError, end_many, force_close, open_file_location, process_details, toggle_efficiency_mode,
+    ActionError, create_dump, end_many, force_close, open_file_location, open_url, process_details, search_url,
+    show_properties, toggle_efficiency_mode,
 };
 use negotium_model::descendants_deepest_first;
 
@@ -63,6 +64,12 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
         },
         "efficiency" => job(JobKind::Efficiency, t.procs.clone()),
         "open-location" if t.image_path.is_some() => job(JobKind::OpenLocation, vec![]),
+        "search-online" if t.image_path.is_some() => job(JobKind::SearchOnline, vec![]),
+        "properties" if t.image_path.is_some() => job(JobKind::Properties, vec![]),
+        "dump" => match first {
+            Some(p) => job(JobKind::Dump, vec![p]),
+            None => return Plan::Nothing,
+        },
         "details" => match first {
             Some(p) => {
                 let mut rest: Vec<_> = t.procs.iter().copied().filter(|q| *q != p).collect();
@@ -85,8 +92,16 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
 
 /// The Services page search for "Go to service(s)": the main process's PID, when the app hosts
 /// services; `None` otherwise.
-pub fn services_search(_t: &Target) -> Option<String> {
-    None
+pub fn services_search(t: &Target) -> Option<String> {
+    if t.group || !t.hosts_services {
+        return None;
+    }
+    t.root.or_else(|| t.procs.first().copied()).map(|(pid, _)| pid.to_string())
+}
+
+/// The file name of `path` (`C:\App\app.exe` → `app.exe`).
+fn file_name(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
 /// Notification for an end-process job: silent on full success, the plain message when the only
@@ -181,9 +196,31 @@ pub fn run(job: Job, elevated: bool) -> Outcome {
             None => Outcome::Silent,
         };
     }
-    match run_text(job, elevated) {
-        text if text.is_empty() => Outcome::Silent,
-        text => Outcome::Toast(text),
+    let fail = |e: ActionError| Outcome::Toast(e.message(&job.name, elevated));
+    let path = job.path.as_deref();
+    match job.kind {
+        JobKind::Dump => match job.targets.first() {
+            Some(&(pid, ct)) => {
+                let process = path.map_or(job.name.as_str(), file_name);
+                match create_dump(pid, ct, process, &std::env::temp_dir()) {
+                    Ok(file) => Outcome::Dumped { text: format!("Memory dump of {} saved.", job.name), file },
+                    Err(e) => fail(e),
+                }
+            }
+            None => Outcome::Silent,
+        },
+        JobKind::SearchOnline => match path.map(|p| open_url(&search_url(file_name(p)))) {
+            Some(Err(e)) => fail(e),
+            _ => Outcome::Silent,
+        },
+        JobKind::Properties => match path.map(show_properties) {
+            Some(Err(e)) => fail(e),
+            _ => Outcome::Silent,
+        },
+        _ => match run_text(job, elevated) {
+            text if text.is_empty() => Outcome::Silent,
+            text => Outcome::Toast(text),
+        },
     }
 }
 

@@ -408,6 +408,8 @@ pub struct Bridge {
     /// The open Details popup's facts, and the latest live part the worker sent for it.
     details: Option<crate::details::Opened>,
     details_live: crate::details::DetailsFrame,
+    /// The file the toast's Open folder button selects in Explorer.
+    toast_file: Option<String>,
     /// Icons for rows on show arrived since the last push: one push is on its way (`icon_arrived`).
     icons_pending: bool,
     /// What a row without an icon carries: one image shared by every such row, because Slint's
@@ -478,6 +480,7 @@ impl Bridge {
             icon_loader: None,
             details: None,
             details_live: Default::default(),
+            toast_file: None,
             icons_pending: false,
             no_icon: slint::Image::from_rgba8(slint::SharedPixelBuffer::new(1, 1)),
             no_bars: ModelRc::new(VecModel::from(vec![0.0; 5])),
@@ -857,7 +860,11 @@ impl Bridge {
     }
 
     /// Switches to Services and filters it by `query` (a PID: "Go to service(s)").
-    pub fn go_to_services(&mut self, _ui: &MainWindow, _query: &str) {}
+    pub fn go_to_services(&mut self, ui: &MainWindow, query: &str) {
+        self.set_page(ui, Page::Services);
+        ui.set_services_search_text(query.into());
+        self.set_services_search(query);
+    }
 
     /// Switches to Overview and filters to `pid` ("Go to process" from Services).
     pub fn select_pid(&mut self, ui: &MainWindow, pid: u32) {
@@ -1013,7 +1020,7 @@ impl Bridge {
             sub: r.sub.clone().into(), cpu: r.cpu.clone().into(), mem: r.mem.clone().into(), disk: r.disk.clone().into(),
             gpu: r.gpu.clone().into(), net: r.net.clone().into(), bars: self.bars_model(i, &r.bars),
             hung: r.hung.clone().into(), expandable: r.expandable, expanded: self.is_open(r),
-            actionable: r.actionable, exited: r.exited, has_icon: icon.is_some(),
+            actionable: r.actionable, hosts_services: r.hosts_services, exited: r.exited, has_icon: icon.is_some(),
             icon: icon.unwrap_or_else(|| self.no_icon.clone()), windows: r.windows, last_in_card: r.last_in_card, pid: r.pid.clone().into(),
             col_pid: r.col_pid.clone().into(), col_proc_name: r.col_proc_name.clone().into(), col_status: r.col_status.clone().into(),
             col_threads: r.col_threads.clone().into(), col_handles: r.col_handles.clone().into(), col_publisher: r.col_publisher.clone().into(),
@@ -1219,6 +1226,7 @@ impl Bridge {
         ui.set_current_row_h(h);
         ui.set_current_id(self.current.unwrap_or(-1));
         ui.set_current_actionable(index.is_some_and(|i| rows[i].actionable && !rows[i].exited));
+        ui.set_current_hosts_services(index.is_some_and(|i| rows[i].hosts_services));
     }
 
     /// Scrolls the current row into view: only for the user's own keyboard moves (ruling PF1).
@@ -1255,6 +1263,14 @@ impl Bridge {
         if let Some(ui) = self.ui.upgrade() {
             ui.set_show_admin_banner(false);
         }
+    }
+
+    pub fn set_toast_file(&mut self, file: Option<String>) {
+        self.toast_file = file;
+    }
+
+    pub fn toast_file(&self) -> Option<String> {
+        self.toast_file.clone()
     }
 
     /// Shows the Details popup for `opened` and starts the worker's live part for it.
