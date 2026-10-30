@@ -3,6 +3,7 @@ pub mod affinity;
 pub mod appdata;
 pub mod bridge;
 pub mod controls;
+pub mod details;
 pub mod dispatch;
 pub mod format;
 pub mod graph;

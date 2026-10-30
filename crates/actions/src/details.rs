@@ -2,11 +2,18 @@ use crate::{ActionError, OwnedHandle, open_verified};
 use std::ffi::c_void;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Security::{
-    GetTokenInformation, LookupAccountSidW, PSID, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    GetTokenInformation, LookupAccountSidW, PSID, SID_NAME_USE, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER,
+    TokenElevation, TokenUser, TokenVirtualizationEnabled,
+};
+use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows::Win32::System::SystemInformation::{
+    IMAGE_FILE_MACHINE, IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
+    IMAGE_FILE_MACHINE_UNKNOWN,
 };
 use windows::Win32::System::Threading::{
-    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass, HIGH_PRIORITY_CLASS,
-    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, OpenProcessToken, PROCESS_NAME_WIN32, QueryFullProcessImageNameW,
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass, GetProcessInformation,
+    HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, IsWow64Process2, NORMAL_PRIORITY_CLASS, OpenProcessToken,
+    PROCESS_MACHINE_INFORMATION, PROCESS_NAME_WIN32, ProcessMachineTypeInfo, QueryFullProcessImageNameW,
     REALTIME_PRIORITY_CLASS,
 };
 use windows::core::PWSTR;
@@ -18,6 +25,23 @@ pub struct Details {
     pub command_line: Option<String>,
     pub user: Option<String>,
     pub priority: Option<String>,
+    /// The process token is elevated (runs as admin).
+    pub elevated: Option<bool>,
+    /// UAC file and registry virtualization is on for the process token.
+    pub virtualized: Option<bool>,
+    pub architecture: Option<Architecture>,
+    pub efficiency: Option<bool>,
+}
+
+/// The machine a process's code is built for, and whether it runs emulated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Architecture {
+    X86,
+    X64,
+    Arm64,
+    X64OnArm64,
+    X86OnArm64,
+    Other,
 }
 
 /// `PROCESSINFOCLASS::ProcessCommandLineInformation`.
@@ -32,7 +56,67 @@ unsafe extern "system" {
 /// be read (protected process, access denied) is `None`.
 pub fn process_details(pid: u32, create_time: i64) -> Result<Details, ActionError> {
     let h = open_verified(pid, create_time, Default::default())?;
-    Ok(Details { pid, image_path: image_path(&h), command_line: command_line(&h), user: user(&h), priority: priority(&h) })
+    Ok(Details {
+        pid,
+        image_path: image_path(&h),
+        command_line: command_line(&h),
+        user: user(&h),
+        priority: priority(&h),
+        elevated: token_flag(&h, TokenElevation),
+        virtualized: token_flag(&h, TokenVirtualizationEnabled),
+        architecture: architecture(&h),
+        efficiency: crate::is_efficiency_mode(pid, create_time).ok(),
+    })
+}
+
+/// The most memory (working set) the process has used since it started, in bytes.
+pub fn peak_working_set(pid: u32, create_time: i64) -> Result<u64, ActionError> {
+    let h = open_verified(pid, create_time, Default::default())?;
+    let mut counters = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+    // SAFETY: `counters` is writable and its size is passed in `cb`.
+    unsafe { GetProcessMemoryInfo(h.0, &mut counters, counters.cb) }.map_err(|e| ActionError::from_win(&e))?;
+    Ok(counters.PeakWorkingSetSize as u64)
+}
+
+/// A 32-bit token value read as a flag (TokenElevation, TokenVirtualizationEnabled).
+fn token_flag(h: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> Option<bool> {
+    let mut token = HANDLE::default();
+    // SAFETY: opens the process token for query; wrapped in OwnedHandle below.
+    unsafe { OpenProcessToken(h.0, TOKEN_QUERY, &mut token) }.ok()?;
+    let token = OwnedHandle(token);
+    let mut value = 0u32;
+    let mut needed = 0u32;
+    // SAFETY: both classes return a single DWORD; `value` is 4 writable bytes.
+    unsafe { GetTokenInformation(token.0, class, Some((&mut value as *mut u32).cast()), 4, &mut needed) }.ok()?;
+    Some(value != 0)
+}
+
+fn architecture(h: &OwnedHandle) -> Option<Architecture> {
+    let (mut process, mut native) = (IMAGE_FILE_MACHINE::default(), IMAGE_FILE_MACHINE::default());
+    // SAFETY: valid handle with query rights; both outputs are writable.
+    unsafe { IsWow64Process2(h.0, &mut process, Some(&mut native)) }.ok()?;
+    // Windows 11 names the machine of an x64 process emulated on ARM64, which IsWow64Process2
+    // reports as native (it is not WOW64).
+    let mut info = PROCESS_MACHINE_INFORMATION::default();
+    // SAFETY: `info` is a writable PROCESS_MACHINE_INFORMATION of the size passed.
+    let machine = unsafe {
+        GetProcessInformation(h.0, ProcessMachineTypeInfo, (&mut info as *mut PROCESS_MACHINE_INFORMATION).cast(), size_of::<PROCESS_MACHINE_INFORMATION>() as u32)
+    }
+    .map(|()| info.ProcessMachine)
+    .unwrap_or(if process == IMAGE_FILE_MACHINE_UNKNOWN { native } else { process });
+    Some(classify(machine, native))
+}
+
+fn classify(machine: IMAGE_FILE_MACHINE, native: IMAGE_FILE_MACHINE) -> Architecture {
+    let on_arm = native == IMAGE_FILE_MACHINE_ARM64;
+    match machine {
+        m if m == IMAGE_FILE_MACHINE_ARM64 => Architecture::Arm64,
+        m if m == IMAGE_FILE_MACHINE_AMD64 && on_arm => Architecture::X64OnArm64,
+        m if m == IMAGE_FILE_MACHINE_AMD64 => Architecture::X64,
+        m if m == IMAGE_FILE_MACHINE_I386 && on_arm => Architecture::X86OnArm64,
+        m if m == IMAGE_FILE_MACHINE_I386 => Architecture::X86,
+        _ => Architecture::Other,
+    }
 }
 
 fn image_path(h: &OwnedHandle) -> Option<String> {
@@ -143,4 +227,59 @@ fn priority(h: &OwnedHandle) -> Option<String> {
         _ => return None,
     };
     Some(name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+
+    fn own() -> (u32, i64) {
+        // SAFETY: plain Win32 call.
+        let pid = unsafe { GetCurrentProcessId() };
+        let h = open_verified(pid, 0, Default::default()).err();
+        assert_eq!(h, Some(ActionError::AlreadyExited), "create time 0 never matches");
+        // SAFETY: plain Win32 call; the handle is owned by OwnedHandle.
+        let raw = unsafe {
+            windows::Win32::System::Threading::OpenProcess(
+                windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+        }
+        .unwrap();
+        let (ct, _) = crate::read_state(&OwnedHandle(raw)).unwrap();
+        (pid, ct)
+    }
+
+    #[test]
+    fn own_process_has_its_architecture() {
+        let (pid, ct) = own();
+        let want = if cfg!(target_arch = "aarch64") { Architecture::Arm64 } else { Architecture::X64 };
+        assert_eq!(process_details(pid, ct).unwrap().architecture, Some(want));
+    }
+
+    #[test]
+    fn own_process_reports_elevation_as_the_token_says() {
+        let (pid, ct) = own();
+        assert_eq!(process_details(pid, ct).unwrap().elevated, Some(crate::is_elevated()));
+    }
+
+    #[test]
+    fn own_process_is_not_virtualized() {
+        let (pid, ct) = own();
+        assert_eq!(process_details(pid, ct).unwrap().virtualized, Some(false));
+    }
+
+    #[test]
+    fn own_process_has_a_peak_at_least_its_working_set() {
+        let (pid, ct) = own();
+        assert!(peak_working_set(pid, ct).unwrap() >= 1 << 20);
+    }
+
+    #[test]
+    fn a_wrong_create_time_is_already_exited() {
+        let (pid, ct) = own();
+        assert_eq!(peak_working_set(pid, ct + 1), Err(ActionError::AlreadyExited));
+    }
 }

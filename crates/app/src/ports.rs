@@ -431,6 +431,7 @@ pub fn port_target(row: &PortRow, owners: &HashMap<u32, PortOwner>) -> Option<Ta
         image_path: o.image_path.clone(),
         critical: negotium_actions::is_critical(&o.process_name),
         group: false,
+        hosts_services: false,
     })
 }
 

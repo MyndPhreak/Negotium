@@ -3,9 +3,11 @@
 mod affinity;
 mod close;
 mod details;
+mod dump;
 pub mod drivers;
 mod efficiency;
 mod elevation;
+mod fileinfo;
 pub mod integration;
 mod location;
 mod priority;
@@ -18,13 +20,15 @@ pub mod users;
 
 pub use affinity::{get_process_affinity, set_process_affinity, set_process_cpu_sets};
 pub use close::{FORCE_CLOSE_GRACE, force_close};
-pub use details::{Details, process_details};
+pub use fileinfo::{Signature, file_version, signature};
+pub use details::{Architecture, Details, peak_working_set, process_details};
 pub use efficiency::{is_efficiency_mode, set_efficiency_mode, set_power_throttling, toggle_efficiency_mode};
 pub use elevation::{
     ELEVATED_WAIT, enable_debug_privilege, is_elevated, restart_as_admin, run_elevated, run_elevated_detached, run_elevated_exe,
     shell_open,
 };
-pub use location::open_file_location;
+pub use dump::{create_dump, dump_file_name};
+pub use location::{open_file_location, open_url, search_url, show_properties};
 pub use priority::{PriorityClass, get_priority_class, set_priority_class};
 pub use shell::{ShellToken, can_terminate, capture_shell_token, start_explorer, wait_for_taskbar};
 pub use terminate::{end_many, end_process};
@@ -215,6 +219,14 @@ pub fn breaks_on_termination(pid: u32, create_time: i64) -> Option<bool> {
 /// terminate itself then fails if access is lacking.
 pub(crate) fn guard_critical(flag: Option<bool>) -> Result<(), ActionError> {
     if flag == Some(true) { Err(ActionError::Critical) } else { Ok(()) }
+}
+
+/// The create time of a running `pid`, for tests that act on a process they started.
+#[cfg(test)]
+pub(crate) fn test_create_time(pid: u32) -> i64 {
+    // SAFETY: plain Win32 call; the handle is owned by OwnedHandle.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.unwrap();
+    read_state(&OwnedHandle(raw)).unwrap().0
 }
 
 #[cfg(test)]

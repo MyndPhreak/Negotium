@@ -55,6 +55,8 @@ pub struct RowView {
     pub hung: String, pub expandable: bool,
     /// False for the "Windows" group row and section headings: never a target of any action.
     pub actionable: bool,
+    /// A process of it hosts Windows services: Go to service(s) applies.
+    pub hosts_services: bool,
     /// Gone since the list froze: held in place (so no other row shifts under the pointer), inert.
     pub exited: bool,
     pub kind: RowKind,
@@ -108,6 +110,8 @@ pub struct Target {
     pub critical: bool,
     /// The "Windows" group (every session-0 / system process): no action may target it.
     pub group: bool,
+    /// One of its processes hosts Windows services (Go to service(s)).
+    pub hosts_services: bool,
 }
 
 /// Builds the action target for an app row; the Overview and the window picker share it.
@@ -132,6 +136,7 @@ pub fn target_of<S: AsRef<str>>(r: &AppRow, hung_pids: &HashSet<u32>, image_of: 
         image_path,
         critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
         group: r.key == AppKey::Windows,
+        hosts_services: false,
     }
 }
 
@@ -152,6 +157,8 @@ pub struct Frame {
     pub history_rows: Vec<AppHistoryView>,
     pub history_elapsed_s: u64,
     pub ports: Option<PortsFrame>,
+    /// The open Details popup's live part, on whatever page the frame is for.
+    pub details: Option<crate::details::DetailsFrame>,
 }
 
 /// The Ports page for one tick: every socket as a row, and the action target of each row that has one.
@@ -486,6 +493,7 @@ pub fn build_frame(
             net: r.net_bps.map(format::bit_rate).unwrap_or_else(|| "—".into()),
             hung, expandable: r.processes.len() > 1,
             actionable: r.key != AppKey::Windows,
+            hosts_services: false,
             exited: false,
             kind: RowKind::App, sub, bars: bars(r), icon: image_path.unwrap_or_default(),
             windows: r.key == AppKey::Windows, last_in_card: false, pid: String::new(),
@@ -511,6 +519,7 @@ pub fn build_frame(
                     image_path: image_of.get(&pid_key).map(|s| s.to_string()),
                     critical: negotium_actions::is_critical(&p.name),
                     group: false,
+                    hosts_services: false,
                 });
                 let sample = sample_of.get(&pid_key).copied();
                 let proc_pub = sample.and_then(|s| s.publisher.clone());
@@ -526,7 +535,7 @@ pub fn build_frame(
                     net: p.net.map(|n| format::bit_rate(n.total())).unwrap_or_else(|| "—".into()),
                     // Its own hung text, so Force close shows on (and targets) this process even
                     // when its app row is the never-actionable Windows group.
-                    hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true,
+                    hung: p.hung_for_ms.map(format::hung).unwrap_or_default(), expandable: false, actionable: true, hosts_services: false,
                     exited: false, kind: RowKind::Proc, sub: String::new(), bars: [0.0; 5],
                     icon: image_of.get(&pid_key).map(|s| s.to_string()).unwrap_or_default(), windows: false,
                     last_in_card: n == last, pid: p.pid.to_string(),
@@ -576,6 +585,7 @@ pub fn build_frame(
         history_rows: Vec::new(),
         history_elapsed_s: 0,
         ports: None,
+        details: None,
     }
 }
 
@@ -687,9 +697,41 @@ pub fn close_cards(rows: &mut [RowView]) {
     }
 }
 
+/// Marks every target, and its row, whose processes include a service host (Go to service(s)).
+pub fn mark_service_hosts(frame: &mut Frame, service_pids: &HashSet<u32>) {
+    for target in frame.targets.values_mut() {
+        // Go to service(s) searches the Services page for the main process's PID: only that
+        // process decides, or the page would open on nothing.
+        let main = target.root.or_else(|| target.procs.first().copied());
+        target.hosts_services = main.is_some_and(|(pid, _)| service_pids.contains(&pid));
+    }
+    for row in &mut frame.rows {
+        row.hosts_services = frame.targets.get(&row.id).is_some_and(|t| t.hosts_services);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_whose_processes_host_services_are_marked() {
+        let mut frame = Frame {
+            rows: vec![RowView { id: 1, ..Default::default() }, RowView { id: 2, ..Default::default() }],
+            targets: HashMap::from([
+                (1, Target { procs: vec![(10, 1), (11, 1)], ..Default::default() }),
+                (2, Target { procs: vec![(20, 1)], ..Default::default() }),
+            ]),
+            ..Default::default()
+        };
+        frame.targets.get_mut(&1).unwrap().root = Some((10, 1));
+        mark_service_hosts(&mut frame, &HashSet::from([11, 20]));
+        assert!(!frame.targets[&1].hosts_services, "only a child hosts a service: Services would show nothing for the main PID");
+        assert!(frame.targets[&2].hosts_services, "no root: the first process is the main one");
+        assert!(!frame.rows[0].hosts_services && frame.rows[1].hosts_services);
+        mark_service_hosts(&mut frame, &HashSet::from([10]));
+        assert!(frame.targets[&1].hosts_services && frame.rows[0].hosts_services);
+    }
     use negotium_model::TopPicker;
 
     /// build_frame with the tiles a fresh TopPicker picks: the current readings, ranked.

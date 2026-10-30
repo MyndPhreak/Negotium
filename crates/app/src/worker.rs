@@ -133,7 +133,12 @@ pub struct LiveSource {
     /// The Ports page: the socket tables, read only while that page is on screen.
     ports: PortReader,
     port_ids: PortIds,
+    /// PIDs that host Windows services, for the Overview menu's Go to service(s); read again
+    /// when older than SERVICE_HOSTS_REFRESH.
+    service_hosts: (Option<Instant>, std::collections::HashSet<u32>),
 }
+
+const SERVICE_HOSTS_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl LiveSource {
     /// `history`, `epoch` and `ids` outlive a restart after a panic, so the graphs keep their past
@@ -162,6 +167,7 @@ impl LiveSource {
             moderator: negotium_moderator::Moderator::new(),
             ports: PortReader::live(),
             port_ids: PortIds::default(),
+            service_hosts: (None, Default::default()),
         }
     }
 
@@ -305,13 +311,45 @@ impl Source for LiveSource {
         if !controls.visible() {
             return None;
         }
+        // The Details popup shows over any page: its live part rides on whatever frame is built.
+        let details = controls.details_watch().map(|watch| {
+            self.ports.sockets(Instant::now(), false);
+            let (sockets, services, _, _) = self.ports.last();
+            let peak = negotium_actions::peak_working_set(watch.selected.0, watch.selected.1).ok();
+            crate::details::build_details_frame(&watch, &snap, &rows, sockets, services, peak)
+        });
+        let frame = self.page_frame(controls, &snap, &rows);
+        match (frame, details) {
+            (Some(frame), details) => Some(Frame { details, ..frame }),
+            (None, Some(details)) => Some(Frame { page: controls.page(), details: Some(details), ..Default::default() }),
+            (None, None) => None,
+        }
+    }
+}
+
+impl LiveSource {
+    /// The PIDs that host services, read again when stale. A failed read keeps the last set.
+    fn service_hosts(&mut self) -> &std::collections::HashSet<u32> {
+        let (read_at, pids) = &mut self.service_hosts;
+        if read_at.is_none_or(|t| t.elapsed() >= SERVICE_HOSTS_REFRESH) {
+            *read_at = Some(Instant::now());
+            match negotium_actions::services::list_services() {
+                Ok(list) => *pids = list.iter().filter_map(|s| s.pid).filter(|&p| p > 0).collect(),
+                Err(e) => self.log.warn(&format!("couldn't list services for Go to service(s): {e}")),
+            }
+        }
+        &self.service_hosts.1
+    }
+
+    /// The frame for the page on screen; `None` for a page that does not change per tick.
+    fn page_frame(&mut self, controls: &Controls, snap: &negotium_snapshot::Snapshot, rows: &[negotium_model::AppRow]) -> Option<Frame> {
         // Only the page on screen is built (spec section 8).
         match controls.page() {
             Page::Overview => {
                 let metric = controls.metric();
                 let sort = controls.sort();
-                let order = self.ranker.order(&rows, sort, snap.taken_at_ms, controls.frozen());
-                let top = self.top.pick(&rows, metric, snap.taken_at_ms, TOP_TILES);
+                let order = self.ranker.order(rows, sort, snap.taken_at_ms, controls.frozen());
+                let top = self.top.pick(rows, metric, snap.taken_at_ms, TOP_TILES);
                 let (expanded, all_children) = controls.child_rows();
                 let resorted = self.ranker.resorted();
                 let restrained: std::collections::HashSet<(u32, i64)> = snap.processes.iter()
@@ -320,13 +358,15 @@ impl Source for LiveSource {
                     .collect();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped(), resorted, restrained };
                 let ids = &mut self.ids;
-                Some(read_history(&self.history, |h| build_frame(ids, &snap, &rows, &order, &top, h, &opts)))
+                let mut frame = read_history(&self.history, |h| build_frame(ids, snap, rows, &order, &top, h, &opts));
+                crate::view::mark_service_hosts(&mut frame, self.service_hosts());
+                Some(frame)
             }
             Page::Performance => {
                 let (device, range) = controls.perf();
-                self.seen = LastSeen::track(self.seen.take(), &snap, &device);
+                self.seen = LastSeen::track(self.seen.take(), snap, &device);
                 let perf = read_history(&self.history, |h| {
-                    build_perf(&PerfInput { snap: &snap, history: h, info: &self.info, apps: &rows, device: &device, range, last_seen: self.seen.as_ref(), elevated: self.elevated })
+                    build_perf(&PerfInput { snap, history: h, info: &self.info, apps: rows, device: &device, range, last_seen: self.seen.as_ref(), elevated: self.elevated })
                 });
                 Some(Frame { page: Page::Performance, perf: Some(perf), ..Default::default() })
             }
@@ -550,6 +590,62 @@ mod tests {
     fn our_socket() -> negotium_collector::sockets::Socket {
         use negotium_collector::sockets::{Protocol, Socket};
         Socket { protocol: Protocol::Udp, local: "127.0.0.1:5353".parse().unwrap(), remote: None, state: None, pid: std::process::id() }
+    }
+
+    /// Our own process as the Overview sees it: (pid, create time).
+    fn ourselves(source: &mut LiveSource) -> (u32, i64) {
+        let f = source.next_frame(&Controls::default()).expect("visible: a frame");
+        let me = std::process::id();
+        f.all_procs.iter().find(|p| p.0 == me).map(|p| (p.0, p.1)).expect("we are in the snapshot")
+    }
+
+    fn watching(me: (u32, i64)) -> Controls {
+        let c = Controls::default();
+        c.set_details_watch(Some(crate::details::DetailsWatch { procs: vec![me], selected: me }));
+        c
+    }
+
+    #[test]
+    fn a_watch_adds_details_to_overview_frames() {
+        let (mut source, _) = ports_source(vec![Ok(vec![our_socket()])]);
+        let me = ourselves(&mut source);
+        let f = source.next_frame(&watching(me)).expect("visible: a frame");
+        let d = f.details.expect("a watch adds the details");
+        assert_eq!(d.procs.len(), 1);
+        assert!(d.procs[0].alive && d.procs[0].threads > 0);
+        assert_eq!(d.connections.len(), 1, "our socket");
+        assert!(d.peak_bytes.is_some_and(|b| b > 0));
+    }
+
+    #[test]
+    fn a_watch_builds_a_frame_on_pages_that_have_none() {
+        let (mut source, _) = ports_source(vec![Ok(vec![])]);
+        let me = ourselves(&mut source);
+        let controls = watching(me);
+        controls.set_page(Page::Settings);
+        let f = source.next_frame(&controls).expect("a watch: a frame on Settings");
+        assert_eq!(f.page, Page::Settings);
+        assert!(f.details.is_some());
+        controls.set_details_watch(None);
+        assert!(source.next_frame(&controls).is_none(), "no watch: Settings has no frame");
+    }
+
+    #[test]
+    fn clearing_the_watch_stops_details() {
+        let (mut source, _) = ports_source(vec![Ok(vec![])]);
+        let me = ourselves(&mut source);
+        let controls = watching(me);
+        assert!(source.next_frame(&controls).and_then(|f| f.details).is_some());
+        controls.set_details_watch(None);
+        assert!(source.next_frame(&controls).and_then(|f| f.details).is_none());
+    }
+
+    #[test]
+    fn sockets_are_not_read_without_ports_or_a_watch() {
+        let (mut source, calls) = ports_source(vec![Ok(vec![])]);
+        source.next_frame(&Controls::default());
+        source.next_frame(&Controls::default());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
