@@ -535,7 +535,7 @@ impl Bridge {
             }
             Page::AppHistory => self.apply_history(ui, frame),
             // The worker builds no frame for these (nothing on them changes per tick).
-            Page::Startup | Page::Settings | Page::Services => {}
+            Page::Startup | Page::Settings | Page::Services | Page::Users => {}
             Page::Ports => {
                 if let Some(ports) = frame.ports {
                     self.apply_ports(ui, ports);

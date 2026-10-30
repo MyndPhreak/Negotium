@@ -18,10 +18,11 @@ pub enum Page {
     AppHistory = 4,
     Services = 5,
     Ports = 6,
+    Users = 7,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [
+    pub const ALL: [Page; 8] = [
         Page::Overview,
         Page::Performance,
         Page::Startup,
@@ -29,6 +30,7 @@ impl Page {
         Page::AppHistory,
         Page::Services,
         Page::Ports,
+        Page::Users,
     ];
 
     /// Unknown indexes fall back to the Overview.
@@ -58,6 +60,7 @@ impl Page {
             Page::AppHistory => "history",
             Page::Services => "services",
             Page::Ports => "ports",
+            Page::Users => "",
         }
     }
 
@@ -416,8 +419,10 @@ mod tests {
         c.adopt_device("cpu");
         assert!(!c.wait(Duration::from_millis(20)), "a fallback adopted from a frame needs no new frame");
         assert_eq!(c.perf().0, "cpu");
-        assert_eq!(Page::ALL.map(Page::index), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(Page::ALL.map(Page::index), [0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(Page::from_index(6), Page::Ports);
+        assert_eq!(Page::from_index(7), Page::Users);
+        assert_eq!(Page::Users.index(), 7);
         assert_eq!(Page::Ports.index(), 6);
         assert_eq!(Page::from_index(3), Page::Settings);
         assert_eq!(Page::from_index(4), Page::AppHistory);
@@ -446,7 +451,11 @@ mod tests {
             assert_eq!(page_from_args(["negotium.exe".to_string(), junk.to_string()]), None, "{junk}");
         }
         assert_eq!(Page::from_name("Performance"), Some(Page::Performance));
-        assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings", "history", "services", "ports"]);
+        assert_eq!(Page::ALL.map(Page::name), ["overview", "performance", "startup", "settings", "history", "services", "ports", "users"]);
+        assert_eq!(Page::from_name("Users"), Some(Page::Users));
+        assert_eq!(Page::ALL.len(), 8);
+        assert_eq!(restart_args(Page::Users), "--restarted --page=users");
+        assert_eq!(page_from_args(restart_args(Page::Users).split(' ').map(String::from)), Some(Page::Users));
         assert_eq!(Page::from_name("ports"), Some(Page::Ports));
         assert_eq!(restart_args(Page::Ports), "--restarted --page=ports");
         assert_eq!(page_from_args(restart_args(Page::Ports).split(' ').map(String::from)), Some(Page::Ports));

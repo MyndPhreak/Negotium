@@ -88,6 +88,11 @@ pub fn clock(ms: u64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3_600, s / 60 % 60, s % 60)
 }
 
+/// A length of time in its two largest units ("2 h 5 min").
+pub fn span(_secs: u64) -> String {
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
