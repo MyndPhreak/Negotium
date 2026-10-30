@@ -6,6 +6,7 @@ mod details;
 pub mod drivers;
 mod efficiency;
 mod elevation;
+mod fileinfo;
 pub mod integration;
 mod location;
 mod priority;
@@ -17,6 +18,7 @@ mod terminate;
 
 pub use affinity::{get_process_affinity, set_process_affinity, set_process_cpu_sets};
 pub use close::{FORCE_CLOSE_GRACE, force_close};
+pub use fileinfo::{Signature, file_version, signature};
 pub use details::{Architecture, Details, peak_working_set, process_details};
 pub use efficiency::{is_efficiency_mode, set_efficiency_mode, set_power_throttling, toggle_efficiency_mode};
 pub use elevation::{
