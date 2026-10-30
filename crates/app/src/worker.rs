@@ -552,6 +552,62 @@ mod tests {
         Socket { protocol: Protocol::Udp, local: "127.0.0.1:5353".parse().unwrap(), remote: None, state: None, pid: std::process::id() }
     }
 
+    /// Our own process as the Overview sees it: (pid, create time).
+    fn ourselves(source: &mut LiveSource) -> (u32, i64) {
+        let f = source.next_frame(&Controls::default()).expect("visible: a frame");
+        let me = std::process::id();
+        f.all_procs.iter().find(|p| p.0 == me).map(|p| (p.0, p.1)).expect("we are in the snapshot")
+    }
+
+    fn watching(me: (u32, i64)) -> Controls {
+        let c = Controls::default();
+        c.set_details_watch(Some(crate::details::DetailsWatch { procs: vec![me], selected: me }));
+        c
+    }
+
+    #[test]
+    fn a_watch_adds_details_to_overview_frames() {
+        let (mut source, _) = ports_source(vec![Ok(vec![our_socket()])]);
+        let me = ourselves(&mut source);
+        let f = source.next_frame(&watching(me)).expect("visible: a frame");
+        let d = f.details.expect("a watch adds the details");
+        assert_eq!(d.procs.len(), 1);
+        assert!(d.procs[0].alive && d.procs[0].threads > 0);
+        assert_eq!(d.connections.len(), 1, "our socket");
+        assert!(d.peak_bytes.is_some_and(|b| b > 0));
+    }
+
+    #[test]
+    fn a_watch_builds_a_frame_on_pages_that_have_none() {
+        let (mut source, _) = ports_source(vec![Ok(vec![])]);
+        let me = ourselves(&mut source);
+        let controls = watching(me);
+        controls.set_page(Page::Settings);
+        let f = source.next_frame(&controls).expect("a watch: a frame on Settings");
+        assert_eq!(f.page, Page::Settings);
+        assert!(f.details.is_some());
+        controls.set_details_watch(None);
+        assert!(source.next_frame(&controls).is_none(), "no watch: Settings has no frame");
+    }
+
+    #[test]
+    fn clearing_the_watch_stops_details() {
+        let (mut source, _) = ports_source(vec![Ok(vec![])]);
+        let me = ourselves(&mut source);
+        let controls = watching(me);
+        assert!(source.next_frame(&controls).and_then(|f| f.details).is_some());
+        controls.set_details_watch(None);
+        assert!(source.next_frame(&controls).and_then(|f| f.details).is_none());
+    }
+
+    #[test]
+    fn sockets_are_not_read_without_ports_or_a_watch() {
+        let (mut source, calls) = ports_source(vec![Ok(vec![])]);
+        source.next_frame(&Controls::default());
+        source.next_frame(&Controls::default());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn the_ports_page_builds_rows_and_targets_and_no_other_page() {
         let (mut source, _) = ports_source(vec![Ok(vec![our_socket()])]);

@@ -152,6 +152,8 @@ pub struct Frame {
     pub history_rows: Vec<AppHistoryView>,
     pub history_elapsed_s: u64,
     pub ports: Option<PortsFrame>,
+    /// The open Details popup's live part, on whatever page the frame is for.
+    pub details: Option<crate::details::DetailsFrame>,
 }
 
 /// The Ports page for one tick: every socket as a row, and the action target of each row that has one.
@@ -576,6 +578,7 @@ pub fn build_frame(
         history_rows: Vec::new(),
         history_elapsed_s: 0,
         ports: None,
+        details: None,
     }
 }
 
