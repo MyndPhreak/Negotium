@@ -1,17 +1,48 @@
 //! Memory dump files, named and placed as Task Manager does.
-use crate::ActionError;
+use crate::{ActionError, open_verified};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Diagnostics::Debug::{
+    MiniDumpWithFullMemory, MiniDumpWithHandleData, MiniDumpWithThreadInfo, MiniDumpWithUnloadedModules,
+    MiniDumpWriteDump,
+};
+use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::Threading::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 
 /// `<process>_<pid>_<YYYYMMDD-HHMMSS>.dmp`, without ".exe" and with no character Windows forbids
 /// in a file name. `local` is (year, month, day, hour, minute, second).
-pub fn dump_file_name(_process: &str, _pid: u32, _local: (i32, u32, u32, u32, u32, u32)) -> String {
-    String::new()
+pub fn dump_file_name(process: &str, pid: u32, local: (i32, u32, u32, u32, u32, u32)) -> String {
+    let stem = match process.len().checked_sub(4).and_then(|i| process.split_at_checked(i)) {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case(".exe") => stem,
+        _ => process,
+    };
+    let stem: String = stem.chars().map(|c| if r#"\/:*?"<>|"#.contains(c) || c.is_control() { '_' } else { c }).collect();
+    let (y, mo, d, h, mi, s) = local;
+    format!("{stem}_{pid}_{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}.dmp")
 }
 
 /// Writes a full memory dump of the process to `dir` and returns its path. Blocking; call on an
 /// action thread. A failed dump leaves no file.
-pub fn create_dump(_pid: u32, _create_time: i64, _process: &str, _dir: &Path) -> Result<PathBuf, ActionError> {
-    Err(ActionError::Other("not built".into()))
+pub fn create_dump(pid: u32, create_time: i64, process: &str, dir: &Path) -> Result<PathBuf, ActionError> {
+    let h = open_verified(pid, create_time, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
+    // SAFETY: plain Win32 call.
+    let t = unsafe { GetLocalTime() };
+    let local = (t.wYear as i32, t.wMonth as u32, t.wDay as u32, t.wHour as u32, t.wMinute as u32, t.wSecond as u32);
+    let path = dir.join(dump_file_name(process, pid, local));
+    let partial = path.with_extension("dmp.partial");
+    let file = std::fs::File::create(&partial).map_err(|e| ActionError::Other(e.to_string()))?;
+    let kind = MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules;
+    // SAFETY: a verified process handle with read rights and an open, writable file handle.
+    let written = unsafe { MiniDumpWriteDump(h.0, pid, HANDLE(file.as_raw_handle()), kind, None, None, None) };
+    drop(file);
+    let done = written.map_err(|e| ActionError::from_win(&e)).and_then(|()| {
+        std::fs::rename(&partial, &path).map_err(|e| ActionError::Other(e.to_string()))
+    });
+    if done.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    done.map(|()| path)
 }
 
 #[cfg(test)]
