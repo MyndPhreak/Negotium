@@ -183,10 +183,12 @@ impl Default for Controls {
 
 impl Controls {
     /// Sets (or with `None` clears) the processes the Details popup shows.
-    pub fn set_details_watch(&self, _watch: Option<crate::details::DetailsWatch>) {}
+    pub fn set_details_watch(&self, watch: Option<crate::details::DetailsWatch>) {
+        *self.details.lock().unwrap_or_else(|e| e.into_inner()) = watch;
+    }
 
     pub fn details_watch(&self) -> Option<crate::details::DetailsWatch> {
-        None
+        self.details.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn set_metric(&self, m: Metric) {

@@ -305,6 +305,25 @@ impl Source for LiveSource {
         if !controls.visible() {
             return None;
         }
+        // The Details popup shows over any page: its live part rides on whatever frame is built.
+        let details = controls.details_watch().map(|watch| {
+            self.ports.sockets(Instant::now(), false);
+            let (sockets, services, _, _) = self.ports.last();
+            let peak = negotium_actions::peak_working_set(watch.selected.0, watch.selected.1).ok();
+            crate::details::build_details_frame(&watch, &snap, &rows, sockets, services, peak)
+        });
+        let frame = self.page_frame(controls, &snap, &rows);
+        match (frame, details) {
+            (Some(frame), details) => Some(Frame { details, ..frame }),
+            (None, Some(details)) => Some(Frame { page: controls.page(), details: Some(details), ..Default::default() }),
+            (None, None) => None,
+        }
+    }
+}
+
+impl LiveSource {
+    /// The frame for the page on screen; `None` for a page that does not change per tick.
+    fn page_frame(&mut self, controls: &Controls, snap: &negotium_snapshot::Snapshot, rows: &[negotium_model::AppRow]) -> Option<Frame> {
         // Only the page on screen is built (spec section 8).
         match controls.page() {
             Page::Overview => {
