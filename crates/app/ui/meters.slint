@@ -13,8 +13,8 @@ component Meter inherits FocusButton {
     preferred-width: 96px;
     border-radius: Theme.radius;
     background: selected ? Theme.accent.with-alpha(0.18) : Theme.card;
-    border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.text : (selected ? Theme.accent : Theme.card-border);
+    border-width: root.focus-visible ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : (selected ? Theme.accent : Theme.card-border);
     accessible-label: data.label + " meter";
     accessible-checkable: true;
     accessible-checked: root.selected;

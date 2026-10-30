@@ -293,7 +293,7 @@ component CheckRow inherits FocusButton {
     min-height: 32px;
     border-radius: 4px;
     background: root.hovered ? Theme.text.with-alpha(0.06) : transparent;
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     accessible-role: checkbox;
     accessible-label: root.text;
@@ -321,8 +321,8 @@ component CpuTile inherits FocusButton {
     height: 30px;
     border-radius: 4px;
     background: root.checked ? (root.hovered ? Theme.accent.brighter(0.15) : Theme.accent) : (root.hovered ? Theme.card-hover : Theme.card-inset);
-    border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.text : (root.checked ? Theme.accent : Theme.card-border);
+    border-width: root.focus-visible ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : (root.checked ? Theme.accent : Theme.card-border);
     accessible-role: checkbox;
     accessible-label: "CPU " + root.cpu;
     accessible-checkable: true;

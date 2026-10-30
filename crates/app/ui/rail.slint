@@ -9,7 +9,7 @@ component RailButton inherits FocusButton {
     height: 56px;
     border-radius: Theme.radius;
     background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card : transparent);
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     accessible-label: root.label + " page";
     accessible-checkable: true;
