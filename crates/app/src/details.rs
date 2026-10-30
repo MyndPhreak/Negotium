@@ -1,10 +1,9 @@
 //! The Details popup's data: facts read once when it opens, and the live part the worker builds
 //! each tick while it is open.
-use crate::view::Target;
 use negotium_actions::{Details, Signature};
-use negotium_collector::sockets::Socket;
-use negotium_model::AppRow;
-use negotium_snapshot::Snapshot;
+use negotium_collector::sockets::{Protocol, Socket};
+use negotium_model::{AppRow, ProcRow};
+use negotium_snapshot::{ProcessSample, Snapshot};
 use std::collections::HashMap;
 
 const DASH: &str = "\u{2014}";
@@ -78,41 +77,145 @@ pub struct DetailsFrame {
 }
 
 /// A hint at what a process of a multi-process app does, from its command line.
-pub fn role_hint(_command_line: Option<&str>, _is_root: bool) -> Option<&'static str> {
-    None
+pub fn role_hint(command_line: Option<&str>, is_root: bool) -> Option<&'static str> {
+    if is_root {
+        return Some("Main");
+    }
+    // Chromium and Electron name each child's job with --type=.
+    let kind = command_line?.split_whitespace().find_map(|a| a.strip_prefix("--type="))?;
+    match kind.trim_matches('"') {
+        "renderer" => Some("Renderer"),
+        "gpu-process" => Some("GPU"),
+        "utility" => Some("Utility"),
+        "crashpad-handler" => Some("Crash reporter"),
+        _ => None,
+    }
 }
 
 pub fn build_details_frame(
-    _watch: &DetailsWatch,
-    _snap: &Snapshot,
-    _rows: &[AppRow],
-    _sockets: &[Socket],
-    _services: &HashMap<u32, Vec<String>>,
-    _peak: Option<u64>,
+    watch: &DetailsWatch,
+    snap: &Snapshot,
+    rows: &[AppRow],
+    sockets: &[Socket],
+    services: &HashMap<u32, Vec<String>>,
+    peak: Option<u64>,
 ) -> DetailsFrame {
-    DetailsFrame::default()
+    let samples: HashMap<(u32, i64), &ProcessSample> = snap.processes.iter().map(|p| ((p.pid, p.create_time), p)).collect();
+    let rates: HashMap<(u32, i64), &ProcRow> =
+        rows.iter().flat_map(|r| &r.processes).map(|p| ((p.pid, p.create_time), p)).collect();
+    let procs = watch
+        .procs
+        .iter()
+        .map(|&(pid, create_time)| {
+            let Some(sample) = samples.get(&(pid, create_time)) else {
+                return LiveProc { pid, create_time, ..Default::default() };
+            };
+            let rate = rates.get(&(pid, create_time));
+            LiveProc {
+                pid,
+                create_time,
+                alive: true,
+                cpu_pct: rate.map_or(0.0, |r| r.cpu_pct),
+                private_bytes: rate.map_or(sample.private_working_set, |r| r.private_bytes),
+                disk_bps: rate.map_or(0.0, |r| r.disk_bps),
+                net_bps: rate.and_then(|r| r.net).map(|n| n.total()),
+                gpu_pct: rate.and_then(|r| r.gpu_pct),
+                threads: sample.threads,
+                handles: sample.handles,
+            }
+        })
+        .collect();
+    let (pid, create_time) = watch.selected;
+    let selected = samples.get(&watch.selected);
+    // A PID is reused once its process exits: only a parent older than the child started it.
+    let parent = selected.and_then(|child| {
+        snap.processes
+            .iter()
+            .find(|p| p.pid == child.parent_pid && p.create_time < child.create_time)
+            .map(|p| (p.pid, p.name.clone()))
+    });
+    let connections = match selected {
+        Some(_) => sockets.iter().filter(|s| s.pid == pid).map(connection).collect(),
+        None => Vec::new(),
+    };
+    DetailsFrame {
+        procs,
+        peak_bytes: selected.and(peak),
+        parent,
+        start_time: selected.map(|_| create_time),
+        connections,
+        services: selected.and_then(|_| services.get(&pid)).cloned().unwrap_or_default(),
+    }
+}
+
+fn connection(s: &Socket) -> Connection {
+    let tcp = s.protocol == Protocol::Tcp;
+    Connection {
+        protocol: if tcp { "TCP" } else { "UDP" },
+        local: s.local.to_string(),
+        remote: s.remote.map_or_else(|| DASH.to_string(), |r| r.to_string()),
+        state: if tcp { crate::ports::state_label(s).to_string() } else { DASH.to_string() },
+    }
 }
 
 /// How long ago `start` was, both FILETIMEs: "2 h 5 min", "3 min 2 s", "45 s"; a dash when
 /// `start` is in the future.
-pub fn running_for(_start: i64, _now: i64) -> String {
-    String::new()
+pub fn running_for(start: i64, now: i64) -> String {
+    let Some(secs) = now.checked_sub(start).filter(|d| *d >= 0).map(|d| d / 10_000_000) else {
+        return DASH.to_string();
+    };
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    match (h, m) {
+        (0, 0) => format!("{s} s"),
+        (0, _) => format!("{m} min {s} s"),
+        _ => format!("{h} h {m} min"),
+    }
 }
 
 /// The Identity section of the selected process as "Label: value" lines, for the clipboard.
-pub fn copy_all_text(_o: &Opened, _f: &DetailsFrame) -> String {
-    String::new()
+pub fn copy_all_text(o: &Opened, f: &DetailsFrame) -> String {
+    let Some(p) = o.procs.get(o.selected) else { return String::new() };
+    let d = p.details.as_ref();
+    let field = |v: Option<&String>| v.map_or(DASH, |v| v.as_str()).to_string();
+    let parent = f.parent.as_ref().map_or_else(|| DASH.to_string(), |(pid, name)| format!("{name} (PID {pid})"));
+    [
+        ("Name", p.name.clone()),
+        ("PID", p.pid.to_string()),
+        ("Path", field(d.and_then(|d| d.image_path.as_ref()))),
+        ("Command line", field(d.and_then(|d| d.command_line.as_ref()))),
+        ("User", field(d.and_then(|d| d.user.as_ref()))),
+        ("Parent", parent),
+    ]
+    .iter()
+    .map(|(label, value)| format!("{label}: {value}"))
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
-/// Reads the facts for every process of `t`. Blocking; call on an action thread.
-pub fn read_opened(t: &Target) -> Opened {
+/// Reads the facts for every process in `procs` (the root first, when there is one). Blocking;
+/// call on an action thread.
+pub fn read_opened(name: &str, root: Option<(u32, i64)>, procs: &[(u32, i64)], image_path: Option<&str>) -> Opened {
+    let procs = procs
+        .iter()
+        .map(|&(pid, create_time)| {
+            let details = negotium_actions::process_details(pid, create_time).ok();
+            let file = details.as_ref().and_then(|d| d.image_path.as_deref()).and_then(|p| p.rsplit('\\').next());
+            ProcFacts {
+                pid,
+                create_time,
+                name: file.map_or_else(|| DASH.to_string(), str::to_string),
+                role: role_hint(details.as_ref().and_then(|d| d.command_line.as_deref()), root == Some((pid, create_time))),
+                details,
+            }
+        })
+        .collect();
     Opened {
-        name: t.name.clone(),
-        publisher: None,
-        version: None,
-        signature: Signature::Unknown,
-        image_path: t.image_path.clone(),
-        procs: Vec::new(),
+        name: name.to_string(),
+        publisher: image_path.and_then(|p| negotium_collector::version_string(p, "CompanyName")),
+        version: image_path.and_then(negotium_actions::file_version),
+        signature: image_path.map_or(Signature::Unknown, negotium_actions::signature),
+        image_path: image_path.map(str::to_string),
+        procs,
         selected: 0,
     }
 }
@@ -120,9 +223,8 @@ pub fn read_opened(t: &Target) -> Opened {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use negotium_collector::sockets::{Protocol, TcpState};
-    use negotium_model::{AppKey, AppKind, ProcRow};
-    use negotium_snapshot::ProcessSample;
+    use negotium_collector::sockets::TcpState;
+    use negotium_model::{AppKey, AppKind};
 
     fn sample(pid: u32, create_time: i64, parent_pid: u32, name: &str) -> ProcessSample {
         ProcessSample { pid, create_time, parent_pid, name: name.into(), threads: 7, handles: 99, ..Default::default() }

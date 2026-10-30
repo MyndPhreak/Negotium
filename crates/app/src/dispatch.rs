@@ -20,6 +20,8 @@ pub struct Job {
     pub name: String,
     pub targets: Vec<(u32, i64)>,
     pub path: Option<String>,
+    /// The app's root process, when it has one.
+    pub root: Option<(u32, i64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +37,7 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
         name: t.name.clone(),
         targets,
         path: t.image_path.clone(),
+        root: t.root,
     };
     // The Windows group spans every system process: nothing may be done to it as a whole.
     if t.group {
@@ -58,7 +61,11 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
         "efficiency" => job(JobKind::Efficiency, t.procs.clone()),
         "open-location" if t.image_path.is_some() => job(JobKind::OpenLocation, vec![]),
         "details" => match first {
-            Some(p) => job(JobKind::Details, vec![p]),
+            Some(p) => {
+                let mut rest: Vec<_> = t.procs.iter().copied().filter(|q| *q != p).collect();
+                rest.sort_unstable();
+                job(JobKind::Details, std::iter::once(p).chain(rest).collect())
+            }
             None => return Plan::Nothing,
         },
         _ => return Plan::Nothing,
@@ -152,7 +159,23 @@ impl Outcome {
 
 /// Blocking; call on an action thread.
 pub fn run(job: Job, elevated: bool) -> Outcome {
-    Outcome::Toast(run_text(job, elevated))
+    if job.kind == JobKind::Details {
+        // The root's own failure (exited, access denied) is the toast; the others show dashes.
+        return match job.targets.first().map(|&(pid, ct)| process_details(pid, ct)) {
+            Some(Ok(_)) => Outcome::Details(Box::new(crate::details::read_opened(
+                &job.name,
+                job.root,
+                &job.targets,
+                job.path.as_deref(),
+            ))),
+            Some(Err(e)) => Outcome::Toast(e.message(&job.name, elevated)),
+            None => Outcome::Silent,
+        };
+    }
+    match run_text(job, elevated) {
+        text if text.is_empty() => Outcome::Silent,
+        text => Outcome::Toast(text),
+    }
 }
 
 fn run_text(job: Job, elevated: bool) -> String {
@@ -181,21 +204,7 @@ fn run_text(job: Job, elevated: bool) -> String {
             Some(Err(e)) => fail(e),
             _ => String::new(),
         },
-        JobKind::Details => match job.targets.first() {
-            Some(&(pid, ct)) => match process_details(pid, ct) {
-                Ok(d) => format!(
-                    "details:Name: {}\nPID: {}\nPath: {}\nCommand line: {}\nUser: {}\nPriority: {}",
-                    job.name,
-                    d.pid,
-                    d.image_path.as_deref().unwrap_or("\u{2014}"),
-                    d.command_line.as_deref().unwrap_or("\u{2014}"),
-                    d.user.as_deref().unwrap_or("\u{2014}"),
-                    d.priority.as_deref().unwrap_or("\u{2014}"),
-                ),
-                Err(e) => fail(e),
-            },
-            None => String::new(),
-        },
+        JobKind::Details => String::new(),
     }
 }
 
@@ -248,7 +257,7 @@ mod tests {
 
     #[test]
     fn a_job_with_nothing_to_say_is_silent() {
-        let job = Job { kind: JobKind::OpenLocation, name: "App".into(), targets: vec![], path: None };
+        let job = Job { kind: JobKind::OpenLocation, name: "App".into(), targets: vec![], path: None, root: None };
         assert_eq!(run(job, false), Outcome::Silent);
     }
 
