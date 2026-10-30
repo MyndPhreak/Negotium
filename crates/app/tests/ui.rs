@@ -623,7 +623,7 @@ fn the_meters_do_not_grow_when_the_first_tiles_and_rows_arrive() {
     assert_eq!((meter_h2, search_y2), (meter_h, search_y), "meter height and search box position stay put");
     assert!(meter_h < 130.0, "the meters keep their natural height: {meter_h}");
     let rail = El::find_by_accessible_label(&ui, "Performance page").next().expect("rail item");
-    assert_eq!(rail.size().height, 56.0, "the rail gives no spare height to its buttons");
+    assert_eq!(rail.size().height, 48.0, "the rail gives no spare height to its buttons");
 }
 
 // ---- Plan 3a: pages ----
@@ -5656,6 +5656,29 @@ fn the_rail_has_a_ports_page_button() {
     assert_eq!(*picked.borrow(), Some(6));
     ui.set_page(6);
     assert_eq!(ports.accessible_checked(), Some(true));
+}
+
+#[test]
+fn the_rail_has_a_users_page_button() {
+    let ui = window();
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_select_page(move |i| *p.borrow_mut() = Some(i));
+    let users = El::find_by_accessible_label(&ui, "Users page").next().expect("rail item");
+    users.invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(7));
+    ui.set_page(7);
+    assert_eq!(users.accessible_checked(), Some(true));
+}
+
+#[test]
+fn all_eight_rail_buttons_fit_the_smallest_window() {
+    let ui = window();
+    ui.window().set_size(slint::PhysicalSize::new(760, 440));
+    El::find_by_accessible_label(&ui, "Users page").next().expect("rail item");
+    let settings = El::find_by_accessible_label(&ui, "Settings page").next().expect("rail item");
+    let bottom = settings.absolute_position().y + settings.size().height;
+    assert!(bottom <= 440.0, "the Settings button ends at {bottom}");
 }
 
 fn port_data(id: i32, actionable: bool) -> PortData {

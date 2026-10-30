@@ -4,7 +4,7 @@
 //! values and shortcuts are never edited or deleted.
 mod approved;
 mod command;
-mod folders;
+pub(crate) mod folders;
 pub mod packaged;
 pub mod registry;
 

@@ -16,6 +16,7 @@ pub mod services;
 mod shell;
 pub mod startup;
 mod terminate;
+pub mod users;
 
 pub use affinity::{get_process_affinity, set_process_affinity, set_process_cpu_sets};
 pub use close::{FORCE_CLOSE_GRACE, force_close};

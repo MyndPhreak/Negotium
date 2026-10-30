@@ -375,7 +375,7 @@ impl LiveSource {
                 Some(crate::view::build_history_frame(&self.usage, sort_col, sort_desc))
             }
             // Nothing on these pages changes per tick.
-            Page::Startup | Page::Settings | Page::Services => None,
+            Page::Startup | Page::Settings | Page::Services | Page::Users => None,
             Page::Ports => {
                 let force = controls.take_ports_refresh();
                 let error = self.ports.sockets(Instant::now(), force).2;
@@ -661,6 +661,14 @@ mod tests {
         assert!(ports.targets.contains_key(&ports.rows[0].id), "an owned row has an action target");
         assert!(ports.error.is_none() && !ports.all_procs.is_empty());
         assert!(f.rows.is_empty() && f.meters.is_empty() && f.perf.is_none(), "no Overview or Performance view on Ports");
+    }
+
+    #[test]
+    fn no_frame_is_built_for_the_users_page() {
+        let (mut source, _) = ports_source(vec![Ok(vec![our_socket()])]);
+        let controls = Controls::default();
+        controls.set_page(Page::Users);
+        assert!(source.next_frame(&controls).is_none(), "nothing on Users changes per tick");
     }
 
     #[test]

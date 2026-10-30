@@ -41,7 +41,7 @@ impl Drop for ComApartment {
     }
 }
 
-fn known_folder(id: &GUID) -> Option<PathBuf> {
+pub(crate) fn known_folder(id: &GUID) -> Option<PathBuf> {
     // SAFETY: returns a CoTaskMem string that is freed below.
     let p = unsafe { SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG(0), None) }.ok()?;
     // SAFETY: `p` is a valid NUL-terminated string until freed.

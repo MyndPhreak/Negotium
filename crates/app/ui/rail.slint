@@ -6,7 +6,7 @@ component RailButton inherits FocusButton {
     in property <string> label;
     in property <string> icon;
     in property <bool> selected;
-    height: 56px;
+    height: 48px;
     border-radius: Theme.radius;
     background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card : transparent);
     border-width: root.focus-visible ? 2px : 0px;
@@ -48,7 +48,7 @@ export component Rail inherits VerticalLayout {
     callback select(int);
     width: 76px;
     padding: 6px;
-    // Seven buttons must fit the window's minimum height (440 less the 32 px caption).
+    // Eight buttons must fit the window's minimum height (440 less the 32 px caption).
     padding-top: 4px;
     padding-bottom: 4px;
     spacing: 1px;
@@ -95,6 +95,13 @@ export component Rail inherits VerticalLayout {
         selected: root.page == 6;
         interactive: root.interactive;
         activated => { root.select(6); }
+    }
+    RailButton {
+        label: "Users";
+        icon: "M 10 3 A 3.5 3.5 0 1 0 10 10 A 3.5 3.5 0 1 0 10 3 M 3 17 A 7 5 0 0 1 17 17 Z";
+        selected: root.page == 7;
+        interactive: root.interactive;
+        activated => { root.select(7); }
     }
     RailButton {
         label: "Settings";
