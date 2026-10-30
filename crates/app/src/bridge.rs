@@ -8,7 +8,7 @@ use crate::smooth::{self, Scroll};
 use crate::view::{Frame, RowKind, RowView, SECTION_APPS, Target, close_cards, row_height, visible_rows};
 use crate::worker::SharedHistory;
 use crate::{
-    AppHistoryData, DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData,
+    AppHistoryData, DetailsChip, DetailsConnection, DetailsField, DetailsProc, DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData,
     PortData, ServiceData, StartupData, StatData, TileData,
 };
 use negotium_actions::startup::StartupEntry;
@@ -405,6 +405,9 @@ pub struct Bridge {
     /// tests that don't set one: rows then show no icons).
     icons: IconCache,
     icon_loader: Option<Box<dyn RequestIcon>>,
+    /// The open Details popup's facts, and the latest live part the worker sent for it.
+    details: Option<crate::details::Opened>,
+    details_live: crate::details::DetailsFrame,
     /// Icons for rows on show arrived since the last push: one push is on its way (`icon_arrived`).
     icons_pending: bool,
     /// What a row without an icon carries: one image shared by every such row, because Slint's
@@ -473,6 +476,8 @@ impl Bridge {
             port_rows: Rc::new(VecModel::default()),
             icons: IconCache::default(),
             icon_loader: None,
+            details: None,
+            details_live: Default::default(),
             icons_pending: false,
             no_icon: slint::Image::from_rgba8(slint::SharedPixelBuffer::new(1, 1)),
             no_bars: ModelRc::new(VecModel::from(vec![0.0; 5])),
@@ -521,7 +526,11 @@ impl Bridge {
         ui.set_page(page.index());
     }
 
-    pub fn apply(&mut self, ui: &MainWindow, frame: Frame) {
+    pub fn apply(&mut self, ui: &MainWindow, mut frame: Frame) {
+        // The Details popup shows over every page: its part applies whatever page the frame was for.
+        if let Some(details) = frame.details.take() {
+            self.apply_details(ui, details);
+        }
         // Built for a page the user has since left: the next frame is already on its way.
         if frame.page != self.controls.page() {
             return;
@@ -1245,6 +1254,141 @@ impl Bridge {
         }
     }
 
+    /// Shows the Details popup for `opened` and starts the worker's live part for it.
+    pub fn open_details(&mut self, ui: &MainWindow, opened: crate::details::Opened) {
+        let icon = match (self.icon_loader.as_deref(), opened.image_path.as_deref()) {
+            (Some(l), Some(path)) => self.icons.get(path, l),
+            _ => None,
+        };
+        ui.set_details_has_icon(icon.is_some());
+        ui.set_details_icon(icon.unwrap_or_default());
+        ui.set_details_name(opened.name.as_str().into());
+        let subtitle: Vec<&str> = [opened.publisher.as_deref(), opened.version.as_deref()].into_iter().flatten().collect();
+        ui.set_details_subtitle(subtitle.join(" \u{b7} ").into());
+        let chips: Vec<DetailsChip> = crate::details::header_chips(&opened)
+            .into_iter()
+            .map(|(text, warn)| DetailsChip { text: text.into(), warn })
+            .collect();
+        ui.set_details_chips(ModelRc::new(VecModel::from(chips)));
+        self.details_live = Default::default();
+        self.details = Some(opened);
+        self.watch_details();
+        self.show_details_fields(ui);
+        self.refresh_details_settings(ui);
+        ui.invoke_show_details();
+    }
+
+    /// The user picked process `index` in the popup's list.
+    pub fn select_details(&mut self, ui: &MainWindow, index: usize) {
+        let Some(d) = self.details.as_mut().filter(|d| index < d.procs.len()) else { return };
+        d.selected = index;
+        ui.set_details_selected(index as i32);
+        self.watch_details();
+        // The old selection's live part no longer applies; the worker sends the new one next tick.
+        let live = &mut self.details_live;
+        live.connections.clear();
+        live.services.clear();
+        (live.parent, live.start_time, live.peak_bytes) = (None, None, None);
+        self.show_details_fields(ui);
+    }
+
+    /// Closes the popup and stops the worker's live part.
+    pub fn close_details(&mut self, ui: &MainWindow) {
+        self.details = None;
+        self.controls.set_details_watch(None);
+        ui.set_details_visible(false);
+    }
+
+    /// The open popup's app as an action target (Change priority / affinity); `None` when closed.
+    pub fn details_target(&self) -> Option<Target> {
+        self.details.as_ref().map(crate::details::Opened::target)
+    }
+
+    /// The open popup's image path, for Open file location.
+    pub fn details_path(&self) -> Option<String> {
+        self.details.as_ref().and_then(|d| d.image_path.clone())
+    }
+
+    /// The Identity section as text, for Copy all.
+    pub fn details_text(&self) -> Option<String> {
+        self.details.as_ref().map(|d| crate::details::copy_all_text(d, &self.details_live))
+    }
+
+    /// Reads the main process's priority and affinity again (on open, and after a dialog applied).
+    pub fn refresh_details_settings(&self, ui: &MainWindow) {
+        let Some(root) = self.details.as_ref().and_then(|d| d.procs.first()) else { return };
+        let dash = || "\u{2014}".to_string();
+        let priority = negotium_actions::get_priority_class(root.pid, root.create_time)
+            .map_or_else(|_| dash(), |p| crate::details::priority_text(p).to_string());
+        let affinity = negotium_actions::get_process_affinity(root.pid, root.create_time)
+            .map_or_else(|_| dash(), |(mask, system)| crate::details::affinity_text(mask, system));
+        let fields = vec![field("Priority", &priority), field("Affinity", &affinity)];
+        ui.set_details_settings(ModelRc::new(VecModel::from(fields)));
+    }
+
+    fn watch_details(&self) {
+        let watch = self.details.as_ref().and_then(|d| {
+            let selected = d.procs.get(d.selected)?;
+            Some(crate::details::DetailsWatch {
+                procs: d.procs.iter().map(|p| (p.pid, p.create_time)).collect(),
+                selected: (selected.pid, selected.create_time),
+            })
+        });
+        self.controls.set_details_watch(watch);
+    }
+
+    fn apply_details(&mut self, ui: &MainWindow, live: crate::details::DetailsFrame) {
+        if self.details.is_none() {
+            return;
+        }
+        self.details_live = live;
+        self.show_details_fields(ui);
+    }
+
+    /// The parts that follow the selection and the live numbers.
+    fn show_details_fields(&self, ui: &MainWindow) {
+        use crate::details::{identity_fields, now_filetime, resource_fields};
+        let Some(d) = &self.details else { return };
+        let live = &self.details_live;
+        let dash = || slint::SharedString::from("\u{2014}");
+        let procs: Vec<DetailsProc> = d
+            .procs
+            .iter()
+            .map(|p| {
+                let l = live.procs.iter().find(|l| (l.pid, l.create_time) == (p.pid, p.create_time));
+                let running = l.filter(|l| l.alive);
+                DetailsProc {
+                    pid: p.pid as i32,
+                    name: p.name.as_str().into(),
+                    role: p.role.unwrap_or("").into(),
+                    cpu: running.map_or_else(dash, |l| crate::format::pct(l.cpu_pct).into()),
+                    memory: running.map_or_else(dash, |l| crate::format::bytes(l.private_bytes as f64).into()),
+                    // Before the first live frame every process counts as running.
+                    alive: l.is_none_or(|l| l.alive),
+                }
+            })
+            .collect();
+        ui.set_details_procs(ModelRc::new(VecModel::from(procs)));
+        let fields = |v: Vec<(String, String)>| -> ModelRc<DetailsField> {
+            ModelRc::new(VecModel::from(v.iter().map(|(l, v)| field(l, v)).collect::<Vec<_>>()))
+        };
+        ui.set_details_identity(fields(identity_fields(d, live, now_filetime())));
+        ui.set_details_resources(fields(resource_fields(d, live)));
+        let connections: Vec<DetailsConnection> = live
+            .connections
+            .iter()
+            .map(|c| DetailsConnection {
+                protocol: c.protocol.into(),
+                local: c.local.as_str().into(),
+                remote: c.remote.as_str().into(),
+                state: c.state.as_str().into(),
+            })
+            .collect();
+        ui.set_details_connections(ModelRc::new(VecModel::from(connections)));
+        let services: Vec<slint::SharedString> = live.services.iter().map(|s| s.as_str().into()).collect();
+        ui.set_details_services(ModelRc::new(VecModel::from(services)));
+    }
+
     /// The action target for a row id; `None` once that row's app or process has exited.
     pub fn target(&self, id: i32) -> Option<Target> {
         self.last.targets.get(&id).cloned()
@@ -1253,6 +1397,10 @@ impl Bridge {
     pub fn all_procs(&self) -> &[(u32, i64, u32)] {
         &self.last.all_procs
     }
+}
+
+fn field(label: &str, value: &str) -> DetailsField {
+    DetailsField { label: label.into(), value: value.into() }
 }
 
 thread_local! {

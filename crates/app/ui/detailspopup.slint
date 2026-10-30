@@ -1,10 +1,64 @@
-// The Details popup: everything about one app, for the process picked in its list.
+// The Details popup: everything about one app, for the process picked in its list. It grows to
+// its content and scrolls inside the window; it never needs a wider window.
+import { Button, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { FocusButton } from "focusbutton.slint";
 
 export struct DetailsChip { text: string, warn: bool }
 export struct DetailsProc { pid: int, name: string, role: string, cpu: string, memory: string, alive: bool }
 export struct DetailsField { label: string, value: string }
 export struct DetailsConnection { protocol: string, local: string, remote: string, state: string }
+
+component SectionTitle inherits Text {
+    color: Theme.text;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+// Label on the left, value on the right; a long value (a path, a command line) wraps anywhere.
+component FieldList inherits VerticalLayout {
+    in property <[DetailsField]> fields;
+    spacing: 4px;
+    for f in root.fields : HorizontalLayout {
+        spacing: 12px;
+        Text { text: f.label; color: Theme.muted; width: 110px; }
+        Text { text: f.value; color: Theme.text; wrap: char-wrap; horizontal-stretch: 1; }
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> warn;
+    height: label.preferred-height + 6px;
+    width: label.preferred-width + 16px;
+    border-radius: self.height / 2;
+    border-width: 1px;
+    border-color: root.warn ? #c42b1c : Theme.card-border;
+    background: Theme.card;
+    label := Text { text: root.text; color: root.warn ? #c42b1c : Theme.text; font-size: 12px; }
+}
+
+component ProcRow inherits FocusButton {
+    in property <DetailsProc> proc;
+    in property <bool> selected;
+    accessible-label: root.proc.name + ", PID " + root.proc.pid;
+    height: 32px;
+    border-radius: 4px;
+    background: root.selected ? Theme.accent.with-alpha(0.18) : (root.hovered ? Theme.card-border.with-alpha(0.4) : transparent);
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.accent;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text { text: root.proc.name; color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+        Text { text: root.proc.role; color: Theme.muted; vertical-alignment: center; }
+        Text { text: "PID " + root.proc.pid; color: Theme.muted; vertical-alignment: center; width: 76px; }
+        if root.proc.alive : Text { text: root.proc.cpu; color: Theme.text; vertical-alignment: center; horizontal-alignment: right; width: 48px; }
+        if root.proc.alive : Text { text: root.proc.memory; color: Theme.text; vertical-alignment: center; horizontal-alignment: right; width: 72px; }
+        if !root.proc.alive : Text { text: "Exited"; color: Theme.muted; vertical-alignment: center; horizontal-alignment: right; width: 128px; }
+    }
+}
 
 export component DetailsPopup inherits Rectangle {
     in property <string> name;
@@ -26,4 +80,116 @@ export component DetailsPopup inherits Rectangle {
     callback open-location();
     callback close();
     background: #00000066;
+    TouchArea { }
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.close();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    panel := Rectangle {
+        accessible-role: groupbox;
+        accessible-label: "Details for " + root.name;
+        width: min(root.width - 48px, 560px);
+        height: min(root.height - 48px, head.preferred-height + body.preferred-height + foot.preferred-height + 2 * 16px + 2 * 12px);
+        border-radius: Theme.radius;
+        background: Theme.palette-dark ? #2b2b2b : #ffffff;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            head := VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    if root.has-icon : Image { source: root.icon; width: 32px; height: 32px; }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: root.name; color: Theme.text; font-size: 16px; font-weight: 600; overflow: elide; }
+                        if root.subtitle != "" : Text { text: root.subtitle; color: Theme.muted; overflow: elide; }
+                    }
+                }
+                // One chip per line: Slint has no wrapping row.
+                VerticalLayout {
+                    spacing: 6px;
+                    for chip in root.chips : HorizontalLayout {
+                        alignment: start;
+                        Chip { text: chip.text; warn: chip.warn; }
+                    }
+                }
+            }
+            ScrollView {
+                vertical-stretch: 1;
+                content-width: self.visible-width;
+                content-height: body.preferred-height;
+                body := VerticalLayout {
+                    width: parent.width;
+                    spacing: 16px;
+                    padding-right: 12px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        SectionTitle { text: "Processes in this app"; }
+                        for p[i] in root.procs : ProcRow {
+                            proc: p;
+                            selected: i == root.selected;
+                            activated => { root.select(i); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 6px;
+                        HorizontalLayout {
+                            SectionTitle { text: "Identity"; vertical-alignment: center; horizontal-stretch: 1; }
+                            Button { text: "Copy all"; clicked => { root.copy-all(); } }
+                        }
+                        FieldList { fields: root.identity; }
+                    }
+                    VerticalLayout {
+                        spacing: 6px;
+                        SectionTitle { text: "Resources"; }
+                        FieldList { fields: root.resources; }
+                    }
+                    VerticalLayout {
+                        spacing: 6px;
+                        SectionTitle { text: "Settings"; }
+                        Text { text: "Applies to all processes in this app."; color: Theme.muted; wrap: word-wrap; }
+                        FieldList { fields: root.settings; }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            Button { text: "Change priority"; clicked => { root.change-priority(); } }
+                            Button { text: "Change affinity"; clicked => { root.change-affinity(); } }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        SectionTitle { text: "Network connections"; }
+                        if root.connections.length == 0 : Text { text: "No network connections."; color: Theme.muted; }
+                        for c in root.connections : HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: c.protocol; color: Theme.muted; width: 32px; }
+                            Text { text: c.local + "  \u{2192}  " + c.remote; color: Theme.text; wrap: char-wrap; horizontal-stretch: 1; }
+                            Text { text: c.state; color: Theme.muted; }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        SectionTitle { text: "Services"; }
+                        if root.services.length == 0 : Text { text: "No services run in this process."; color: Theme.muted; }
+                        for s in root.services : Text { text: s; color: Theme.text; }
+                    }
+                }
+            }
+            foot := HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button { text: "Open file location"; clicked => { root.open-location(); } }
+                Button { text: "Close"; primary: true; clicked => { root.close(); } }
+            }
+        }
+    }
 }

@@ -1,6 +1,6 @@
 //! The Details popup's data: facts read once when it opens, and the live part the worker builds
 //! each tick while it is open.
-use negotium_actions::{Details, Signature};
+use negotium_actions::{Architecture, Details, Signature};
 use negotium_collector::sockets::{Protocol, Socket};
 use negotium_model::{AppRow, ProcRow};
 use negotium_snapshot::{ProcessSample, Snapshot};
@@ -194,18 +194,136 @@ pub fn copy_all_text(o: &Opened, f: &DetailsFrame) -> String {
 
 /// The header chips: (text, warn). Signature, architecture and admin always (when known);
 /// efficiency mode and UAC virtualization only when on.
-pub fn header_chips(_o: &Opened) -> Vec<(String, bool)> {
-    Vec::new()
+pub fn header_chips(o: &Opened) -> Vec<(String, bool)> {
+    let mut chips = Vec::new();
+    match &o.signature {
+        Signature::Signed(name) if name.is_empty() => chips.push(("Signed".to_string(), false)),
+        Signature::Signed(name) => chips.push((format!("Signed by {name}"), false)),
+        Signature::NotSigned => chips.push(("Not signed".to_string(), true)),
+        Signature::Unknown => {}
+    }
+    // The app's main process (listed first) speaks for the app.
+    let Some(d) = o.procs.first().and_then(|p| p.details.as_ref()) else { return chips };
+    if let Some(a) = d.architecture {
+        let text = match a {
+            Architecture::X86 => "32-bit",
+            Architecture::X64 => "64-bit",
+            Architecture::Arm64 => "ARM64",
+            Architecture::X64OnArm64 => "x64 on ARM64",
+            Architecture::X86OnArm64 => "x86 on ARM64",
+            Architecture::Other => "Other architecture",
+        };
+        chips.push((text.to_string(), false));
+    }
+    match d.elevated {
+        Some(true) => chips.push(("Runs as admin".to_string(), false)),
+        Some(false) => chips.push(("Does not run as admin".to_string(), false)),
+        None => {}
+    }
+    if d.efficiency == Some(true) {
+        chips.push(("Efficiency mode on".to_string(), false));
+    }
+    if d.virtualized == Some(true) {
+        chips.push(("UAC virtualization on".to_string(), false));
+    }
+    chips
 }
 
 /// The Identity section of the selected process: (label, value). `now` is a FILETIME.
-pub fn identity_fields(_o: &Opened, _f: &DetailsFrame, _now: i64) -> Vec<(String, String)> {
-    Vec::new()
+pub fn identity_fields(o: &Opened, f: &DetailsFrame, now: i64) -> Vec<(String, String)> {
+    let d = o.procs.get(o.selected).and_then(|p| p.details.as_ref());
+    let text = |v: Option<&String>| v.map_or_else(|| DASH.to_string(), Clone::clone);
+    vec![
+        ("Path".to_string(), text(d.and_then(|d| d.image_path.as_ref()))),
+        ("Command line".to_string(), text(d.and_then(|d| d.command_line.as_ref()))),
+        ("Started".to_string(), f.start_time.and_then(local_time_text).unwrap_or_else(|| DASH.to_string())),
+        ("Running for".to_string(), f.start_time.map_or_else(|| DASH.to_string(), |t| running_for(t, now))),
+        (
+            "Parent".to_string(),
+            f.parent.as_ref().map_or_else(|| DASH.to_string(), |(pid, name)| format!("{name} (PID {pid})")),
+        ),
+        ("User".to_string(), text(d.and_then(|d| d.user.as_ref()))),
+    ]
 }
 
 /// The Resources section of the selected process: (label, value).
-pub fn resource_fields(_o: &Opened, _f: &DetailsFrame) -> Vec<(String, String)> {
-    Vec::new()
+pub fn resource_fields(o: &Opened, f: &DetailsFrame) -> Vec<(String, String)> {
+    use crate::format;
+    let selected = o.procs.get(o.selected).map(|p| (p.pid, p.create_time));
+    let live = f.procs.iter().find(|p| p.alive && Some((p.pid, p.create_time)) == selected);
+    let value = |make: &dyn Fn(&LiveProc) -> Option<String>| live.and_then(make).unwrap_or_else(|| DASH.to_string());
+    vec![
+        ("CPU".to_string(), value(&|p| Some(format::pct(p.cpu_pct)))),
+        ("Memory".to_string(), value(&|p| Some(format::bytes(p.private_bytes as f64)))),
+        ("Peak memory".to_string(), value(&|_| f.peak_bytes.map(|b| format::bytes(b as f64)))),
+        ("Disk".to_string(), value(&|p| Some(format::byte_rate(p.disk_bps)))),
+        ("Network".to_string(), value(&|p| p.net_bps.map(format::bit_rate))),
+        ("GPU".to_string(), value(&|p| p.gpu_pct.map(format::pct))),
+        ("Threads".to_string(), value(&|p| Some(p.threads.to_string()))),
+        ("Handles".to_string(), value(&|p| Some(p.handles.to_string()))),
+    ]
+}
+
+/// Now, as a FILETIME (100 ns since 1601), like process create times.
+pub fn now_filetime() -> i64 {
+    // SAFETY: plain Win32 call.
+    let ft = unsafe { windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime() };
+    ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64
+}
+
+/// A FILETIME as local date and time, e.g. "2026-10-29 14:25:01".
+pub fn local_time_text(filetime: i64) -> Option<String> {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let ft = FILETIME { dwLowDateTime: filetime as u32, dwHighDateTime: (filetime >> 32) as u32 };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    // SAFETY: valid in and out pointers.
+    unsafe { FileTimeToSystemTime(&ft, &mut utc) }.ok()?;
+    // SAFETY: valid in and out pointers; no time zone means the current one.
+    unsafe { SystemTimeToTzSpecificLocalTime(None, &utc, &mut local) }.ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond
+    ))
+}
+
+impl Opened {
+    /// The app as an action target for the priority and affinity dialogs: every process, the
+    /// main one first.
+    pub fn target(&self) -> crate::view::Target {
+        let procs: Vec<(u32, i64)> = self.procs.iter().map(|p| (p.pid, p.create_time)).collect();
+        crate::view::Target {
+            name: self.name.clone(),
+            process_name: self.procs.first().map_or_else(|| self.name.clone(), |p| p.name.clone()),
+            root: procs.first().copied(),
+            procs,
+            hung_pid: None,
+            image_path: self.image_path.clone(),
+            critical: false,
+            group: false,
+        }
+    }
+}
+
+pub fn priority_text(p: negotium_actions::PriorityClass) -> &'static str {
+    use negotium_actions::PriorityClass::*;
+    match p {
+        Realtime => "Realtime",
+        High => "High",
+        AboveNormal => "Above normal",
+        Normal => "Normal",
+        BelowNormal => "Below normal",
+        Idle => "Low",
+    }
+}
+
+/// "All CPUs" when the process may run on every CPU, else "N of M CPUs".
+pub fn affinity_text(mask: u64, system: u64) -> String {
+    if mask & system == system {
+        "All CPUs".to_string()
+    } else {
+        format!("{} of {} CPUs", (mask & system).count_ones(), system.count_ones())
+    }
 }
 
 /// Reads the facts for every process in `procs` (the root first, when there is one). Blocking;
@@ -474,5 +592,11 @@ mod tests {
         let fields = resource_fields(&o, &f);
         assert!(!fields.is_empty());
         assert!(fields.iter().all(|(_, v)| v == DASH), "{fields:?}");
+    }
+
+    #[test]
+    fn affinity_reads_as_all_or_a_count() {
+        assert_eq!(affinity_text(0xff, 0xff), "All CPUs");
+        assert_eq!(affinity_text(0x0f, 0xff), "4 of 8 CPUs");
     }
 }
