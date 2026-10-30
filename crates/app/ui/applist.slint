@@ -13,6 +13,8 @@ export struct RowData {
     // Each column's bar under an app card's number, 0..1, in column order.
     bars: [float],
     hung: string, expandable: bool, expanded: bool, actionable: bool,
+    // A process of it hosts Windows services (the menu's Go to service(s)).
+    hosts-services: bool,
     // The app or process went away while the list was frozen: shown in place, dimmed, inert.
     exited: bool,
     // The program's icon, extracted off the UI thread; has-icon is false until it arrives (and for
@@ -228,7 +230,7 @@ component EndTaskButton inherits FocusButton {
     height: 22px;
     border-radius: 4px;
     background: root.hovered ? Theme.danger : transparent;
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     Path {
         width: 10px;
@@ -252,7 +254,7 @@ export component SortHeader inherits FocusButton {
     in property <bool> descending;
     in property <bool> left;
     border-radius: 4px;
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     // "Sort by <column>" first (what activating it does), then which way the sorted one runs.
     accessible-label: "Sort by " + root.label + (root.sorted ? (root.descending ? ", sorted descending" : ", sorted ascending") : "");
@@ -307,6 +309,7 @@ component StaticHeader inherits Rectangle {
 // to that captured row.
 component RowMenu inherits Rectangle {
     in property <bool> actionable;
+    in property <bool> hosts-services;
     callback action(string);
     public function open(x: length, y: length) {
         area.show({ x: x, y: y });
@@ -326,6 +329,12 @@ component RowMenu inherits Rectangle {
             MenuItem { title: "Exclude from Aequilibrium"; enabled: root.actionable; activated => { root.action("toggle-aequilibrium-exclusion"); } }
             MenuSeparator { }
             MenuItem { title: "Open file location"; enabled: root.actionable; activated => { root.action("open-location"); } }
+            MenuItem { title: "Search online"; enabled: root.actionable; activated => { root.action("search-online"); } }
+            MenuItem { title: "Properties"; enabled: root.actionable; activated => { root.action("properties"); } }
+            MenuItem { title: "Go to service(s)"; enabled: root.actionable && root.hosts-services; activated => { root.action("goto-services"); } }
+            MenuSeparator { }
+            MenuItem { title: "Create memory dump file"; enabled: root.actionable; activated => { root.action("dump"); } }
+            MenuSeparator { }
             MenuItem { title: "Details"; enabled: root.actionable; activated => { root.action("details"); } }
         }
     }
@@ -359,6 +368,7 @@ export component AppList inherits VerticalLayout {
     in property <length> current-row-h;
     in property <int> current-id: -1;
     in property <bool> current-actionable;
+    in property <bool> current-hosts-services;
     out property <bool> hovered: area.has-hover;
     out property <length> scroll-y: lv.content-y;
     // Row heights by kind, mirrored from crate::view::ROW_H_* (a test keeps them equal): Rust sums
@@ -569,6 +579,7 @@ export component AppList inherits VerticalLayout {
         }
         key-menu := RowMenu {
             actionable: root.current-actionable;
+            hosts-services: root.current-hosts-services;
             action(name) => { root.action(name, root.menu-target); }
             area := TouchArea {
                 enabled: root.interactive;
@@ -652,6 +663,7 @@ export component AppList inherits VerticalLayout {
                                 }
                                 menu := RowMenu {
                                     actionable: r.actionable;
+                                    hosts-services: r.hosts-services;
                                     action(name) => { root.action(name, root.menu-target); }
                                     // Never takes focus itself; key presses a focused control in this row rejects
                                     // (the buttons take only Space and Return) bubble up here.

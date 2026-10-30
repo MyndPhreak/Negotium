@@ -148,6 +148,8 @@ pub struct Controls {
     /// remembered, so the next `wait` returns immediately instead of losing the wakeup.
     woken: Mutex<bool>,
     moderator: Mutex<negotium_moderator::ModeratorConfig>,
+    /// The processes the open Details popup shows; the worker builds their live part each tick.
+    details: Mutex<Option<crate::details::DetailsWatch>>,
     cv: Condvar,
 }
 
@@ -177,12 +179,24 @@ impl Default for Controls {
             stop: AtomicBool::new(false),
             child_rows: Mutex::new((HashSet::new(), false)),
             woken: Mutex::new(false),
+            details: Mutex::new(None),
             cv: Condvar::new(),
         }
     }
 }
 
 impl Controls {
+    /// Sets (or with `None` clears) the processes the Details popup shows.
+    pub fn set_details_watch(&self, watch: Option<crate::details::DetailsWatch>) {
+        *self.details.lock().unwrap_or_else(|e| e.into_inner()) = watch;
+        // A new selection should not wait a whole refresh interval for its live part.
+        self.poke();
+    }
+
+    pub fn details_watch(&self) -> Option<crate::details::DetailsWatch> {
+        self.details.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     pub fn set_metric(&self, m: Metric) {
         self.metric.store(m as u8, Ordering::Relaxed);
         self.poke();
@@ -335,6 +349,23 @@ impl Controls {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_details_watch_wakes_the_worker() {
+        let c = super::Controls::default();
+        c.set_details_watch(Some(crate::details::DetailsWatch { procs: vec![(1, 2)], selected: (1, 2) }));
+        assert!(c.wait(std::time::Duration::from_millis(1)), "the worker builds the new selection at once");
+    }
+
+    #[test]
+    fn a_details_watch_is_kept_until_cleared() {
+        let c = super::Controls::default();
+        let w = crate::details::DetailsWatch { procs: vec![(1, 2)], selected: (1, 2) };
+        c.set_details_watch(Some(w.clone()));
+        assert_eq!(c.details_watch(), Some(w));
+        c.set_details_watch(None);
+        assert_eq!(c.details_watch(), None);
+    }
+
     use super::*;
     use std::sync::Arc;
     use std::time::{Duration, Instant};

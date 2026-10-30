@@ -73,7 +73,7 @@ export component TopStrip inherits VerticalLayout {
             clip: true;
             border-radius: 6px;
             background: t.hung ? Theme.danger-bg : Theme.accent.with-alpha(0.28);
-            border-width: self.focused ? 2px : 0px;
+            border-width: self.focus-visible ? 2px : 0px;
             border-color: Theme.text;
             accessible-label: t.name + " tile";
             interactive: root.interactive && !t.leaving;

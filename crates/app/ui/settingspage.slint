@@ -18,8 +18,8 @@ export component Toggle inherits FocusButton {
     // Disabled (a later version, or under a modal): dimmed as a whole.
     opacity: root.interactive ? 1 : 0.5;
     background: root.checked && root.interactive ? Theme.accent : transparent;
-    border-width: root.focused ? 2px : (root.checked && root.interactive ? 0px : 1px);
-    border-color: root.focused ? Theme.text : Theme.muted;
+    border-width: root.focus-visible ? 2px : (root.checked && root.interactive ? 0px : 1px);
+    border-color: root.focus-visible ? Theme.text : Theme.muted;
     accessible-role: switch;
     accessible-label: root.label;
     accessible-description: root.description;
@@ -46,8 +46,8 @@ component ChoiceButton inherits FocusButton {
     border-radius: 4px;
     // The hover tint must show on a card, which is itself Theme.card.
     background: root.selected ? Theme.accent : (root.hovered ? Theme.text.with-alpha(0.08) : transparent);
-    border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.text : Theme.card-border;
+    border-width: root.focus-visible ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : Theme.card-border;
     accessible-role: radio-button;
     accessible-label: root.label;
     accessible-checkable: true;
@@ -78,8 +78,8 @@ component ActionButton inherits FocusButton {
     border-radius: 4px;
     opacity: root.interactive ? 1 : 0.5;
     background: root.hovered && root.interactive ? Theme.text.with-alpha(0.08) : transparent;
-    border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.text : Theme.card-border;
+    border-width: root.focus-visible ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : Theme.card-border;
     accessible-label: root.label;
     accessible-enabled: root.interactive;
     HorizontalLayout {
@@ -109,8 +109,8 @@ component TintSwatch inherits FocusButton {
     vertical-stretch: 0;
     border-radius: 6px;
     opacity: root.interactive ? 1 : 0.5;
-    border-width: root.focused || root.selected ? 2px : 1px;
-    border-color: root.focused ? Theme.text : (root.selected ? Theme.accent : Theme.card-border);
+    border-width: root.focus-visible || root.selected ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : (root.selected ? Theme.accent : Theme.card-border);
     accessible-role: radio-button;
     accessible-label: root.label;
     accessible-checkable: true;
@@ -233,7 +233,7 @@ export component SettingGroup inherits VerticalLayout {
         border-radius: 4px;
         interactive: root.interactive;
         background: self.hovered && root.interactive ? Theme.text.with-alpha(0.06) : transparent;
-        border-width: self.focused ? 2px : 0px;
+        border-width: self.focus-visible ? 2px : 0px;
         border-color: Theme.text;
         accessible-label: root.title;
         accessible-description: root.summary;

@@ -29,6 +29,9 @@ export component Banner inherits Rectangle {
 export component Toast inherits Rectangle {
     in property <string> text;
     in property <bool> interactive: true;
+    // An optional second button before OK (e.g. "Open folder"); none when empty.
+    in property <string> action-label;
+    callback action();
     callback dismiss();
     min-height: 36px;
     border-radius: Theme.radius;
@@ -39,6 +42,7 @@ export component Toast inherits Rectangle {
         padding: 8px;
         spacing: 8px;
         Text { text: root.text; color: Theme.text; vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1; }
+        if root.action-label != "" : Button { text: root.action-label; enabled: root.interactive; clicked => { root.action(); } }
         Button { text: "OK"; enabled: root.interactive; clicked => { root.dismiss(); } }
     }
 }
@@ -293,7 +297,7 @@ component CheckRow inherits FocusButton {
     min-height: 32px;
     border-radius: 4px;
     background: root.hovered ? Theme.text.with-alpha(0.06) : transparent;
-    border-width: root.focused ? 2px : 0px;
+    border-width: root.focus-visible ? 2px : 0px;
     border-color: Theme.text;
     accessible-role: checkbox;
     accessible-label: root.text;
@@ -321,8 +325,8 @@ component CpuTile inherits FocusButton {
     height: 30px;
     border-radius: 4px;
     background: root.checked ? (root.hovered ? Theme.accent.brighter(0.15) : Theme.accent) : (root.hovered ? Theme.card-hover : Theme.card-inset);
-    border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.text : (root.checked ? Theme.accent : Theme.card-border);
+    border-width: root.focus-visible ? 2px : 1px;
+    border-color: root.focus-visible ? Theme.text : (root.checked ? Theme.accent : Theme.card-border);
     accessible-role: checkbox;
     accessible-label: "CPU " + root.cpu;
     accessible-checkable: true;
