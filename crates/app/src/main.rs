@@ -1097,7 +1097,7 @@ fn main() -> Result<(), slint::PlatformError> {
         move |job: negotium::dispatch::Job| {
             let weak = weak.clone();
             std::thread::spawn(move || {
-                let text = negotium::dispatch::run(job, elevated);
+                let text = negotium::dispatch::run(job, elevated).toast();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         if let Some(details) = text.strip_prefix("details:") {

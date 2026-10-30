@@ -130,9 +130,32 @@ fn stuck_hint(ending: &[u32]) -> Option<String> {
     ending_hint(holds, &filters)
 }
 
-/// Blocking; call on an action thread. Returns the notification text ("" = silent success),
-/// or `details:`-prefixed details text for [`JobKind::Details`].
-pub fn run(job: Job, elevated: bool) -> String {
+/// What a finished job shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    Silent,
+    Toast(String),
+    Details(Box<crate::details::Opened>),
+    /// A memory dump was written: the toast text and the folder its Open folder button opens.
+    Dumped { text: String, folder: std::path::PathBuf },
+}
+
+impl Outcome {
+    /// The toast text, "" when there is none (the window picker shows only text).
+    pub fn toast(self) -> String {
+        match self {
+            Outcome::Toast(text) | Outcome::Dumped { text, .. } => text,
+            Outcome::Silent | Outcome::Details(_) => String::new(),
+        }
+    }
+}
+
+/// Blocking; call on an action thread.
+pub fn run(job: Job, elevated: bool) -> Outcome {
+    Outcome::Toast(run_text(job, elevated))
+}
+
+fn run_text(job: Job, elevated: bool) -> String {
     let fail = |e: ActionError| e.message(&job.name, elevated);
     match job.kind {
         JobKind::EndMany => {
@@ -212,6 +235,21 @@ mod tests {
     fn critical_targets_need_confirmation() {
         assert!(matches!(plan("end-task", &target(true), ALL), Plan::Confirm(text, _) if text.contains("unusable")));
         assert!(matches!(plan("details", &target(true), ALL), Plan::Run(_)));
+    }
+
+    #[test]
+    fn details_job_returns_every_process_root_first() {
+        let mut t = target(false);
+        t.procs = vec![(11, 2), (10, 1), (12, 3)];
+        let Plan::Run(job) = plan("details", &t, ALL) else { panic!() };
+        assert_eq!(job.kind, JobKind::Details);
+        assert_eq!(job.targets, vec![(10, 1), (11, 2), (12, 3)]);
+    }
+
+    #[test]
+    fn a_job_with_nothing_to_say_is_silent() {
+        let job = Job { kind: JobKind::OpenLocation, name: "App".into(), targets: vec![], path: None };
+        assert_eq!(run(job, false), Outcome::Silent);
     }
 
     #[test]

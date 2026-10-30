@@ -247,7 +247,7 @@ fn run(job: Job, restart_shell: bool) {
         let text = if restart_shell {
             end_with_restart(&mut LiveShell { job: Some(job), elevated, shell, old_taskbar: None }, elevated)
         } else {
-            crate::dispatch::run(job, elevated)
+            crate::dispatch::run(job, elevated).toast()
         };
         if !text.is_empty() {
             overlay::tell(None, &text);
@@ -441,7 +441,7 @@ impl ShellRestart for LiveShell {
     fn run_job(&mut self) -> String {
         // Noted first: once the shell ends, any taskbar found is the new one.
         self.old_taskbar = win::taskbar();
-        self.job.take().map_or_else(String::new, |job| crate::dispatch::run(job, self.elevated))
+        self.job.take().map_or_else(String::new, |job| crate::dispatch::run(job, self.elevated).toast())
     }
 
     fn wait_old_taskbar_gone(&mut self) {
