@@ -415,6 +415,8 @@ pub struct Bridge {
     /// When the last profile walk ended, and whether one runs now.
     profile_size_at: Option<Instant>,
     profile_running: bool,
+    /// The page was just shown: the next read may start a profile walk (the timer's reads do not).
+    profile_wanted: bool,
     /// Program icons by image path, and where the ones not yet seen are requested (none in
     /// tests that don't set one: rows then show no icons).
     icons: IconCache,
@@ -494,6 +496,7 @@ impl Bridge {
             profile_size: crate::users::ProfileSize::Calculating,
             profile_size_at: None,
             profile_running: false,
+            profile_wanted: false,
             icons: IconCache::default(),
             icon_loader: None,
             icons_pending: false,
@@ -932,6 +935,16 @@ impl Bridge {
     /// Claims the one Users read at a time: false while one runs.
     pub fn begin_users_read(&mut self) -> bool {
         !std::mem::replace(&mut self.users_reading, true)
+    }
+
+    /// The Users page was shown: the next read may start a profile walk.
+    pub fn want_profile_size(&mut self) {
+        unimplemented!("Not implemented")
+    }
+
+    /// The profile folder to walk: only after `want_profile_size`, and when a walk is due.
+    pub fn take_profile_walk(&mut self, _now: Instant) -> Option<std::path::PathBuf> {
+        unimplemented!("Not implemented")
     }
 
     /// The profile folder to walk, when a walk is due (none runs, and none is known or the last is

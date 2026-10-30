@@ -6058,6 +6058,36 @@ fn with_no_other_sessions_the_page_says_so() {
 }
 
 #[test]
+fn a_failed_first_read_does_not_say_nobody_else_is_signed_in() {
+    let (ui, bridge) = users_bridged();
+    ui.set_page(7);
+    ui.window().set_size(slint::PhysicalSize::new(760, 1000));
+    ui.show().unwrap();
+    bridge.borrow_mut().set_users(&ui, users_read(Err("boom".into()), my_account()), false);
+    assert_eq!(ui.get_users_read_note(), "Couldn't read the signed-in users: boom.");
+    assert!(text(&ui, "No other users are signed in.").is_none(), "the read failed: nobody is known");
+}
+
+#[test]
+fn the_profile_walk_starts_only_after_the_page_was_shown() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    let profile = PathBuf::from(r"C:\Users\alex");
+    let t0 = Instant::now();
+    b.set_users(&ui, users_read(Ok(two_sessions()), Account { profile: Some(profile.clone()), ..my_account() }), true);
+    assert_eq!(b.take_profile_walk(t0), None, "a timer read does not walk");
+    b.want_profile_size();
+    assert_eq!(b.take_profile_walk(t0), Some(profile.clone()), "the page was shown: the first walk");
+    b.set_profile_size(&ui, Some(DirSize { bytes: 1 << 30, skipped: 0 }), t0);
+    let later = t0 + Duration::from_secs(700);
+    assert_eq!(b.take_profile_walk(later), None, "the wish was used up");
+    b.want_profile_size();
+    assert_eq!(b.take_profile_walk(t0 + Duration::from_secs(599)), None, "shown again, but the size is fresh");
+    b.want_profile_size();
+    assert_eq!(b.take_profile_walk(later), Some(profile), "shown again, and the size is old");
+}
+
+#[test]
 fn with_other_sessions_the_page_lists_each_one_and_drops_the_empty_text() {
     let ui = users_window(vec![user_row(3, "alex"), user_row(4, "bo")], false, "");
     assert!(text(&ui, "No other users are signed in.").is_none());
