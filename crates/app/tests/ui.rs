@@ -5977,6 +5977,403 @@ fn a_search_of_only_spaces_keeps_the_saved_groups() {
     assert!(text(&ui, NO_MATCH).is_none());
 }
 
+// ---- Users page (docs/superpowers/specs/2026-10-28-users-details-settings-design.md §3) ----
+
+use negotium::users::UsersRead;
+use negotium::{UserRowData, YouData};
+use negotium_actions::users::{Account, DirSize, Session, SessionState};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+fn you_data() -> YouData {
+    YouData {
+        initial: "A".into(),
+        name: "Alex Doe".into(),
+        subtitle: "alex@example.com".into(),
+        account_type: "Administrator".into(),
+        signed_in: "Signed in for 10 min".into(),
+        place: "This PC".into(),
+        profile_path: r"C:\Users\alex".into(),
+        profile_size: "1.0 GB".into(),
+        sign_in: "Password, PIN, Face".into(),
+        password_set: "558 days ago".into(),
+        groups: "Administrators, Users".into(),
+        negotium_admin: "Yes".into(),
+    }
+}
+
+fn user_row(id: i32, name: &str) -> UserRowData {
+    UserRowData { id, name: name.into(), account_type: "Standard".into(), state: "Disconnected".into(), idle: "—".into() }
+}
+
+fn users_window(rows: Vec<UserRowData>, need_admin: bool, note: &str) -> MainWindow {
+    let ui = window();
+    ui.set_page(7);
+    ui.set_you(you_data());
+    ui.set_user_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_users_need_admin(need_admin);
+    ui.set_users_read_note(note.into());
+    ui.window().set_size(PhysicalSize::new(760, 1400));
+    ui.show().unwrap();
+    ui
+}
+
+fn users_el(ui: &MainWindow, label: &str) -> El {
+    El::find_by_accessible_label(ui, label).next().unwrap_or_else(|| panic!("missing {label}"))
+}
+
+/// Records the Users page's `user-action` reports.
+fn user_actions(ui: &MainWindow) -> Rc<RefCell<Vec<(String, i32)>>> {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let l = log.clone();
+    ui.on_user_action(move |name, id| l.borrow_mut().push((name.to_string(), id)));
+    log
+}
+
+#[test]
+fn the_users_card_shows_the_account_and_every_detail() {
+    let ui = users_window(vec![], false, "");
+    for shown in [
+        "Alex Doe",
+        "alex@example.com",
+        "Administrator",
+        "Signed in for 10 min",
+        "This PC",
+        r"C:\Users\alex",
+        "1.0 GB",
+        "Password, PIN, Face",
+        "558 days ago",
+        "Administrators, Users",
+        "Yes",
+    ] {
+        assert!(text(&ui, shown).is_some(), "the card shows {shown}");
+    }
+}
+
+#[test]
+fn with_no_other_sessions_the_page_says_so() {
+    let ui = users_window(vec![], false, "");
+    assert!(text(&ui, "No other users are signed in.").is_some());
+}
+
+#[test]
+fn a_failed_first_read_does_not_say_nobody_else_is_signed_in() {
+    let (ui, bridge) = users_bridged();
+    ui.set_page(7);
+    ui.window().set_size(slint::PhysicalSize::new(760, 1000));
+    ui.show().unwrap();
+    bridge.borrow_mut().set_users(&ui, users_read(Err("boom".into()), my_account()), false);
+    assert_eq!(ui.get_users_read_note(), "Couldn't read the signed-in users: boom.");
+    assert!(text(&ui, "No other users are signed in.").is_none(), "the read failed: nobody is known");
+}
+
+#[test]
+fn the_profile_walk_starts_only_after_the_page_was_shown() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    let profile = PathBuf::from(r"C:\Users\alex");
+    let t0 = Instant::now();
+    b.set_users(&ui, users_read(Ok(two_sessions()), Account { profile: Some(profile.clone()), ..my_account() }), true);
+    assert_eq!(b.take_profile_walk(t0), None, "a timer read does not walk");
+    b.want_profile_size();
+    assert_eq!(b.take_profile_walk(t0), Some(profile.clone()), "the page was shown: the first walk");
+    b.set_profile_size(&ui, Some(DirSize { bytes: 1 << 30, skipped: 0 }), t0);
+    let later = t0 + Duration::from_secs(700);
+    assert_eq!(b.take_profile_walk(later), None, "the wish was used up");
+    b.want_profile_size();
+    assert_eq!(b.take_profile_walk(t0 + Duration::from_secs(599)), None, "shown again, but the size is fresh");
+    b.want_profile_size();
+    assert_eq!(b.take_profile_walk(later), Some(profile), "shown again, and the size is old");
+}
+
+#[test]
+fn with_other_sessions_the_page_lists_each_one_and_drops_the_empty_text() {
+    let ui = users_window(vec![user_row(3, "alex"), user_row(4, "bo")], false, "");
+    assert!(text(&ui, "No other users are signed in.").is_none());
+    for label in ["Sign out alex", "Disconnect alex", "Sign out bo", "Disconnect bo"] {
+        users_el(&ui, label);
+    }
+}
+
+#[test]
+fn each_card_button_reports_its_action_with_no_session() {
+    let ui = users_window(vec![], false, "");
+    let log = user_actions(&ui);
+    for label in ["Lock", "Switch user", "Sign out", "Open account settings"] {
+        users_el(&ui, label).invoke_accessible_default_action();
+    }
+    let expected: Vec<(String, i32)> = [("lock", -1), ("switch-user", -1), ("sign-out", -1), ("account-settings", -1)]
+        .iter()
+        .map(|(n, i)| (n.to_string(), *i))
+        .collect();
+    assert_eq!(*log.borrow(), expected);
+}
+
+#[test]
+fn row_buttons_report_their_session() {
+    let ui = users_window(vec![user_row(3, "alex")], false, "");
+    let log = user_actions(&ui);
+    users_el(&ui, "Sign out alex").invoke_accessible_default_action();
+    users_el(&ui, "Disconnect alex").invoke_accessible_default_action();
+    assert_eq!(*log.borrow(), [("sign-out-session".to_string(), 3), ("disconnect".to_string(), 3)]);
+}
+
+#[test]
+fn without_admin_rights_rows_are_disabled_and_the_banner_offers_a_restart() {
+    let ui = users_window(vec![user_row(3, "alex")], true, "");
+    let restarts = Rc::new(RefCell::new(0));
+    let r = restarts.clone();
+    ui.on_restart_admin(move || *r.borrow_mut() += 1);
+    assert!(text(&ui, "To sign out or disconnect another user, restart Negotium as admin.").is_some());
+    users_el(&ui, "Restart as admin").invoke_accessible_default_action();
+    assert_eq!(*restarts.borrow(), 1);
+    assert_eq!(users_el(&ui, "Sign out alex").accessible_enabled(), Some(false));
+    assert_eq!(users_el(&ui, "Disconnect alex").accessible_enabled(), Some(false));
+    assert_eq!(users_el(&ui, "Lock").accessible_enabled(), Some(true), "the card's own buttons need no admin rights");
+    // Nobody to act on: nothing to explain.
+    ui.set_user_rows(ModelRc::new(VecModel::from(Vec::<UserRowData>::new())));
+    assert!(El::find_by_accessible_label(&ui, "Restart as admin").next().is_none());
+}
+
+#[test]
+fn with_admin_rights_the_row_buttons_are_enabled_and_no_banner_shows() {
+    let ui = users_window(vec![user_row(3, "alex")], false, "");
+    assert_eq!(users_el(&ui, "Sign out alex").accessible_enabled(), Some(true));
+    assert!(El::find_by_accessible_label(&ui, "Restart as admin").next().is_none());
+}
+
+#[test]
+fn a_read_note_shows_on_the_page() {
+    let ui = users_window(vec![], false, "Couldn't read the signed-in users: boom.");
+    assert!(text(&ui, "Couldn't read the signed-in users: boom.").is_some());
+}
+
+#[test]
+fn the_user_confirm_shows_its_text_and_reports_the_choice() {
+    let ui = users_window(vec![], false, "");
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let l = log.clone();
+    ui.on_user_confirm(move |ok| l.borrow_mut().push(ok));
+    assert!(!ui.get_modal_open());
+    ui.invoke_show_user_confirm("Sign out?".into(), "Save your work first.".into(), "Sign out".into());
+    assert!(ui.get_modal_open());
+    assert!(text(&ui, "Sign out?").is_some());
+    assert!(text(&ui, "Save your work first.").is_some());
+    assert_eq!(users_el(&ui, "Lock").accessible_enabled(), Some(false), "the page beneath is disabled");
+    users_el(&ui, "Cancel").invoke_accessible_default_action();
+    // The card's own "Sign out" is disabled under the dialog: the enabled one is the dialog's.
+    El::find_by_accessible_label(&ui, "Sign out")
+        .find(|e| e.accessible_enabled() == Some(true))
+        .expect("the dialog's Sign out")
+        .invoke_accessible_default_action();
+    assert_eq!(*log.borrow(), [false, true]);
+}
+
+#[test]
+fn return_in_the_user_confirm_cancels() {
+    let ui = users_window(vec![], false, "");
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let l = log.clone();
+    ui.on_user_confirm(move |ok| l.borrow_mut().push(ok));
+    ui.invoke_show_user_confirm("Sign out?".into(), "Save your work first.".into(), "Sign out".into());
+    slint::platform::update_timers_and_animations();
+    key(&ui, slint::platform::Key::Return);
+    assert_eq!(*log.borrow(), [false], "Cancel is the primary choice");
+}
+
+#[test]
+fn the_card_and_row_buttons_do_not_overlap_and_stay_inside_the_window() {
+    let ui = users_window(vec![user_row(3, "alex"), user_row(4, "bo")], false, "");
+    let labels = [
+        "Lock",
+        "Switch user",
+        "Sign out",
+        "Open account settings",
+        "Sign out alex",
+        "Disconnect alex",
+        "Sign out bo",
+        "Disconnect bo",
+    ];
+    let rects: Vec<Rect> = labels.iter().map(|l| rect(&ui, l)).collect();
+    for (label, r) in labels.iter().zip(&rects) {
+        assert!(r.0 + r.2 <= 760.0 - 14.0, "{label} ends at {}", r.0 + r.2);
+    }
+    for (i, a) in rects.iter().enumerate() {
+        for (j, b) in rects.iter().enumerate().skip(i + 1) {
+            let apart = a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+            assert!(apart, "{} overlaps {}", labels[i], labels[j]);
+        }
+    }
+}
+
+// The bridge side.
+
+fn session(id: u32, user: &str) -> Session {
+    Session { id, user: user.into(), domain: "PC".into(), state: SessionState::Disconnected, signed_in_secs: Some(600), idle_secs: None }
+}
+
+fn users_read(sessions: Result<Vec<Session>, String>, account: Account) -> UsersRead {
+    UsersRead {
+        sessions,
+        current: Some(1),
+        remote: false,
+        account,
+        admin_member: true,
+        admin_group: Some("Administrators".into()),
+        groups: HashMap::new(),
+    }
+}
+
+fn my_account() -> Account {
+    Account { name: Some(r"PC\alex".into()), full_name: Some("Alex Doe".into()), ..Default::default() }
+}
+
+fn two_sessions() -> Vec<Session> {
+    vec![Session { state: SessionState::Active, ..session(1, "alex") }, session(3, "bo")]
+}
+
+fn users_bridged() -> (MainWindow, Rc<RefCell<Bridge>>) {
+    let (ui, controls, bridge) = bridged();
+    controls.set_page(Page::Users);
+    (ui, bridge)
+}
+
+#[test]
+fn set_users_pushes_the_card_and_the_other_rows() {
+    let (ui, bridge) = users_bridged();
+    bridge.borrow_mut().set_users(&ui, users_read(Ok(two_sessions()), my_account()), false);
+    let you = ui.get_you();
+    assert_eq!(
+        (you.name.as_str(), you.account_type.as_str(), you.signed_in.as_str()),
+        ("Alex Doe", "Administrator", "Signed in for 10 min")
+    );
+    let rows: Vec<(i32, String)> = ui.get_user_rows().iter().map(|r| (r.id, r.name.to_string())).collect();
+    assert_eq!(rows, [(3, "bo".to_string())], "the current session is not a row");
+    assert!(ui.get_users_need_admin(), "not elevated");
+    assert_eq!(ui.get_users_read_note(), "");
+}
+
+#[test]
+fn an_elevated_read_does_not_ask_for_admin_rights() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    b.set_users(&ui, users_read(Ok(two_sessions()), my_account()), false);
+    assert!(ui.get_users_need_admin());
+    b.set_users(&ui, users_read(Ok(two_sessions()), my_account()), true);
+    assert!(!ui.get_users_need_admin());
+}
+
+#[test]
+fn a_failed_session_read_keeps_the_rows_and_sets_a_note_until_a_read_succeeds() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    b.set_users(&ui, users_read(Ok(two_sessions()), my_account()), true);
+    b.set_users(&ui, users_read(Err("boom".into()), my_account()), true);
+    assert_eq!(ui.get_user_rows().row_count(), 1, "the rows stay");
+    assert_eq!(ui.get_users_read_note(), "Couldn't read the signed-in users: boom.");
+    assert_eq!(ui.get_toast(), "", "a note, not a toast");
+    b.set_users(&ui, users_read(Ok(two_sessions()), my_account()), true);
+    assert_eq!(ui.get_users_read_note(), "");
+}
+
+#[test]
+fn a_panicked_read_job_sets_a_plain_note() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    assert!(b.begin_users_read());
+    b.users_read_failed(&ui);
+    assert_eq!(ui.get_users_read_note(), "Couldn't read the users.");
+    assert!(b.begin_users_read(), "the failure ends the read");
+}
+
+#[test]
+fn a_picture_that_does_not_exist_leaves_the_initial() {
+    let (ui, bridge) = users_bridged();
+    let account = Account { picture: Some(PathBuf::from(r"C:\no\such\picture.jpg")), ..my_account() };
+    bridge.borrow_mut().set_users(&ui, users_read(Ok(two_sessions()), account), true);
+    assert!(!ui.get_you_has_picture());
+    assert_eq!(ui.get_you().initial, "A");
+}
+
+/// A 1 x 1 PNG.
+const PIXEL_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+#[test]
+fn a_picture_that_exists_shows_and_is_dropped_when_the_path_goes() {
+    let dir = Scratch::new("users-picture");
+    let path = dir.0.join("me.png");
+    std::fs::write(&path, PIXEL_PNG).unwrap();
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    b.set_users(&ui, users_read(Ok(two_sessions()), Account { picture: Some(path), ..my_account() }), true);
+    assert!(ui.get_you_has_picture());
+    b.set_users(&ui, users_read(Ok(two_sessions()), my_account()), true);
+    assert!(!ui.get_you_has_picture());
+}
+
+#[test]
+fn the_profile_size_calculates_first_then_holds_the_old_value_while_a_new_walk_runs() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    let profile = PathBuf::from(r"C:\Users\alex");
+    let t0 = Instant::now();
+    b.set_users(&ui, users_read(Ok(two_sessions()), Account { profile: Some(profile.clone()), ..my_account() }), true);
+    assert_eq!(ui.get_you().profile_size, "Calculating\u{2026}");
+    assert_eq!(b.begin_profile_size(t0), Some(profile.clone()), "the first walk is due");
+    assert_eq!(b.begin_profile_size(t0), None, "one walk at a time");
+    b.set_profile_size(&ui, Some(DirSize { bytes: 1 << 30, skipped: 0 }), t0);
+    assert_eq!(ui.get_you().profile_size, "1.0 GB");
+    assert_eq!(b.begin_profile_size(t0 + Duration::from_secs(599)), None, "not old enough");
+    assert_eq!(b.begin_profile_size(t0 + Duration::from_secs(600)), Some(profile), "ten minutes old");
+    assert_eq!(ui.get_you().profile_size, "1.0 GB", "the old size stays while the walk runs");
+    b.set_profile_size(&ui, None, t0 + Duration::from_secs(601));
+    assert_eq!(ui.get_you().profile_size, "—", "a failed walk");
+}
+
+#[test]
+fn a_later_read_keeps_the_known_profile_size() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    let account = Account { profile: Some(PathBuf::from(r"C:\Users\alex")), ..my_account() };
+    b.set_users(&ui, users_read(Ok(two_sessions()), account.clone()), true);
+    b.set_profile_size(&ui, Some(DirSize { bytes: 1 << 30, skipped: 2 }), Instant::now());
+    b.set_users(&ui, users_read(Ok(two_sessions()), account), true);
+    assert_eq!(ui.get_you().profile_size, "At least 1.0 GB");
+}
+
+#[test]
+fn no_profile_folder_means_no_walk_and_a_dash() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    b.set_users(&ui, users_read(Ok(two_sessions()), my_account()), true);
+    assert_eq!(b.begin_profile_size(Instant::now()), None);
+    assert_eq!(ui.get_you().profile_size, "—");
+}
+
+#[test]
+fn only_one_users_read_runs_at_a_time_and_rows_answer_for_their_name() {
+    let (ui, bridge) = users_bridged();
+    let mut b = bridge.borrow_mut();
+    assert!(b.begin_users_read());
+    assert!(!b.begin_users_read(), "one read is running");
+    b.set_users(&ui, users_read(Ok(two_sessions()), my_account()), true);
+    assert!(b.begin_users_read(), "set_users ends the read");
+    assert_eq!(b.user_name(3), Some("bo".to_string()));
+    assert_eq!(b.user_name(99), None);
+}
+
+#[test]
+fn the_account_picture_loads_when_there_is_one() {
+    let Some(picture) = negotium_actions::users::current_account().picture else {
+        eprintln!("skipped: this account has no picture");
+        return;
+    };
+    assert!(slint::Image::load_from_path(&picture).is_ok(), "{} should decode", picture.display());
+}
+
 // ---- Details popup ----
 
 use negotium::{DetailsChip, DetailsConnection, DetailsField, DetailsProc};

@@ -1,1 +1,263 @@
-export component UsersPage inherits VerticalLayout { }
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Banner } from "overlays.slint";
+import { RevealScrollView } from "revealscroll.slint";
+import { ScrollIndicator } from "scrollindicator.slint";
+
+export struct YouData {
+    initial: string,
+    name: string,
+    subtitle: string,
+    account-type: string,
+    signed-in: string,
+    place: string,
+    profile-path: string,
+    profile-size: string,
+    sign-in: string,
+    password-set: string,
+    groups: string,
+    negotium-admin: string,
+}
+
+export struct UserRowData {
+    id: int,
+    name: string,
+    account-type: string,
+    state: string,
+    idle: string,
+}
+
+// A Button that reports keyboard focus, so the scrolling page can bring it into view.
+component PageButton inherits Button {
+    callback focus-gained();
+    changed has-focus => {
+        if (self.has-focus) {
+            root.focus-gained();
+        }
+    }
+}
+
+// One fact of the card: a fixed label column, and a value that wraps instead of being clipped.
+component Detail inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 12px;
+    Text { text: root.label; width: 150px; color: Theme.muted; font-size: 12px; }
+    Text { text: root.value; horizontal-stretch: 1; color: Theme.text; font-size: 12px; wrap: word-wrap; }
+}
+
+component Chip inherits Rectangle {
+    in property <string> label;
+    height: 24px;
+    border-radius: 12px;
+    background: Theme.accent.with-alpha(0.15);
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text { text: root.label; color: Theme.text; font-size: 12px; vertical-alignment: center; }
+    }
+}
+
+// The signed-in account (a card with its actions) and the other signed-in sessions. Everything
+// scrolls: the card and the list together must fit the 760 x 440 window.
+export component UsersPage inherits VerticalLayout {
+    in property <YouData> you;
+    in property <image> picture;
+    in property <bool> has-picture;
+    in property <[UserRowData]> rows;
+    in property <bool> need-admin;
+    in property <string> read-note;
+    in property <length> bottom-inset;
+    in property <bool> interactive: true;
+    // "lock" | "switch-user" | "sign-out" | "account-settings" (id -1) | "sign-out-session" | "disconnect" (the row's session id)
+    callback act(string, int);
+    callback restart-admin();
+    property <length> gutter: 14px;
+    max-width: 16384px;
+    padding: 12px;
+    padding-bottom: 12px + root.bottom-inset;
+    spacing: 10px;
+
+    Text {
+        vertical-stretch: 0;
+        text: "Users";
+        color: Theme.text;
+        font-size: 24px;
+        font-weight: 600;
+    }
+    Rectangle {
+        vertical-stretch: 1;
+        sv := RevealScrollView {
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            content-width: max(0px, self.visible-width - root.gutter);
+            content-height: column.preferred-height;
+            changed content-height => {
+                self.content-y = max(self.content-y, min(0px, self.visible-height - self.content-height));
+            }
+            column := VerticalLayout {
+                width: sv.content-width;
+                height: self.preferred-height;
+                alignment: start;
+                spacing: 10px;
+                card := Rectangle {
+                    border-radius: Theme.radius;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+                        HorizontalLayout {
+                            spacing: 14px;
+                            Rectangle {
+                                width: 64px;
+                                height: 64px;
+                                border-radius: 32px;
+                                clip: true;
+                                background: Theme.accent.with-alpha(0.25);
+                                if root.has-picture : Image {
+                                    source: root.picture;
+                                    image-fit: ImageFit.cover;
+                                    width: parent.width;
+                                    height: parent.height;
+                                }
+                                if !root.has-picture : Text {
+                                    text: root.you.initial;
+                                    color: Theme.text;
+                                    font-size: 28px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    accessible-role: none;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                Text { text: root.you.name; color: Theme.text; font-size: 20px; font-weight: 600; overflow: elide; }
+                                Text { text: root.you.subtitle; color: Theme.muted; font-size: 12px; overflow: elide; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Chip { label: root.you.account-type; }
+                            Chip { label: root.you.signed-in; }
+                            Chip { label: root.you.place; }
+                        }
+                        VerticalLayout {
+                            spacing: 6px;
+                            Detail { label: "Profile folder"; value: root.you.profile-path; }
+                            Detail { label: "Profile size"; value: root.you.profile-size; }
+                            Detail { label: "Sign-in methods"; value: root.you.sign-in; }
+                            Detail { label: "Password set"; value: root.you.password-set; }
+                            Detail { label: "Groups"; value: root.you.groups; }
+                            Detail { label: "Negotium runs as admin"; value: root.you.negotium-admin; }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            PageButton {
+                                text: "Lock";
+                                enabled: root.interactive;
+                                clicked => { root.act("lock", -1); }
+                                focus-gained => { sv.reveal(self.absolute-position.y, self.height); }
+                            }
+                            PageButton {
+                                text: "Switch user";
+                                enabled: root.interactive;
+                                clicked => { root.act("switch-user", -1); }
+                                focus-gained => { sv.reveal(self.absolute-position.y, self.height); }
+                            }
+                            PageButton {
+                                text: "Sign out";
+                                enabled: root.interactive;
+                                clicked => { root.act("sign-out", -1); }
+                                focus-gained => { sv.reveal(self.absolute-position.y, self.height); }
+                            }
+                            PageButton {
+                                text: "Open account settings";
+                                enabled: root.interactive;
+                                clicked => { root.act("account-settings", -1); }
+                                focus-gained => { sv.reveal(self.absolute-position.y, self.height); }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "Other signed-in users";
+                    color: Theme.text;
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+                // Inline, never a dialog (spec 7). Only when there is a row to act on.
+                if root.need-admin && root.rows.length > 0 : Banner {
+                    text: "To sign out or disconnect another user, restart Negotium as admin.";
+                    dismissable: false;
+                    interactive: root.interactive;
+                    act => { root.restart-admin(); }
+                }
+                if root.read-note != "" : Text {
+                    text: root.read-note;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                if root.rows.length == 0 && root.read-note == "" : Text {
+                    text: "No other users are signed in.";
+                    color: Theme.muted;
+                }
+                for r in root.rows : row := Rectangle {
+                    height: 56px;
+                    border-radius: 4px;
+                    background: ta.has-hover ? Theme.card : transparent;
+                    accessible-role: list-item;
+                    accessible-label: r.name + ", " + r.account-type + ", " + r.state;
+                    ta := TouchArea { }
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            Text { text: r.name; color: Theme.text; font-size: 12.5px; font-weight: 600; overflow: elide; accessible-role: none; }
+                            Text { text: r.account-type; color: Theme.muted; font-size: 11px; overflow: elide; accessible-role: none; }
+                        }
+                        Text { text: r.state; width: 90px; color: Theme.text; font-size: 12px; vertical-alignment: center; accessible-role: none; }
+                        Text { text: "Idle " + r.idle; width: 80px; color: Theme.muted; font-size: 12px; vertical-alignment: center; overflow: elide; accessible-role: none; }
+                        VerticalLayout {
+                            alignment: center;
+                            PageButton {
+                                text: "Sign out";
+                                accessible-label: "Sign out " + r.name;
+                                enabled: !root.need-admin && root.interactive;
+                                clicked => { root.act("sign-out-session", r.id); }
+                                focus-gained => { sv.reveal(row.absolute-position.y, row.height); }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            PageButton {
+                                text: "Disconnect";
+                                accessible-label: "Disconnect " + r.name;
+                                enabled: !root.need-admin && root.interactive;
+                                clicked => { root.act("disconnect", r.id); }
+                                focus-gained => { sv.reveal(row.absolute-position.y, row.height); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if sv.content-height > sv.visible-height : ScrollIndicator {
+            x: sv.width - self.width;
+            height: sv.height;
+            interactive: root.interactive;
+            content-y <=> sv.content-y;
+            visible-height: sv.visible-height;
+            content-height: sv.content-height;
+        }
+    }
+}

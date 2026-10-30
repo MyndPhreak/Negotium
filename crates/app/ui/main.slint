@@ -11,13 +11,13 @@ import { StartupPage, StartupData } from "startuppage.slint";
 import { AppHistoryPage, AppHistoryData } from "apphistorypage.slint";
 import { ServicesPage, ServiceData } from "servicespage.slint";
 import { PortsPage, PortData } from "portspage.slint";
-import { UsersPage } from "userspage.slint";
+import { UsersPage, YouData, UserRowData } from "userspage.slint";
 import { DetailsPopup, DetailsChip, DetailsProc, DetailsField, DetailsConnection } from "detailspopup.slint";
 import { GraphData, ScrubRow, GraphClock } from "graph.slint";
 import { Caption, TitleBar } from "titlebar.slint";
 export { NegotiumTray } from "tray.slint";
 export { DetailsChip, DetailsProc, DetailsField, DetailsConnection }
-export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, PortData, GraphClock, Caption }
+export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, PortData, YouData, UserRowData, GraphClock, Caption }
 
 export component MainWindow inherits Window {
     title: "Negotium";
@@ -125,7 +125,7 @@ export component MainWindow inherits Window {
         GraphClock.lead-ms = lead-ms;
         GraphClock.speed = speed;
     }
-    out property <bool> modal-open: confirm-visible || details-visible || run-task-visible || affinity-visible || priority-visible || tint-picker-visible;
+    out property <bool> modal-open: confirm-visible || details-visible || run-task-visible || affinity-visible || priority-visible || tint-picker-visible || user-confirm-visible;
 
     in-out property <bool> affinity-visible: false;
     in-out property <string> affinity-title: "";
@@ -259,6 +259,22 @@ export component MainWindow inherits Window {
     callback refresh-ports();
     callback port-action(string, int);
 
+    // Users (crate::users): the signed-in account's card, the other sessions, whether Negotium
+    // lacks the admin rights to act on them, and a note when the last session read failed.
+    in property <YouData> you;
+    in property <image> you-picture;
+    in property <bool> you-has-picture;
+    in property <[UserRowData]> user-rows;
+    in property <bool> users-need-admin;
+    in property <string> users-read-note;
+    // The confirm dialog of a Users action (Sign out, Disconnect); its own, not the End process one.
+    in-out property <bool> user-confirm-visible: false;
+    in-out property <string> user-confirm-title: "";
+    in-out property <string> user-confirm-text: "";
+    in-out property <string> user-confirm-label: "";
+    callback user-action(string, int);
+    callback user-confirm(bool);
+
     // Settings (crate::settings::Settings, shown by crate::settingspage): refresh index (0.5 / 1 /
     // 2 / 5 s), theme index (System / Light / Dark), the switches. `on-top` is both the window's
     // state and the switch's. The GPU switch also needs whether an automatic fallback is recorded,
@@ -356,6 +372,13 @@ export component MainWindow inherits Window {
         parking.focus();
         root.confirm-text = text;
         root.confirm-visible = true;
+    }
+    public function show-user-confirm(title: string, text: string, label: string) {
+        parking.focus();
+        root.user-confirm-title = title;
+        root.user-confirm-text = text;
+        root.user-confirm-label = label;
+        root.user-confirm-visible = true;
     }
     public function show-details() {
         parking.focus();
@@ -674,7 +697,18 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     visible: root.page == 7;
-                    UsersPage { }
+                    UsersPage {
+                        you: root.you;
+                        picture: root.you-picture;
+                        has-picture: root.you-has-picture;
+                        rows: root.user-rows;
+                        need-admin: root.users-need-admin;
+                        read-note: root.users-read-note;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        act(name, id) => { root.user-action(name, id); }
+                        restart-admin => { root.restart-admin(); }
+                    }
                 }
                 // Over every page: a result (a failed startup toggle, an action's message) shows
                 // wherever the user is. Its host is empty (zero height) without a toast.
@@ -700,6 +734,14 @@ export component MainWindow inherits Window {
         confirm-label: "End process";
         cancel-primary: true;
         done(ok) => { root.confirm(ok); }
+    }
+    // Sign out and Disconnect on the Users page: its own, so the End process dialog stays as it is.
+    if root.user-confirm-visible : Modal {
+        title: root.user-confirm-title;
+        body: root.user-confirm-text;
+        confirm-label: root.user-confirm-label;
+        cancel-primary: true;
+        done(ok) => { root.user-confirm(ok); }
     }
     if root.details-visible : DetailsPopup {
         name: root.details-name;

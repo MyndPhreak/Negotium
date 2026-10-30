@@ -9,7 +9,7 @@ use crate::view::{Frame, RowKind, RowView, SECTION_APPS, Target, close_cards, ro
 use crate::worker::SharedHistory;
 use crate::{
     AppHistoryData, DetailsChip, DetailsConnection, DetailsField, DetailsProc, DeviceData, GraphClock, GraphData, MainWindow, MeterData, RowData, ScrubRow, SegmentData,
-    PortData, ServiceData, StartupData, StatData, TileData,
+    PortData, ServiceData, StartupData, StatData, TileData, UserRowData, YouData,
 };
 use negotium_actions::startup::StartupEntry;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -401,6 +401,22 @@ pub struct Bridge {
     /// A failed socket read has already been toasted, and no read has succeeded since.
     ports_failing: bool,
     port_rows: Rc<VecModel<PortData>>,
+    /// A Users read is running (one at a time); ended by `set_users` or `users_read_failed`.
+    users_reading: bool,
+    /// The sessions of the last read that worked: a failed read keeps them on screen.
+    user_sessions: Vec<negotium_actions::users::Session>,
+    /// The other sessions' (id, user name) as shown: a row's button asks for its name.
+    user_names: Vec<(i32, String)>,
+    user_rows: Rc<VecModel<UserRowData>>,
+    /// The picture path the card shows: the image is loaded again only when it changes.
+    you_picture_path: Option<std::path::PathBuf>,
+    profile_path: Option<std::path::PathBuf>,
+    profile_size: crate::users::ProfileSize,
+    /// When the last profile walk ended, and whether one runs now.
+    profile_size_at: Option<Instant>,
+    profile_running: bool,
+    /// The page was just shown: the next read may start a profile walk (the timer's reads do not).
+    profile_wanted: bool,
     /// Program icons by image path, and where the ones not yet seen are requested (none in
     /// tests that don't set one: rows then show no icons).
     icons: IconCache,
@@ -476,6 +492,16 @@ impl Bridge {
             ports: crate::view::PortsFrame::default(),
             ports_failing: false,
             port_rows: Rc::new(VecModel::default()),
+            users_reading: false,
+            user_sessions: Vec::new(),
+            user_names: Vec::new(),
+            user_rows: Rc::new(VecModel::default()),
+            you_picture_path: None,
+            profile_path: None,
+            profile_size: crate::users::ProfileSize::Calculating,
+            profile_size_at: None,
+            profile_running: false,
+            profile_wanted: false,
             icons: IconCache::default(),
             icon_loader: None,
             details: None,
@@ -500,6 +526,7 @@ impl Bridge {
         ui.set_history_rows(ModelRc::from(b.history_rows.clone()));
         ui.set_service_rows(ModelRc::from(b.service_rows.clone()));
         ui.set_port_rows(ModelRc::from(b.port_rows.clone()));
+        ui.set_user_rows(ModelRc::from(b.user_rows.clone()));
         let epoch = b.epoch.clone();
         smooth::install(ui, move || epoch.get().elapsed());
         Rc::new(RefCell::new(b))
@@ -857,6 +884,108 @@ impl Bridge {
 
     pub fn service_entry(&self, id: i32) -> Option<negotium_actions::services::ServiceEntry> {
         usize::try_from(id).ok().and_then(|i| self.services.get(i)).cloned()
+    }
+
+    /// A Users read landed: the card, and the rows when the sessions were read. A failed session
+    /// read keeps the last rows and says so in a note until a read works (no toast every 5 s).
+    pub fn set_users(&mut self, ui: &MainWindow, read: crate::users::UsersRead, elevated: bool) {
+        self.users_reading = false;
+        match &read.sessions {
+            Ok(sessions) => {
+                self.user_sessions = sessions.clone();
+                let others = crate::users::other_rows(&read, sessions);
+                self.user_names = others.iter().map(|r| (r.id, r.name.clone())).collect();
+                sync_model(&*self.user_rows, others.into_iter().map(|r| UserRowData {
+                    id: r.id,
+                    name: r.name.into(),
+                    account_type: r.account_type.into(),
+                    state: r.state.into(),
+                    idle: r.idle.into(),
+                }).collect());
+                ui.set_users_read_note("".into());
+            }
+            Err(e) => ui.set_users_read_note(format!("Couldn't read the signed-in users: {e}.").into()),
+        }
+        self.profile_path = read.account.profile.clone();
+        if self.profile_path.is_none() && matches!(self.profile_size, crate::users::ProfileSize::Calculating) {
+            self.profile_size = crate::users::ProfileSize::Unknown; // no folder, nothing to calculate
+        }
+        if read.account.picture != self.you_picture_path {
+            self.you_picture_path = read.account.picture.clone();
+            match self.you_picture_path.as_deref().map(slint::Image::load_from_path) {
+                Some(Ok(image)) => {
+                    ui.set_you_picture(image);
+                    ui.set_you_has_picture(true);
+                }
+                _ => ui.set_you_has_picture(false), // the card shows the initial
+            }
+        }
+        let v = crate::users::you_view(&read, &self.user_sessions, &self.profile_size, elevated);
+        ui.set_you(YouData {
+            initial: v.initial.into(),
+            name: v.name.into(),
+            subtitle: v.subtitle.into(),
+            account_type: v.account_type.into(),
+            signed_in: v.signed_in.into(),
+            place: v.place.into(),
+            profile_path: v.profile_path.into(),
+            profile_size: v.profile_size.into(),
+            sign_in: v.sign_in.into(),
+            password_set: v.password_set.into(),
+            groups: v.groups.into(),
+            negotium_admin: v.negotium_admin.into(),
+        });
+        ui.set_users_need_admin(!elevated);
+    }
+
+    /// A Users read failed outright (the job panicked): the note says so, the rows stay.
+    pub fn users_read_failed(&mut self, ui: &MainWindow) {
+        self.users_reading = false;
+        ui.set_users_read_note("Couldn't read the users.".into());
+    }
+
+    /// Claims the one Users read at a time: false while one runs.
+    pub fn begin_users_read(&mut self) -> bool {
+        !std::mem::replace(&mut self.users_reading, true)
+    }
+
+    /// The Users page was shown: the next read may start a profile walk.
+    pub fn want_profile_size(&mut self) {
+        self.profile_wanted = true;
+    }
+
+    /// The profile folder to walk: only after `want_profile_size`, and when a walk is due.
+    pub fn take_profile_walk(&mut self, now: Instant) -> Option<std::path::PathBuf> {
+        if !std::mem::take(&mut self.profile_wanted) {
+            return None;
+        }
+        self.begin_profile_size(now)
+    }
+
+    /// The profile folder to walk, when a walk is due (none runs, and none is known or the last is
+    /// old); claims the walk.
+    pub fn begin_profile_size(&mut self, now: Instant) -> Option<std::path::PathBuf> {
+        if !crate::users::profile_size_due(self.profile_size_at, self.profile_running, now) {
+            return None;
+        }
+        let path = self.profile_path.clone()?;
+        self.profile_running = true;
+        Some(path)
+    }
+
+    /// A profile walk ended; None: it failed. The card shows it at once.
+    pub fn set_profile_size(&mut self, ui: &MainWindow, size: Option<negotium_actions::users::DirSize>, now: Instant) {
+        self.profile_running = false;
+        self.profile_size_at = Some(now);
+        self.profile_size = size.map_or(crate::users::ProfileSize::Unknown, crate::users::ProfileSize::Done);
+        let mut you = ui.get_you();
+        you.profile_size = crate::users::size_text(&self.profile_size).into();
+        ui.set_you(you);
+    }
+
+    /// The user name of an other-session row, as of the latest read.
+    pub fn user_name(&self, id: i32) -> Option<String> {
+        self.user_names.iter().find(|(i, _)| *i == id).map(|(_, n)| n.clone())
     }
 
     /// Switches to Services and filters it by `query` (a PID: "Go to service(s)").
