@@ -12,6 +12,9 @@ pub enum JobKind {
     Efficiency,
     OpenLocation,
     Details,
+    Dump,
+    Properties,
+    SearchOnline,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +83,12 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
     Plan::Run(planned)
 }
 
+/// The Services page search for "Go to service(s)": the main process's PID, when the app hosts
+/// services; `None` otherwise.
+pub fn services_search(_t: &Target) -> Option<String> {
+    None
+}
+
 /// Notification for an end-process job: silent on full success, the plain message when the only
 /// target failed, otherwise "Ended N of M" with the first failure's reason.
 pub fn end_summary(name: &str, total: usize, failures: &[ActionError], elevated: bool) -> String {
@@ -144,7 +153,7 @@ pub enum Outcome {
     Toast(String),
     Details(Box<crate::details::Opened>),
     /// A memory dump was written: the toast text and the folder its Open folder button opens.
-    Dumped { text: String, folder: std::path::PathBuf },
+    Dumped { text: String, file: std::path::PathBuf },
 }
 
 impl Outcome {
@@ -204,7 +213,7 @@ fn run_text(job: Job, elevated: bool) -> String {
             Some(Err(e)) => fail(e),
             _ => String::new(),
         },
-        JobKind::Details => String::new(),
+        JobKind::Details | JobKind::Dump | JobKind::Properties | JobKind::SearchOnline => String::new(),
     }
 }
 
@@ -216,6 +225,7 @@ mod tests {
         Target {
             name: "App".into(), process_name: "app.exe".into(), root: Some((10, 1)), procs: vec![(10, 1), (11, 2), (12, 3)],
             hung_pid: Some((11, 2)), image_path: Some(r"C:\App\app.exe".into()), critical, group: false,
+            hosts_services: false,
         }
     }
     const ALL: &[(u32, i64, u32)] = &[(10, 1, 4), (11, 2, 10), (12, 3, 11), (13, 4, 4)];
@@ -244,6 +254,42 @@ mod tests {
     fn critical_targets_need_confirmation() {
         assert!(matches!(plan("end-task", &target(true), ALL), Plan::Confirm(text, _) if text.contains("unusable")));
         assert!(matches!(plan("details", &target(true), ALL), Plan::Run(_)));
+    }
+
+    #[test]
+    fn search_and_properties_need_a_path() {
+        let mut t = target(false);
+        let Plan::Run(job) = plan("search-online", &t, ALL) else { panic!("search-online") };
+        assert_eq!(job.kind, JobKind::SearchOnline);
+        let Plan::Run(job) = plan("properties", &t, ALL) else { panic!("properties") };
+        assert_eq!(job.kind, JobKind::Properties);
+        t.image_path = None;
+        assert_eq!(plan("search-online", &t, ALL), Plan::Nothing);
+        assert_eq!(plan("properties", &t, ALL), Plan::Nothing);
+    }
+
+    #[test]
+    fn dump_targets_the_main_process() {
+        let Plan::Run(job) = plan("dump", &target(false), ALL) else { panic!() };
+        assert_eq!((job.kind, job.targets), (JobKind::Dump, vec![(10, 1)]));
+    }
+
+    #[test]
+    fn the_windows_group_gets_none_of_the_new_actions() {
+        let mut t = target(false);
+        (t.group, t.hosts_services) = (true, true);
+        for action in ["search-online", "properties", "dump"] {
+            assert_eq!(plan(action, &t, ALL), Plan::Nothing, "{action}");
+        }
+        assert_eq!(services_search(&t), None);
+    }
+
+    #[test]
+    fn goto_services_needs_a_service_host() {
+        let mut t = target(false);
+        assert_eq!(services_search(&t), None);
+        t.hosts_services = true;
+        assert_eq!(services_search(&t).as_deref(), Some("10"));
     }
 
     #[test]

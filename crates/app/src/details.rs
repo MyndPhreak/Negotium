@@ -301,6 +301,7 @@ impl Opened {
             image_path: self.image_path.clone(),
             critical: false,
             group: false,
+            hosts_services: false,
         }
     }
 }

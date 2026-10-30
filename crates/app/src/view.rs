@@ -108,6 +108,8 @@ pub struct Target {
     pub critical: bool,
     /// The "Windows" group (every session-0 / system process): no action may target it.
     pub group: bool,
+    /// One of its processes hosts Windows services (Go to service(s)).
+    pub hosts_services: bool,
 }
 
 /// Builds the action target for an app row; the Overview and the window picker share it.
@@ -132,6 +134,7 @@ pub fn target_of<S: AsRef<str>>(r: &AppRow, hung_pids: &HashSet<u32>, image_of: 
         image_path,
         critical: r.processes.iter().any(|p| negotium_actions::is_critical(&p.name)),
         group: r.key == AppKey::Windows,
+        hosts_services: false,
     }
 }
 
@@ -513,6 +516,7 @@ pub fn build_frame(
                     image_path: image_of.get(&pid_key).map(|s| s.to_string()),
                     critical: negotium_actions::is_critical(&p.name),
                     group: false,
+                    hosts_services: false,
                 });
                 let sample = sample_of.get(&pid_key).copied();
                 let proc_pub = sample.and_then(|s| s.publisher.clone());

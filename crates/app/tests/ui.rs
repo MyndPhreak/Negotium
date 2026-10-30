@@ -6062,3 +6062,64 @@ fn empty_lists_say_so() {
     assert!(found(&ui, "No network connections."));
     assert!(found(&ui, "No services run in this process."));
 }
+
+// ---- Row menu: Search online, Properties, Go to service(s), Create memory dump file ----
+
+/// The row menu opens as a native popup the testing backend cannot search: its items are
+/// checked in the source, as `tray_menu_offers_end_a_window` does.
+#[test]
+fn the_row_menu_has_the_new_items_in_order() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/applist.slint");
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let menu = &src[src.find("component RowMenu").expect("RowMenu")..];
+    let menu = &menu[..menu.find("@children").expect("end of the menu")];
+    let titles: Vec<&str> = menu.match_indices("title: \"").map(|(i, m)| {
+        let rest = &menu[i + m.len()..];
+        &rest[..rest.find('"').unwrap()]
+    }).collect();
+    assert_eq!(titles, [
+        "End task", "End process tree", "Efficiency mode",
+        "Set CPU affinity...", "Set CPU priority...",
+        "Exclude from Aequilibrium",
+        "Open file location", "Search online", "Properties", "Go to service(s)",
+        "Create memory dump file",
+        "Details",
+    ]);
+    for (title, action) in [("Search online", "search-online"), ("Properties", "properties"), ("Go to service(s)", "goto-services"), ("Create memory dump file", "dump")] {
+        let at = menu.find(&format!("title: \"{title}\"")).unwrap();
+        let line = &menu[at..at + menu[at..].find('\n').unwrap()];
+        assert!(line.contains(&format!("root.action(\"{action}\")")), "{title} → {action}: {line}");
+    }
+}
+
+#[test]
+fn go_to_services_is_enabled_only_for_service_hosts() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/applist.slint");
+    let src = std::fs::read_to_string(path).unwrap();
+    let at = src.find("title: \"Go to service(s)\"").expect("the item");
+    let line = &src[at..at + src[at..].find('\n').unwrap()];
+    assert!(line.contains("enabled: root.actionable && root.hosts-services;"), "{line}");
+    assert!(src.contains("hosts-services: r.hosts-services;"), "each row's menu knows");
+    assert!(src.contains("hosts-services: root.current-hosts-services;"), "the list's menu knows");
+}
+
+#[test]
+fn go_to_services_filters_the_services_page_by_pid() {
+    let (ui, _controls, bridge, _) = wired_list(vec![row_view(7, "Editor", "")]);
+    bridge.borrow_mut().go_to_services(&ui, "1234");
+    assert_eq!(ui.get_page(), Page::Services.index());
+    assert_eq!(ui.get_services_search_text(), "1234");
+}
+
+#[test]
+fn a_toast_action_shows_its_button() {
+    let ui = window();
+    ui.set_toast("Memory dump of Editor saved.".into());
+    assert!(!found(&ui, "Open folder"), "no action: no button");
+    ui.set_toast_action("Open folder".into());
+    let clicked = Rc::new(RefCell::new(0));
+    let c = clicked.clone();
+    ui.on_toast_action_clicked(move || *c.borrow_mut() += 1);
+    ElementHandle::find_by_accessible_label(&ui, "Open folder").next().expect("button").invoke_accessible_default_action();
+    assert_eq!(*clicked.borrow(), 1);
+}

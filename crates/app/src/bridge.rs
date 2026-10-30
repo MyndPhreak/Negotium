@@ -856,6 +856,9 @@ impl Bridge {
         usize::try_from(id).ok().and_then(|i| self.services.get(i)).cloned()
     }
 
+    /// Switches to Services and filters it by `query` (a PID: "Go to service(s)").
+    pub fn go_to_services(&mut self, _ui: &MainWindow, _query: &str) {}
+
     /// Switches to Overview and filters to `pid` ("Go to process" from Services).
     pub fn select_pid(&mut self, ui: &MainWindow, pid: u32) {
         let query = pid.to_string();
