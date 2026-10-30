@@ -1,9 +1,9 @@
 //! The Users page: text and decisions as pure functions, plus the read and action jobs.
-use crate::format;
+use crate::{MainWindow, format};
 use negotium_actions::ActionError;
 use negotium_actions::integration::is_admin_member;
 use negotium_actions::users::{
-    Account, DirSize, Session, SessionState, SignIn, admin_group_name, current_account, current_session_id, disconnect_session,
+    Account, DirSize, Session, SessionState, SignIn, admin_group_name, current_account, current_session_id, dir_size, disconnect_session,
     is_remote_session, list_sessions, local_groups, lock, sign_out, sign_out_session, switch_user,
 };
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ pub struct UsersRead {
     pub groups: HashMap<String, Option<Vec<String>>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileSize {
     Calculating,
     Done(DirSize),
@@ -261,6 +262,45 @@ pub fn read_job() -> UsersRead {
         admin_group: admin_group_name(),
         groups,
     }
+}
+
+/// Reads the sessions and the account on a thread, then hands them to the bridge and, when one
+/// is due, starts the profile walk. One read at a time: a call during a read does nothing.
+pub fn refresh(weak: slint::Weak<MainWindow>, elevated: bool) {
+    let mut start = false;
+    crate::bridge::with_bridge(|b| start = b.begin_users_read());
+    if !start {
+        return;
+    }
+    std::thread::spawn(move || {
+        let read = std::panic::catch_unwind(read_job).ok();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut walk = None;
+            crate::bridge::with_bridge(|b| {
+                match read {
+                    Some(read) => b.set_users(&ui, read, elevated),
+                    None => b.users_read_failed(&ui),
+                }
+                walk = b.begin_profile_size(Instant::now());
+            });
+            if let Some(path) = walk {
+                spawn_profile_size(weak, path);
+            }
+        });
+    });
+}
+
+/// Walks the profile folder off the UI thread. A panic counts as a failed walk (shown as a dash).
+fn spawn_profile_size(weak: slint::Weak<MainWindow>, path: PathBuf) {
+    std::thread::spawn(move || {
+        let size = std::panic::catch_unwind(|| dir_size(&path)).ok();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                crate::bridge::with_bridge(|b| b.set_profile_size(&ui, size, Instant::now()));
+            }
+        });
+    });
 }
 
 /// Runs the action: the failure text, or None when it worked. Call off the UI thread.

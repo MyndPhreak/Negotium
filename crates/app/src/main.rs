@@ -687,9 +687,16 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     };
+    // The Users page reads the sessions and the account on a thread (negotium::users); the card
+    // and rows come back through the bridge. Read when the page opens and every USERS_REFRESH.
+    let load_users = {
+        let weak = weak.clone();
+        move || negotium::users::refresh(weak.clone(), elevated)
+    };
     // Every page change: a rail click, and the page a restart comes back on.
     let show_page = {
         let (weak, b, load_startup, load_services) = (weak.clone(), bridge.clone(), load_startup.clone(), load_services.clone());
+        let load_users = load_users.clone();
         let controls = controls.clone();
         let integrations = tray_wiring.integrations.clone();
         move |page: negotium::controls::Page| {
@@ -701,6 +708,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 load_startup();
             } else if page == negotium::controls::Page::Services {
                 load_services();
+            } else if page == negotium::controls::Page::Users {
+                load_users();
             } else if page == negotium::controls::Page::Ports {
                 // Read the sockets on the next tick, not up to 2 s from now.
                 controls.request_ports_refresh();
@@ -1263,6 +1272,66 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    // Users page: card and row buttons. The UI thread only plans; an action runs on its own thread.
+    let pending_user: std::rc::Rc<std::cell::RefCell<Option<(negotium::users::UserAction, String)>>> = Default::default();
+    let run_user_action = {
+        let weak = weak.clone();
+        move |action: negotium::users::UserAction, user: String| {
+            let owner = weak.upgrade().and_then(|ui| platform::main_hwnd(&ui)).map_or(0, |h| h.0 as isize);
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let failure = negotium::users::run_user_action(action, &user, owner);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    match failure {
+                        Some(msg) => ui.set_toast(msg.into()),
+                        // The row should change within the refresh, not up to USERS_REFRESH later.
+                        None if matches!(action, negotium::users::UserAction::SignOutSession(_) | negotium::users::UserAction::Disconnect(_)) => {
+                            negotium::users::refresh(weak.clone(), elevated)
+                        }
+                        None => {}
+                    }
+                });
+            });
+        }
+    };
+    {
+        let (b, weak, pending_user, run_user_action) = (bridge.clone(), weak.clone(), pending_user.clone(), run_user_action.clone());
+        ui.on_user_action(move |name, id| {
+            use negotium::users::{UserAction, UserPlan};
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(action) = negotium::users::action_from(&name, id) else { return };
+            let user = match action {
+                UserAction::SignOutSession(_) | UserAction::Disconnect(_) => {
+                    // The row went away since it was drawn.
+                    let Some(user) = b.borrow().user_name(id) else { return };
+                    user
+                }
+                _ => String::new(),
+            };
+            match negotium::users::plan_user_action(action, &user, elevated) {
+                UserPlan::Run => run_user_action(action, user),
+                UserPlan::Confirm { title, body, label } => {
+                    *pending_user.borrow_mut() = Some((action, user));
+                    ui.invoke_show_user_confirm(title.into(), body.into(), label.into());
+                }
+                UserPlan::NeedsAdmin(msg) => ui.set_toast(msg.into()),
+            }
+        });
+    }
+    {
+        let (weak, pending_user) = (weak.clone(), pending_user.clone());
+        ui.on_user_confirm(move |ok| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_user_confirm_visible(false);
+            }
+            if let Some((action, user)) = pending_user.borrow_mut().take()
+                && ok
+            {
+                run_user_action(action, user);
+            }
+        });
+    }
     {
         let weak = weak.clone();
         ui.on_close_details(move || {
@@ -1481,6 +1550,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // once: apply the chrome, hook the window (tray re-creation, activation by a second launch)
     // and mark it for that second launch. Every tick is also the renderer watchdog's heartbeat
     // (the UI thread is alive), and the tray icon waits until the watchdog has resolved.
+    // The Users page reads again every USERS_REFRESH while it is on screen and the window shows.
+    let users_timer = Rc::new(slint::Timer::default());
+    {
+        let controls = controls.clone();
+        users_timer.start(slint::TimerMode::Repeated, negotium::users::USERS_REFRESH, move || {
+            if controls.page() == negotium::controls::Page::Users && controls.visible() {
+                load_users();
+            }
+        });
+    }
     let chrome_timer = Rc::new(slint::Timer::default());
     {
         let weak = weak.clone();

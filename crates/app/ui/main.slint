@@ -671,7 +671,18 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     visible: root.page == 7;
-                    UsersPage { }
+                    UsersPage {
+                        you: root.you;
+                        picture: root.you-picture;
+                        has-picture: root.you-has-picture;
+                        rows: root.user-rows;
+                        need-admin: root.users-need-admin;
+                        read-note: root.users-read-note;
+                        bottom-inset: root.toast-inset;
+                        interactive: !root.modal-open;
+                        act(name, id) => { root.user-action(name, id); }
+                        restart-admin => { root.restart-admin(); }
+                    }
                 }
                 // Over every page: a result (a failed startup toggle, an action's message) shows
                 // wherever the user is. Its host is empty (zero height) without a toast.
@@ -695,6 +706,14 @@ export component MainWindow inherits Window {
         confirm-label: "End process";
         cancel-primary: true;
         done(ok) => { root.confirm(ok); }
+    }
+    // Sign out and Disconnect on the Users page: its own, so the End process dialog stays as it is.
+    if root.user-confirm-visible : Modal {
+        title: root.user-confirm-title;
+        body: root.user-confirm-text;
+        confirm-label: root.user-confirm-label;
+        cancel-primary: true;
+        done(ok) => { root.user-confirm(ok); }
     }
     if root.details-visible : Modal {
         title: "Details";
