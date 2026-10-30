@@ -1,8 +1,29 @@
 //! Signed-in users: sessions, account facts of the current user, and the lock / sign-out actions.
 //! Call off the UI thread.
+use crate::details::sid_account;
+use crate::integration::{ADMINISTRATORS, current_user_sid};
+use crate::startup::folders::known_folder;
+use crate::startup::registry::{Hive, RegKey, RegValue, subkeys, values};
 use crate::ActionError;
+use std::ffi::c_void;
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use windows::Win32::System::RemoteDesktop::WTSINFOW;
+use windows::Win32::Foundation::{HLOCAL, LocalFree};
+use windows::Win32::NetworkManagement::NetManagement::{
+    LG_INCLUDE_INDIRECT, LOCALGROUP_USERS_INFO_0, MAX_PREFERRED_LENGTH, NetApiBufferFree, NetUserGetInfo, NetUserGetLocalGroups,
+    USER_INFO_2, USER_INFO_24,
+};
+use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
+use windows::Win32::Security::PSID;
+use windows::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTS_SESSION_INFOW, WTSDisconnectSession, WTSEnumerateSessionsW, WTSFreeMemory, WTSINFOW,
+    WTSLogoffSession, WTSQuerySessionInformationW, WTSSessionInfo,
+};
+use windows::Win32::System::Shutdown::{EWX_LOGOFF, ExitWindowsEx, LockWorkStation, SHUTDOWN_REASON};
+use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::Shell::FOLDERID_Profile;
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+use windows::core::{HSTRING, PWSTR};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
@@ -48,72 +69,283 @@ pub struct DirSize {
     pub skipped: u32,
 }
 
-pub fn session_state(_raw: i32) -> SessionState {
-    SessionState::Other
+/// `WTS_CONNECTSTATE_CLASS`: 0 is WTSActive, 4 is WTSDisconnected.
+pub fn session_state(raw: i32) -> SessionState {
+    match raw {
+        0 => SessionState::Active,
+        4 => SessionState::Disconnected,
+        _ => SessionState::Other,
+    }
 }
 
 /// FILETIME units (100 ns). 0 or `from > now` gives None.
-pub fn elapsed_secs(_from_ft: i64, _now_ft: i64) -> Option<u64> {
-    None
+pub fn elapsed_secs(from_ft: i64, now_ft: i64) -> Option<u64> {
+    (from_ft > 0 && from_ft <= now_ft).then(|| ((now_ft - from_ft) / 10_000_000) as u64)
+}
+
+fn utf16_until_nul(units: &[u16]) -> String {
+    String::from_utf16_lossy(units.split(|u| *u == 0).next().unwrap_or_default())
 }
 
 /// None when the session has no user name (session 0, listeners).
-pub fn session_from_info(_info: &WTSINFOW) -> Option<Session> {
-    Some(Session { id: 0, user: String::new(), domain: String::new(), state: SessionState::Other, signed_in_secs: None, idle_secs: None })
+pub fn session_from_info(info: &WTSINFOW) -> Option<Session> {
+    let user = utf16_until_nul(&info.UserName);
+    if user.is_empty() {
+        return None;
+    }
+    Some(Session {
+        id: info.SessionId,
+        user,
+        domain: utf16_until_nul(&info.Domain),
+        state: session_state(info.State.0),
+        signed_in_secs: elapsed_secs(info.LogonTime, info.CurrentTime),
+        idle_secs: elapsed_secs(info.LastInputTime, info.CurrentTime),
+    })
 }
 
-pub fn sign_in_from(_pin: Option<bool>, _factors: Option<u32>) -> Option<SignIn> {
-    None
+/// WINBIO_TYPE_FACIAL_FEATURES and WINBIO_TYPE_FINGERPRINT in `EnrolledFactors`.
+const FACTOR_FACE: u32 = 0x2;
+const FACTOR_FINGERPRINT: u32 = 0x8;
+
+/// None when either read failed (shown as a dash).
+pub fn sign_in_from(pin: Option<bool>, factors: Option<u32>) -> Option<SignIn> {
+    let (pin, factors) = (pin?, factors?);
+    Some(SignIn { pin, face: factors & FACTOR_FACE != 0, fingerprint: factors & FACTOR_FINGERPRINT != 0 })
 }
 
+/// Sessions with a user. A session whose query fails is skipped.
 pub fn list_sessions() -> Result<Vec<Session>, ActionError> {
-    Err(ActionError::Other("stub".into()))
+    let mut list: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
+    let mut count = 0u32;
+    // SAFETY: the out pointers are valid locals; the list is freed below.
+    unsafe { WTSEnumerateSessionsW(None, 0, 1, &mut list, &mut count) }.map_err(|e| ActionError::from_win(&e))?;
+    // SAFETY: Windows returned `count` entries at `list`; they stay valid until the free below.
+    let ids: Vec<u32> = unsafe { std::slice::from_raw_parts(list, count as usize) }.iter().map(|s| s.SessionId).collect();
+    // SAFETY: allocated by WTSEnumerateSessionsW; freed exactly once (the ids were copied out).
+    unsafe { WTSFreeMemory(list.cast()) };
+    Ok(ids.into_iter().filter_map(query_session).collect())
+}
+
+fn query_session(id: u32) -> Option<Session> {
+    let mut buf = PWSTR::null();
+    let mut bytes = 0u32;
+    // SAFETY: the out pointers are valid locals; the buffer is freed below.
+    unsafe { WTSQuerySessionInformationW(None, id, WTSSessionInfo, &mut buf, &mut bytes) }.ok()?;
+    let session = if bytes as usize >= size_of::<WTSINFOW>() && !buf.is_null() {
+        // SAFETY: Windows wrote a WTSINFOW of at least `bytes` bytes at `buf`; it may not be
+        // aligned for the struct, hence the unaligned read of a copy.
+        let info = unsafe { std::ptr::read_unaligned(buf.0.cast::<WTSINFOW>()) };
+        session_from_info(&info)
+    } else {
+        None
+    };
+    // SAFETY: allocated by WTSQuerySessionInformationW; freed exactly once.
+    unsafe { WTSFreeMemory(buf.0.cast::<c_void>()) };
+    session
 }
 
 pub fn current_session_id() -> Option<u32> {
-    None
+    let mut id = 0u32;
+    // SAFETY: `id` is a valid out pointer.
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut id) }.ok()?;
+    Some(id)
 }
 
 pub fn is_remote_session() -> bool {
-    false
+    // SAFETY: a plain metrics query.
+    unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
 }
 
-/// Never fails as a whole: a field Windows refuses stays None.
-pub fn current_account() -> Account {
-    Account::default()
+/// (domain, name) of the account the string SID `sid` names.
+fn account_of_sid(sid: &str) -> Option<(String, String)> {
+    let mut psid = PSID::default();
+    // SAFETY: `psid` receives a LocalAlloc'd SID that is freed below.
+    unsafe { ConvertStringSidToSidW(&HSTRING::from(sid), &mut psid) }.ok()?;
+    // SAFETY: `psid` is the valid SID just built.
+    let found = unsafe { sid_account(psid) };
+    // SAFETY: allocated by ConvertStringSidToSidW with LocalAlloc; freed exactly once.
+    unsafe { LocalFree(Some(HLOCAL(psid.0))) };
+    found
 }
 
-pub fn local_groups(_account: &str) -> Option<Vec<String>> {
-    None
+/// Frees a NetApi buffer on drop.
+struct NetBuf(*mut u8);
+
+impl Drop for NetBuf {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: allocated by a NetApi call; freed exactly once.
+            unsafe { NetApiBufferFree(Some(self.0.cast_const().cast())) };
+        }
+    }
+}
+
+fn text(p: PWSTR) -> Option<String> {
+    // SAFETY: a PWSTR inside a NetApi struct is null or NUL-terminated and alive while its buffer is.
+    let s = if p.is_null() { String::new() } else { unsafe { p.to_string() }.ok()? };
+    (!s.is_empty()).then_some(s)
+}
+
+/// (full name, password age in seconds) from `NetUserGetInfo` level 2.
+fn user_info_2(user: &str) -> Option<(Option<String>, u64)> {
+    let mut buf = std::ptr::null_mut();
+    // SAFETY: the out pointer is a valid local; the buffer is freed by `NetBuf`.
+    let status = unsafe { NetUserGetInfo(None, &HSTRING::from(user), 2, &mut buf) };
+    let buf = NetBuf(buf);
+    if status != 0 || buf.0.is_null() {
+        return None;
+    }
+    // SAFETY: level 2 returns a USER_INFO_2 that lives until `buf` drops.
+    let info = unsafe { &*(buf.0 as *const USER_INFO_2) };
+    Some((text(info.usri2_full_name), u64::from(info.usri2_password_age)))
+}
+
+/// The Microsoft account email from `NetUserGetInfo` level 24 (fails for other accounts).
+fn user_email(user: &str) -> Option<String> {
+    let mut buf = std::ptr::null_mut();
+    // SAFETY: the out pointer is a valid local; the buffer is freed by `NetBuf`.
+    let status = unsafe { NetUserGetInfo(None, &HSTRING::from(user), 24, &mut buf) };
+    let buf = NetBuf(buf);
+    if status != 0 || buf.0.is_null() {
+        return None;
+    }
+    // SAFETY: level 24 returns a USER_INFO_24 that lives until `buf` drops.
+    let info = unsafe { &*(buf.0 as *const USER_INFO_24) };
+    if info.usri24_internet_identity.as_bool() { text(info.usri24_internet_principal_name) } else { None }
+}
+
+/// The local groups `account` (`DOMAIN\user`) belongs to, directly or through nesting.
+pub fn local_groups(account: &str) -> Option<Vec<String>> {
+    let (mut buf, mut read, mut total) = (std::ptr::null_mut(), 0u32, 0u32);
+    // SAFETY: the out pointers are valid locals; the buffer is freed by `NetBuf`.
+    let status = unsafe {
+        NetUserGetLocalGroups(None, &HSTRING::from(account), 0, LG_INCLUDE_INDIRECT, &mut buf, MAX_PREFERRED_LENGTH, &mut read, &mut total)
+    };
+    let buf = NetBuf(buf);
+    if status != 0 {
+        return None;
+    }
+    if buf.0.is_null() {
+        return Some(Vec::new());
+    }
+    // SAFETY: level 0 returns `read` LOCALGROUP_USERS_INFO_0 entries that live until `buf` drops.
+    let entries = unsafe { std::slice::from_raw_parts(buf.0 as *const LOCALGROUP_USERS_INFO_0, read as usize) };
+    Some(entries.iter().filter_map(|e| text(e.lgrui0_name)).collect())
 }
 
 /// The local name of the Administrators group (S-1-5-32-544).
 pub fn admin_group_name() -> Option<String> {
-    None
+    account_of_sid(ADMINISTRATORS).map(|(_, name)| name)
 }
 
-pub fn dir_size(_path: &Path) -> DirSize {
-    DirSize::default()
+const CREDENTIAL_PROVIDERS: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers";
+const PIN_PROVIDER: &str = "{D6886603-9D2F-4EB2-B667-1971041FA96B}";
+const WINBIO_ACCOUNTS: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\WinBio\AccountInfo";
+const ACCOUNT_PICTURES: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\AccountPicture\Users";
+
+/// Whether a PIN is set: the provider has a subkey named after the SID. A missing key is "not set".
+fn has_pin(sid: &str) -> Option<bool> {
+    let key = RegKey::new(Hive::LocalMachine, &format!(r"{CREDENTIAL_PROVIDERS}\{PIN_PROVIDER}"));
+    Some(subkeys(&key).ok()?.iter().any(|k| k.eq_ignore_ascii_case(sid)))
+}
+
+/// The enrolled biometric factor bits. A missing key is 0 (nothing enrolled).
+fn enrolled_factors(sid: &str) -> Option<u32> {
+    let key = RegKey::new(Hive::LocalMachine, &format!(r"{WINBIO_ACCOUNTS}\{sid}"));
+    let all = values(&key).ok()?;
+    Some(all.into_iter().find_map(|(n, v)| match v {
+        RegValue::Dword(f) if n.eq_ignore_ascii_case("EnrolledFactors") => Some(f),
+        _ => None,
+    })
+    .unwrap_or(0))
+}
+
+/// The account picture: the 192 px image, else the 96 px one.
+fn picture_path(sid: &str) -> Option<PathBuf> {
+    let all = values(&RegKey::new(Hive::LocalMachine, &format!(r"{ACCOUNT_PICTURES}\{sid}"))).ok()?;
+    let find = |wanted: &str| {
+        all.iter().find_map(|(n, v)| match v {
+            RegValue::Str(p) if n.eq_ignore_ascii_case(wanted) && !p.is_empty() => Some(PathBuf::from(p)),
+            _ => None,
+        })
+    };
+    find("Image192").or_else(|| find("Image96"))
+}
+
+/// Never fails as a whole: a field Windows refuses stays None.
+pub fn current_account() -> Account {
+    let sid = current_user_sid().ok();
+    let name = sid.as_deref().and_then(account_of_sid).map(|(domain, name)| format!("{domain}\\{name}"));
+    let user = name.as_deref().and_then(|n| n.rsplit('\\').next());
+    let info = user.and_then(user_info_2);
+    Account {
+        full_name: info.as_ref().and_then(|i| i.0.clone()),
+        password_age_secs: info.map(|i| i.1),
+        email: user.and_then(user_email),
+        groups: name.as_deref().and_then(local_groups),
+        picture: sid.as_deref().and_then(picture_path),
+        profile: known_folder(&FOLDERID_Profile),
+        sign_in: sid.as_deref().and_then(|s| sign_in_from(has_pin(s), enrolled_factors(s))),
+        name,
+        sid,
+    }
+}
+
+/// Logical size of everything under `path`. Reparse points (junctions, symlinks) are not followed,
+/// so `Application Data`-style loops end; a folder or entry that cannot be read counts as skipped.
+pub fn dir_size(path: &Path) -> DirSize {
+    const REPARSE_POINT: u32 = 0x400;
+    let mut out = DirSize::default();
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            out.skipped += 1;
+            continue;
+        };
+        for entry in entries {
+            let Ok(meta) = entry.and_then(|e| e.metadata().map(|m| (e.path(), m))) else {
+                out.skipped += 1;
+                continue;
+            };
+            let (p, m) = meta;
+            if m.file_attributes() & REPARSE_POINT != 0 {
+                continue;
+            }
+            if m.is_dir() {
+                pending.push(p);
+            } else {
+                out.bytes += m.len();
+            }
+        }
+    }
+    out
 }
 
 pub fn lock() -> Result<(), ActionError> {
-    Err(ActionError::Other("stub".into()))
+    // SAFETY: no arguments; locks this session.
+    unsafe { LockWorkStation() }.map_err(|e| ActionError::from_win(&e))
 }
 
+/// Disconnects the current session to the sign-in screen (what `tsdiscon` does).
 pub fn switch_user() -> Result<(), ActionError> {
-    Err(ActionError::Other("stub".into()))
+    // SAFETY: the current session on the local server.
+    unsafe { WTSDisconnectSession(None, u32::MAX, false) }.map_err(|e| ActionError::from_win(&e))
 }
 
+/// Not forced: apps can ask to save.
 pub fn sign_out() -> Result<(), ActionError> {
-    Err(ActionError::Other("stub".into()))
+    // SAFETY: a plain logoff request.
+    unsafe { ExitWindowsEx(EWX_LOGOFF, SHUTDOWN_REASON(0)) }.map_err(|e| ActionError::from_win(&e))
 }
 
-pub fn sign_out_session(_id: u32) -> Result<(), ActionError> {
-    Ok(())
+pub fn sign_out_session(id: u32) -> Result<(), ActionError> {
+    // SAFETY: the local server; `id` is a session number.
+    unsafe { WTSLogoffSession(None, id, false) }.map_err(|e| ActionError::from_win(&e))
 }
 
-pub fn disconnect_session(_id: u32) -> Result<(), ActionError> {
-    Ok(())
+pub fn disconnect_session(id: u32) -> Result<(), ActionError> {
+    // SAFETY: the local server; `id` is a session number.
+    unsafe { WTSDisconnectSession(None, id, false) }.map_err(|e| ActionError::from_win(&e))
 }
 
 #[cfg(test)]

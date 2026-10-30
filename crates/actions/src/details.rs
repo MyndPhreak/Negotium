@@ -2,7 +2,7 @@ use crate::{ActionError, OwnedHandle, open_verified};
 use std::ffi::c_void;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Security::{
-    GetTokenInformation, LookupAccountSidW, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    GetTokenInformation, LookupAccountSidW, PSID, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows::Win32::System::Threading::{
     ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass, HIGH_PRIORITY_CLASS,
@@ -98,10 +98,20 @@ fn user(h: &OwnedHandle) -> Option<String> {
     // SAFETY: the buffer now holds a TOKEN_USER (at least that many bytes, checked above);
     // its SID pointer refers into the same buffer.
     let sid = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
+    // SAFETY: `sid` points into `buf`, which is alive.
+    let (domain, name) = unsafe { sid_account(sid) }?;
+    Some(format!("{domain}\\{name}"))
+}
+
+/// (domain, name) of the account `sid` names.
+///
+/// # Safety
+/// `sid` must point at a valid SID.
+pub(crate) unsafe fn sid_account(sid: PSID) -> Option<(String, String)> {
     let (mut name, mut domain) = ([0u16; 256], [0u16; 256]);
     let (mut name_len, mut domain_len) = (name.len() as u32, domain.len() as u32);
     let mut use_ = SID_NAME_USE::default();
-    // SAFETY: buffers and lengths are valid; `sid` points into `buf`, which is alive.
+    // SAFETY: buffers and lengths are valid; `sid` is valid (the caller's contract).
     unsafe {
         LookupAccountSidW(
             None,
@@ -114,10 +124,9 @@ fn user(h: &OwnedHandle) -> Option<String> {
         )
     }
     .ok()?;
-    Some(format!(
-        "{}\\{}",
+    Some((
         String::from_utf16_lossy(domain.get(..domain_len as usize)?),
-        String::from_utf16_lossy(name.get(..name_len as usize)?)
+        String::from_utf16_lossy(name.get(..name_len as usize)?),
     ))
 }
 
