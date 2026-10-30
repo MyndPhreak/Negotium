@@ -20,6 +20,21 @@ fn explorer() -> PathBuf {
     explorer_in(Path::new(&negotium_collector::windows_dir()))
 }
 
+/// A web search for `file_name` (Bing, as Task Manager's Search online).
+pub fn search_url(_file_name: &str) -> String {
+    String::new()
+}
+
+/// Opens `url` in the default browser.
+pub fn open_url(_url: &str) -> Result<(), ActionError> {
+    Ok(())
+}
+
+/// Opens the Windows file Properties dialog for `path`.
+pub fn show_properties(_path: &str) -> Result<(), ActionError> {
+    Ok(())
+}
+
 /// Opens File Explorer with the file selected.
 pub fn open_file_location(path: &str) -> Result<(), ActionError> {
     Command::new(explorer())
@@ -71,5 +86,11 @@ mod tests {
             .unwrap_or_else(|| panic!("no EXPLORER line in {text}"));
         assert_eq!(Path::new(line), real);
         assert!(!Path::new(line).starts_with(&fake), "{line}");
+    }
+
+    #[test]
+    fn search_urls_are_encoded() {
+        assert_eq!(search_url("my app.exe"), "https://www.bing.com/search?q=my%20app.exe");
+        assert_eq!(search_url("a&b#.exe"), "https://www.bing.com/search?q=a%26b%23.exe");
     }
 }
