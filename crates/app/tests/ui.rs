@@ -5953,3 +5953,112 @@ fn a_search_of_only_spaces_keeps_the_saved_groups() {
     assert!(setting_control(&ui, "System").is_some());
     assert!(text(&ui, NO_MATCH).is_none());
 }
+
+// ---- Details popup ----
+
+use negotium::{DetailsChip, DetailsConnection, DetailsField, DetailsProc};
+
+fn field(label: &str, value: &str) -> DetailsField {
+    DetailsField { label: label.into(), value: value.into() }
+}
+
+fn details_window(w: f32, h: f32, connections: Vec<DetailsConnection>, services: Vec<&str>) -> MainWindow {
+    let ui = window();
+    ui.window().set_size(slint::LogicalSize::new(w, h));
+    ui.set_details_name("Browser".into());
+    ui.set_details_subtitle("Example Ltd · 1.2.3.4".into());
+    ui.set_details_chips(ModelRc::new(VecModel::from(vec![
+        DetailsChip { text: "Signed by Example Ltd".into(), warn: false },
+        DetailsChip { text: "64-bit".into(), warn: false },
+    ])));
+    ui.set_details_procs(ModelRc::new(VecModel::from(vec![
+        DetailsProc { pid: 10, name: "browser.exe".into(), role: "Main".into(), cpu: "1%".into(), memory: "20 MB".into(), alive: true },
+        DetailsProc { pid: 11, name: "browser.exe".into(), role: "Renderer".into(), cpu: "0%".into(), memory: "9 MB".into(), alive: true },
+        DetailsProc { pid: 12, name: "browser.exe".into(), role: "".into(), cpu: "\u{2014}".into(), memory: "\u{2014}".into(), alive: false },
+    ])));
+    ui.set_details_identity(ModelRc::new(VecModel::from(vec![field("Path", r"C:\B\browser.exe"), field("Command line", "\u{2014}")])));
+    ui.set_details_resources(ModelRc::new(VecModel::from(vec![field("CPU", "1%"), field("Threads", "40")])));
+    ui.set_details_settings(ModelRc::new(VecModel::from(vec![field("Priority", "Normal"), field("Affinity", "All CPUs")])));
+    ui.set_details_connections(ModelRc::new(VecModel::from(connections)));
+    let services: Vec<slint::SharedString> = services.into_iter().map(Into::into).collect();
+    ui.set_details_services(ModelRc::new(VecModel::from(services)));
+    ui.invoke_show_details();
+    slint::platform::update_timers_and_animations();
+    ui
+}
+
+fn one_connection() -> Vec<DetailsConnection> {
+    vec![DetailsConnection { protocol: "TCP".into(), local: "0.0.0.0:80".into(), remote: "\u{2014}".into(), state: "Listening".into() }]
+}
+
+fn found(ui: &MainWindow, label: &str) -> bool {
+    ElementHandle::find_by_accessible_label(ui, label).next().is_some()
+}
+
+#[test]
+fn details_popup_shows_every_section() {
+    let ui = details_window(1000.0, 3000.0, one_connection(), vec!["Dnscache"]);
+    for title in ["Browser", "Processes in this app", "Identity", "Resources", "Settings", "Network connections", "Services"] {
+        assert!(found(&ui, title), "{title}");
+    }
+    for text in ["Signed by Example Ltd", "Main", "Renderer", r"C:\B\browser.exe", "Threads", "Normal", "Listening", "Dnscache"] {
+        assert!(found(&ui, text), "{text}");
+    }
+    assert!(found(&ui, "Applies to all processes in this app."));
+}
+
+#[test]
+fn selecting_a_process_reports_its_index() {
+    let ui = details_window(1000.0, 3000.0, vec![], vec![]);
+    let picked = Rc::new(RefCell::new(None));
+    let p = picked.clone();
+    ui.on_details_select(move |i| *p.borrow_mut() = Some(i));
+    ElementHandle::find_by_accessible_label(&ui, "browser.exe, PID 11").next().expect("process row").invoke_accessible_default_action();
+    assert_eq!(*picked.borrow(), Some(1));
+}
+
+#[test]
+fn an_exited_process_reads_exited() {
+    let ui = details_window(1000.0, 3000.0, vec![], vec![]);
+    assert!(found(&ui, "Exited"));
+}
+
+#[test]
+fn details_popup_fits_the_narrowest_window() {
+    let ui = details_window(760.0, 900.0, one_connection(), vec![]);
+    let panel = ElementHandle::find_by_accessible_label(&ui, "Details for Browser").next().expect("panel");
+    assert!(panel.size().width <= 712.0, "{:?}", panel.size());
+    assert!(panel.size().height <= 900.0, "{:?}", panel.size());
+}
+
+#[test]
+fn escape_closes_the_details_popup() {
+    let ui = details_window(1000.0, 3000.0, vec![], vec![]);
+    let closed = Rc::new(RefCell::new(0));
+    let c = closed.clone();
+    ui.on_close_details(move || *c.borrow_mut() += 1);
+    key(&ui, slint::platform::Key::Escape);
+    assert_eq!(*closed.borrow(), 1);
+}
+
+#[test]
+fn change_buttons_report_their_callbacks() {
+    let ui = details_window(1000.0, 3000.0, vec![], vec![]);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let (a, b, c, d) = (calls.clone(), calls.clone(), calls.clone(), calls.clone());
+    ui.on_details_change_priority(move || a.borrow_mut().push("priority"));
+    ui.on_details_change_affinity(move || b.borrow_mut().push("affinity"));
+    ui.on_details_open_location(move || c.borrow_mut().push("location"));
+    ui.on_details_copy_all(move || d.borrow_mut().push("copy"));
+    for label in ["Change priority", "Change affinity", "Open file location", "Copy all"] {
+        ElementHandle::find_by_accessible_label(&ui, label).next().expect(label).invoke_accessible_default_action();
+    }
+    assert_eq!(*calls.borrow(), ["priority", "affinity", "location", "copy"]);
+}
+
+#[test]
+fn empty_lists_say_so() {
+    let ui = details_window(1000.0, 3000.0, vec![], vec![]);
+    assert!(found(&ui, "No network connections."));
+    assert!(found(&ui, "No services run in this process."));
+}

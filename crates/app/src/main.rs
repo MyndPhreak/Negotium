@@ -1100,9 +1100,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let text = negotium::dispatch::run(job, elevated).toast();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        if let Some(details) = text.strip_prefix("details:") {
-                            ui.invoke_show_details(details.into());
-                        } else if !text.is_empty() {
+                        if !text.is_empty() {
                             ui.set_toast(text.into());
                         }
                     }

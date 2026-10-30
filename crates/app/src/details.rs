@@ -192,6 +192,22 @@ pub fn copy_all_text(o: &Opened, f: &DetailsFrame) -> String {
     .join("\n")
 }
 
+/// The header chips: (text, warn). Signature, architecture and admin always (when known);
+/// efficiency mode and UAC virtualization only when on.
+pub fn header_chips(_o: &Opened) -> Vec<(String, bool)> {
+    Vec::new()
+}
+
+/// The Identity section of the selected process: (label, value). `now` is a FILETIME.
+pub fn identity_fields(_o: &Opened, _f: &DetailsFrame, _now: i64) -> Vec<(String, String)> {
+    Vec::new()
+}
+
+/// The Resources section of the selected process: (label, value).
+pub fn resource_fields(_o: &Opened, _f: &DetailsFrame) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// Reads the facts for every process in `procs` (the root first, when there is one). Blocking;
 /// call on an action thread.
 pub fn read_opened(name: &str, root: Option<(u32, i64)>, procs: &[(u32, i64)], image_path: Option<&str>) -> Opened {
@@ -386,5 +402,77 @@ mod tests {
         assert!(text.contains("Command line: \u{2014}"), "{text}");
         assert!(text.contains(r"User: PC\me"), "{text}");
         assert!(text.contains("Parent: \u{2014}"), "{text}");
+    }
+
+    fn opened(details: Details, signature: Signature) -> Opened {
+        Opened {
+            name: "App".into(),
+            publisher: None,
+            version: None,
+            signature,
+            image_path: details.image_path.clone(),
+            procs: vec![ProcFacts { pid: 10, create_time: 1, name: "app.exe".into(), role: Some("Main"), details: Some(details) }],
+            selected: 0,
+        }
+    }
+
+    fn facts() -> Details {
+        Details {
+            pid: 10,
+            image_path: None,
+            command_line: None,
+            user: None,
+            priority: None,
+            elevated: Some(true),
+            virtualized: Some(false),
+            architecture: Some(negotium_actions::Architecture::X86OnArm64),
+            efficiency: Some(true),
+        }
+    }
+
+    #[test]
+    fn chips_name_signature_architecture_admin_and_what_is_on() {
+        let chips = header_chips(&opened(facts(), Signature::Signed("Example Ltd".into())));
+        assert_eq!(
+            chips,
+            vec![
+                ("Signed by Example Ltd".to_string(), false),
+                ("x86 on ARM64".to_string(), false),
+                ("Runs as admin".to_string(), false),
+                ("Efficiency mode on".to_string(), false),
+            ]
+        );
+        let mut d = facts();
+        (d.elevated, d.virtualized, d.efficiency, d.architecture) = (Some(false), Some(true), Some(false), None);
+        assert_eq!(
+            header_chips(&opened(d, Signature::NotSigned)),
+            vec![
+                ("Not signed".to_string(), true),
+                ("Does not run as admin".to_string(), false),
+                ("UAC virtualization on".to_string(), false),
+            ]
+        );
+        assert!(header_chips(&opened(facts(), Signature::Unknown)).iter().all(|c| !c.0.contains("signed")));
+    }
+
+    #[test]
+    fn identity_shows_dashes_for_what_windows_refused() {
+        let o = opened(facts(), Signature::Unknown);
+        let f = DetailsFrame { start_time: Some(0), ..Default::default() };
+        let fields = identity_fields(&o, &f, 45 * 10_000_000);
+        let get = |l: &str| fields.iter().find(|(k, _)| k == l).map(|(_, v)| v.clone());
+        assert_eq!(get("Path").as_deref(), Some(DASH));
+        assert_eq!(get("Command line").as_deref(), Some(DASH));
+        assert_eq!(get("Parent").as_deref(), Some(DASH));
+        assert_eq!(get("Running for").as_deref(), Some("45 s"));
+    }
+
+    #[test]
+    fn resources_of_an_exited_process_are_dashes() {
+        let o = opened(facts(), Signature::Unknown);
+        let f = DetailsFrame { procs: vec![LiveProc { pid: 10, create_time: 1, ..Default::default() }], ..Default::default() };
+        let fields = resource_fields(&o, &f);
+        assert!(!fields.is_empty());
+        assert!(fields.iter().all(|(_, v)| v == DASH), "{fields:?}");
     }
 }

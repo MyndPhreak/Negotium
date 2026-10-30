@@ -11,9 +11,11 @@ import { StartupPage, StartupData } from "startuppage.slint";
 import { AppHistoryPage, AppHistoryData } from "apphistorypage.slint";
 import { ServicesPage, ServiceData } from "servicespage.slint";
 import { PortsPage, PortData } from "portspage.slint";
+import { DetailsPopup, DetailsChip, DetailsProc, DetailsField, DetailsConnection } from "detailspopup.slint";
 import { GraphData, ScrubRow, GraphClock } from "graph.slint";
 import { Caption, TitleBar } from "titlebar.slint";
 export { NegotiumTray } from "tray.slint";
+export { DetailsChip, DetailsProc, DetailsField, DetailsConnection }
 export { Theme, MeterData, TileData, RowData, DeviceData, GraphData, StatData, SegmentData, ScrubRow, StartupData, AppHistoryData, ServiceData, PortData, GraphClock, Caption }
 
 export component MainWindow inherits Window {
@@ -47,8 +49,25 @@ export component MainWindow inherits Window {
     in property <string> toast;
     in-out property <string> confirm-text;
     in-out property <bool> confirm-visible;
-    in-out property <string> details-text;
     in-out property <bool> details-visible;
+    in property <string> details-name;
+    // "Publisher · version".
+    in property <string> details-subtitle;
+    in property <image> details-icon;
+    in property <bool> details-has-icon;
+    in property <[DetailsChip]> details-chips;
+    in property <[DetailsProc]> details-procs;
+    in-out property <int> details-selected;
+    in property <[DetailsField]> details-identity;
+    in property <[DetailsField]> details-resources;
+    in property <[DetailsField]> details-settings;
+    in property <[DetailsConnection]> details-connections;
+    in property <[string]> details-services;
+    callback details-select(int);
+    callback details-copy-all();
+    callback details-change-priority();
+    callback details-change-affinity();
+    callback details-open-location();
     in-out property <bool> run-task-visible;
     in-out property <string> run-task-command;
     in-out property <string> run-task-working-dir;
@@ -331,9 +350,9 @@ export component MainWindow inherits Window {
         root.confirm-text = text;
         root.confirm-visible = true;
     }
-    public function show-details(text: string) {
+    public function show-details() {
         parking.focus();
-        root.details-text = text;
+        root.details-selected = 0;
         root.details-visible = true;
     }
     public function show-run-task() {
@@ -664,12 +683,25 @@ export component MainWindow inherits Window {
         cancel-primary: true;
         done(ok) => { root.confirm(ok); }
     }
-    if root.details-visible : Modal {
-        title: "Details";
-        body: root.details-text;
-        confirm-label: "Close";
-        show-cancel: false;
-        done(ok) => { root.close-details(); }
+    if root.details-visible : DetailsPopup {
+        name: root.details-name;
+        subtitle: root.details-subtitle;
+        icon: root.details-icon;
+        has-icon: root.details-has-icon;
+        chips: root.details-chips;
+        procs: root.details-procs;
+        selected: root.details-selected;
+        identity: root.details-identity;
+        resources: root.details-resources;
+        settings: root.details-settings;
+        connections: root.details-connections;
+        services: root.details-services;
+        select(i) => { root.details-select(i); }
+        copy-all => { root.details-copy-all(); }
+        change-priority => { root.details-change-priority(); }
+        change-affinity => { root.details-change-affinity(); }
+        open-location => { root.details-open-location(); }
+        close => { root.close-details(); }
     }
     if root.run-task-visible : RunTaskModal {
         command <=> root.run-task-command;

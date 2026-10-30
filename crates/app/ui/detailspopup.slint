@@ -1,0 +1,29 @@
+// The Details popup: everything about one app, for the process picked in its list.
+import { Theme } from "theme.slint";
+
+export struct DetailsChip { text: string, warn: bool }
+export struct DetailsProc { pid: int, name: string, role: string, cpu: string, memory: string, alive: bool }
+export struct DetailsField { label: string, value: string }
+export struct DetailsConnection { protocol: string, local: string, remote: string, state: string }
+
+export component DetailsPopup inherits Rectangle {
+    in property <string> name;
+    in property <string> subtitle;
+    in property <image> icon;
+    in property <bool> has-icon;
+    in property <[DetailsChip]> chips;
+    in property <[DetailsProc]> procs;
+    in property <int> selected;
+    in property <[DetailsField]> identity;
+    in property <[DetailsField]> resources;
+    in property <[DetailsField]> settings;
+    in property <[DetailsConnection]> connections;
+    in property <[string]> services;
+    callback select(int);
+    callback copy-all();
+    callback change-priority();
+    callback change-affinity();
+    callback open-location();
+    callback close();
+    background: #00000066;
+}
