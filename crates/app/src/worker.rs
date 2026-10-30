@@ -329,8 +329,8 @@ impl LiveSource {
             Page::Overview => {
                 let metric = controls.metric();
                 let sort = controls.sort();
-                let order = self.ranker.order(&rows, sort, snap.taken_at_ms, controls.frozen());
-                let top = self.top.pick(&rows, metric, snap.taken_at_ms, TOP_TILES);
+                let order = self.ranker.order(rows, sort, snap.taken_at_ms, controls.frozen());
+                let top = self.top.pick(rows, metric, snap.taken_at_ms, TOP_TILES);
                 let (expanded, all_children) = controls.child_rows();
                 let resorted = self.ranker.resorted();
                 let restrained: std::collections::HashSet<(u32, i64)> = snap.processes.iter()
@@ -339,13 +339,13 @@ impl LiveSource {
                     .collect();
                 let opts = FrameOptions { metric, elevated: self.elevated, expanded, all_children, sort, grouped: controls.grouped(), resorted, restrained };
                 let ids = &mut self.ids;
-                Some(read_history(&self.history, |h| build_frame(ids, &snap, &rows, &order, &top, h, &opts)))
+                Some(read_history(&self.history, |h| build_frame(ids, snap, rows, &order, &top, h, &opts)))
             }
             Page::Performance => {
                 let (device, range) = controls.perf();
-                self.seen = LastSeen::track(self.seen.take(), &snap, &device);
+                self.seen = LastSeen::track(self.seen.take(), snap, &device);
                 let perf = read_history(&self.history, |h| {
-                    build_perf(&PerfInput { snap: &snap, history: h, info: &self.info, apps: &rows, device: &device, range, last_seen: self.seen.as_ref(), elevated: self.elevated })
+                    build_perf(&PerfInput { snap, history: h, info: &self.info, apps: rows, device: &device, range, last_seen: self.seen.as_ref(), elevated: self.elevated })
                 });
                 Some(Frame { page: Page::Performance, perf: Some(perf), ..Default::default() })
             }
