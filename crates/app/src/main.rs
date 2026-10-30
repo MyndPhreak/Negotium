@@ -709,6 +709,7 @@ fn main() -> Result<(), slint::PlatformError> {
             } else if page == negotium::controls::Page::Services {
                 load_services();
             } else if page == negotium::controls::Page::Users {
+                b.borrow_mut().want_profile_size();
                 load_users();
             } else if page == negotium::controls::Page::Ports {
                 // Read the sockets on the next tick, not up to 2 s from now.

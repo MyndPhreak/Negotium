@@ -939,12 +939,15 @@ impl Bridge {
 
     /// The Users page was shown: the next read may start a profile walk.
     pub fn want_profile_size(&mut self) {
-        unimplemented!("Not implemented")
+        self.profile_wanted = true;
     }
 
     /// The profile folder to walk: only after `want_profile_size`, and when a walk is due.
-    pub fn take_profile_walk(&mut self, _now: Instant) -> Option<std::path::PathBuf> {
-        unimplemented!("Not implemented")
+    pub fn take_profile_walk(&mut self, now: Instant) -> Option<std::path::PathBuf> {
+        if !std::mem::take(&mut self.profile_wanted) {
+            return None;
+        }
+        self.begin_profile_size(now)
     }
 
     /// The profile folder to walk, when a walk is due (none runs, and none is known or the last is

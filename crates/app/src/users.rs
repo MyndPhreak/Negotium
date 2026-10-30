@@ -265,7 +265,8 @@ pub fn read_job() -> UsersRead {
 }
 
 /// Reads the sessions and the account on a thread, then hands them to the bridge and, when one
-/// is due, starts the profile walk. One read at a time: a call during a read does nothing.
+/// is due and the page was just shown, starts the profile walk (the timer's reads do not).
+/// One read at a time: a call during a read does nothing.
 pub fn refresh(weak: slint::Weak<MainWindow>, elevated: bool) {
     let mut start = false;
     crate::bridge::with_bridge(|b| start = b.begin_users_read());
@@ -282,7 +283,7 @@ pub fn refresh(weak: slint::Weak<MainWindow>, elevated: bool) {
                     Some(read) => b.set_users(&ui, read, elevated),
                     None => b.users_read_failed(&ui),
                 }
-                walk = b.begin_profile_size(Instant::now());
+                walk = b.take_profile_walk(Instant::now());
             });
             if let Some(path) = walk {
                 spawn_profile_size(weak, path);

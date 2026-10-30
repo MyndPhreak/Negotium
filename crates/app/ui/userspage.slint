@@ -204,7 +204,7 @@ export component UsersPage inherits VerticalLayout {
                     font-size: 12px;
                     wrap: word-wrap;
                 }
-                if root.rows.length == 0 : Text {
+                if root.rows.length == 0 && root.read-note == "" : Text {
                     text: "No other users are signed in.";
                     color: Theme.muted;
                 }
