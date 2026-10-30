@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.13.0](https://github.com/MyndPhreak/Negotium/compare/v0.12.0...v0.13.0) (2026-10-30)
+
+
+### Features
+
+* **app:** fuller Details popup and new row menu items ([#40](https://github.com/MyndPhreak/Negotium/issues/40)) ([6c7cb17](https://github.com/MyndPhreak/Negotium/commit/6c7cb17af9fa53a5d8b849a88664b1c8e2cd6964))
+* **app:** Users page data layer and rail button ([#41](https://github.com/MyndPhreak/Negotium/issues/41)) ([e27abfa](https://github.com/MyndPhreak/Negotium/commit/e27abfaed02ec6248c673cd9dc7b550c689a8245))
+* **app:** Users page UI and wiring ([#42](https://github.com/MyndPhreak/Negotium/issues/42)) ([1f72a18](https://github.com/MyndPhreak/Negotium/commit/1f72a1810139507892acd27a206eb006bd394295))
+
 ## [0.12.0](https://github.com/MyndPhreak/Negotium/compare/v0.11.0...v0.12.0) (2026-10-29)
 
 
