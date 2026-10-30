@@ -700,7 +700,10 @@ pub fn close_cards(rows: &mut [RowView]) {
 /// Marks every target, and its row, whose processes include a service host (Go to service(s)).
 pub fn mark_service_hosts(frame: &mut Frame, service_pids: &HashSet<u32>) {
     for target in frame.targets.values_mut() {
-        target.hosts_services = target.procs.iter().any(|(pid, _)| service_pids.contains(pid));
+        // Go to service(s) searches the Services page for the main process's PID: only that
+        // process decides, or the page would open on nothing.
+        let main = target.root.or_else(|| target.procs.first().copied());
+        target.hosts_services = main.is_some_and(|(pid, _)| service_pids.contains(&pid));
     }
     for row in &mut frame.rows {
         row.hosts_services = frame.targets.get(&row.id).is_some_and(|t| t.hosts_services);

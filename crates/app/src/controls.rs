@@ -185,6 +185,8 @@ impl Controls {
     /// Sets (or with `None` clears) the processes the Details popup shows.
     pub fn set_details_watch(&self, watch: Option<crate::details::DetailsWatch>) {
         *self.details.lock().unwrap_or_else(|e| e.into_inner()) = watch;
+        // A new selection should not wait a whole refresh interval for its live part.
+        self.poke();
     }
 
     pub fn details_watch(&self) -> Option<crate::details::DetailsWatch> {

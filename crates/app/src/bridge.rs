@@ -1357,7 +1357,9 @@ impl Bridge {
     }
 
     fn apply_details(&mut self, ui: &MainWindow, live: crate::details::DetailsFrame) {
-        if self.details.is_none() {
+        // A frame built before the selection changed (or for another app's popup) is dropped.
+        let current = self.details.as_ref().and_then(|d| d.procs.get(d.selected)).map(|p| (p.pid, p.create_time));
+        if current != Some(live.selected) {
             return;
         }
         self.details_live = live;
