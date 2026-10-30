@@ -1,13 +1,19 @@
 //! The Users page: text and decisions as pure functions, plus the read and action jobs.
+use crate::format;
 use negotium_actions::ActionError;
-use negotium_actions::users::{Account, DirSize, Session, SessionState, SignIn};
+use negotium_actions::integration::is_admin_member;
+use negotium_actions::users::{
+    Account, DirSize, Session, SessionState, SignIn, admin_group_name, current_account, current_session_id, disconnect_session,
+    is_remote_session, list_sessions, local_groups, lock, sign_out, sign_out_session, switch_user,
+};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const USERS_REFRESH: Duration = Duration::from_secs(5);
 pub const PROFILE_SIZE_MAX_AGE: Duration = Duration::from_secs(600);
 
+/// What `read_job` found. A refused field stays None (shown as a dash).
 pub struct UsersRead {
     pub sessions: Result<Vec<Session>, String>,
     pub current: Option<u32>,
@@ -15,7 +21,7 @@ pub struct UsersRead {
     pub account: Account,
     pub admin_member: bool,
     pub admin_group: Option<String>,
-    /// Key: lower-case `DOMAIN\user`.
+    /// Local groups of each other session's user. Key: lower-case `DOMAIN\user`.
     pub groups: HashMap<String, Option<Vec<String>>>,
 }
 
@@ -67,77 +73,207 @@ pub enum UserPlan {
     NeedsAdmin(String),
 }
 
-pub fn initial(_name: &str) -> String {
-    String::new()
+const DASH: &str = "\u{2014}";
+
+/// The first letter or digit in capitals, `?` when there is none.
+pub fn initial(name: &str) -> String {
+    name.chars().find(|c| c.is_alphanumeric()).map_or_else(|| "?".to_string(), |c| c.to_uppercase().collect())
 }
 
-pub fn span_text(_secs: Option<u64>) -> String {
-    String::new()
+pub fn span_text(secs: Option<u64>) -> String {
+    secs.map_or_else(|| DASH.to_string(), format::span)
 }
 
-pub fn password_age_text(_secs: Option<u64>) -> String {
-    String::new()
-}
-
-pub fn sign_in_text(_s: Option<SignIn>) -> String {
-    String::new()
-}
-
-pub fn groups_text(_g: Option<&[String]>) -> String {
-    String::new()
-}
-
-pub fn size_text(_s: &ProfileSize) -> String {
-    String::new()
-}
-
-pub fn state_text(_s: SessionState) -> &'static str {
-    ""
-}
-
-pub fn account_type_text(_groups: Option<&[String]>, _admin_group: Option<&str>) -> &'static str {
-    ""
-}
-
-pub fn you_view(_read: &UsersRead, _sessions: &[Session], _size: &ProfileSize, _elevated: bool) -> YouView {
-    YouView::default()
-}
-
-pub fn other_rows(_read: &UsersRead, _sessions: &[Session]) -> Vec<OtherRow> {
-    Vec::new()
-}
-
-pub fn action_from(_name: &str, _session: i32) -> Option<UserAction> {
-    None
-}
-
-pub fn plan_user_action(_a: UserAction, _user: &str, _elevated: bool) -> UserPlan {
-    UserPlan::NeedsAdmin(String::new())
-}
-
-pub fn failure_text(_a: UserAction, _user: &str, _e: &ActionError) -> String {
-    String::new()
-}
-
-pub fn profile_size_due(_last: Option<Instant>, _running: bool, _now: Instant) -> bool {
-    false
-}
-
-pub fn read_job() -> UsersRead {
-    UsersRead {
-        sessions: Err(String::new()),
-        current: None,
-        remote: false,
-        account: Account::default(),
-        admin_member: false,
-        admin_group: None,
-        groups: HashMap::new(),
+pub fn password_age_text(secs: Option<u64>) -> String {
+    match secs.map(|s| s / 86_400) {
+        None => DASH.to_string(),
+        Some(0) => "Today".to_string(),
+        Some(1) => "1 day ago".to_string(),
+        Some(days) => format!("{days} days ago"),
     }
 }
 
-/// Runs the action; the failure text, or None when it worked.
-pub fn run_user_action(_a: UserAction, _user: &str, _owner: isize) -> Option<String> {
-    None
+pub fn sign_in_text(s: Option<SignIn>) -> String {
+    let Some(s) = s else { return DASH.to_string() };
+    let mut out = vec!["Password"];
+    out.extend([(s.pin, "PIN"), (s.face, "Face"), (s.fingerprint, "Fingerprint")].into_iter().filter(|(set, _)| *set).map(|(_, n)| n));
+    out.join(", ")
+}
+
+pub fn groups_text(g: Option<&[String]>) -> String {
+    match g {
+        None => DASH.to_string(),
+        Some([]) => "None".to_string(),
+        Some(g) => g.join(", "),
+    }
+}
+
+pub fn size_text(s: &ProfileSize) -> String {
+    match s {
+        ProfileSize::Calculating => "Calculating\u{2026}".to_string(),
+        ProfileSize::Done(d) if d.skipped > 0 => format!("At least {}", format::bytes(d.bytes as f64)),
+        ProfileSize::Done(d) => format::bytes(d.bytes as f64),
+        ProfileSize::Unknown => DASH.to_string(),
+    }
+}
+
+pub fn state_text(s: SessionState) -> &'static str {
+    match s {
+        SessionState::Active => "Active",
+        SessionState::Disconnected => "Disconnected",
+        SessionState::Other => DASH,
+    }
+}
+
+/// "Administrator" when the user's groups hold the admin group (compared as Windows does, ignoring case).
+pub fn account_type_text(groups: Option<&[String]>, admin_group: Option<&str>) -> &'static str {
+    match (groups, admin_group) {
+        (Some(groups), Some(admin)) if groups.iter().any(|g| g.eq_ignore_ascii_case(admin)) => "Administrator",
+        (Some(_), Some(_)) => "Standard",
+        _ => DASH,
+    }
+}
+
+pub fn you_view(read: &UsersRead, sessions: &[Session], size: &ProfileSize, elevated: bool) -> YouView {
+    let a = &read.account;
+    let account_name = a.name.as_deref();
+    let user = account_name.and_then(|n| n.rsplit('\\').next()).unwrap_or(DASH);
+    let name = a.full_name.as_deref().unwrap_or(user);
+    let signed_in = read.current.and_then(|id| sessions.iter().find(|s| s.id == id)).and_then(|s| s.signed_in_secs);
+    YouView {
+        initial: initial(name),
+        name: name.to_string(),
+        subtitle: a.email.as_deref().or(account_name).unwrap_or(DASH).to_string(),
+        account_type: (if read.admin_member { "Administrator" } else { "Standard" }).to_string(),
+        signed_in: signed_in.map_or_else(|| DASH.to_string(), |s| format!("Signed in for {}", format::span(s))),
+        place: (if read.remote { "Remote" } else { "This PC" }).to_string(),
+        profile_path: a.profile.as_deref().map_or_else(|| DASH.to_string(), |p| p.display().to_string()),
+        profile_size: size_text(size),
+        sign_in: sign_in_text(a.sign_in),
+        password_set: password_age_text(a.password_age_secs),
+        groups: groups_text(a.groups.as_deref()),
+        negotium_admin: (if elevated { "Yes" } else { "No" }).to_string(),
+        picture: a.picture.clone(),
+    }
+}
+
+/// The other signed-in sessions, sorted by user name ignoring case.
+pub fn other_rows(read: &UsersRead, sessions: &[Session]) -> Vec<OtherRow> {
+    let mut rows: Vec<&Session> = sessions.iter().filter(|s| Some(s.id) != read.current).collect();
+    rows.sort_by_cached_key(|s| s.user.to_lowercase());
+    rows.into_iter()
+        .map(|s| {
+            let groups = read.groups.get(&group_key(s)).and_then(|g| g.as_deref());
+            OtherRow {
+                id: s.id as i32,
+                name: s.user.clone(),
+                account_type: account_type_text(groups, read.admin_group.as_deref()).to_string(),
+                state: state_text(s.state).to_string(),
+                idle: span_text(s.idle_secs),
+            }
+        })
+        .collect()
+}
+
+/// The `groups` key of a session's user.
+fn group_key(s: &Session) -> String {
+    format!("{}\\{}", s.domain, s.user).to_lowercase()
+}
+
+/// `session` is the row's session id, -1 for the card's buttons.
+pub fn action_from(name: &str, session: i32) -> Option<UserAction> {
+    let id = u32::try_from(session).ok();
+    match name {
+        "lock" => Some(UserAction::Lock),
+        "switch-user" => Some(UserAction::SwitchUser),
+        "sign-out" => Some(UserAction::SignOut),
+        "account-settings" => Some(UserAction::AccountSettings),
+        "sign-out-session" => id.map(UserAction::SignOutSession),
+        "disconnect" => id.map(UserAction::Disconnect),
+        _ => None,
+    }
+}
+
+/// Run now, ask first, or refuse. Windows is the real boundary for other sessions (the calls fail
+/// with access denied without admin); the refusal here only gives the reason before asking.
+pub fn plan_user_action(a: UserAction, user: &str, elevated: bool) -> UserPlan {
+    let confirm = |title: String, body: String, label: &str| UserPlan::Confirm { title, body, label: label.to_string() };
+    match a {
+        UserAction::Lock | UserAction::SwitchUser | UserAction::AccountSettings => UserPlan::Run,
+        UserAction::SignOut => confirm(
+            "Sign out?".to_string(),
+            "Windows closes all your apps. Save your work before you sign out.".to_string(),
+            "Sign out",
+        ),
+        UserAction::SignOutSession(_) | UserAction::Disconnect(_) if !elevated => {
+            UserPlan::NeedsAdmin("To sign out or disconnect another user, restart Negotium as admin.".to_string())
+        }
+        UserAction::SignOutSession(_) => confirm(
+            format!("Sign out {user}?"),
+            format!("Windows closes all apps of {user}. Work that {user} did not save is lost."),
+            "Sign out",
+        ),
+        UserAction::Disconnect(_) => confirm(
+            format!("Disconnect {user}?"),
+            format!("The apps of {user} continue to run. {user} can sign in again to continue."),
+            "Disconnect",
+        ),
+    }
+}
+
+pub fn failure_text(a: UserAction, user: &str, e: &ActionError) -> String {
+    let what = match a {
+        UserAction::Lock => "lock the PC".to_string(),
+        UserAction::SwitchUser => "switch user".to_string(),
+        UserAction::SignOut => "sign out".to_string(),
+        UserAction::AccountSettings => "open account settings".to_string(),
+        UserAction::SignOutSession(_) => format!("sign out {user}"),
+        UserAction::Disconnect(_) => format!("disconnect {user}"),
+    };
+    format!("Couldn't {what}: {e}.")
+}
+
+/// Whether to start a profile walk: none is running, and none is known or the last one is old.
+pub fn profile_size_due(last: Option<Instant>, running: bool, now: Instant) -> bool {
+    !running && last.is_none_or(|t| now.saturating_duration_since(t) >= PROFILE_SIZE_MAX_AGE)
+}
+
+/// Reads sessions and account facts. Call off the UI thread.
+pub fn read_job() -> UsersRead {
+    let sessions = list_sessions().map_err(|e| e.to_string());
+    let current = current_session_id();
+    let groups = sessions
+        .iter()
+        .flatten()
+        .filter(|s| Some(s.id) != current)
+        .map(|s| {
+            let key = group_key(s);
+            let found = local_groups(&format!("{}\\{}", s.domain, s.user));
+            (key, found)
+        })
+        .collect();
+    UsersRead {
+        sessions,
+        current,
+        remote: is_remote_session(),
+        account: current_account(),
+        admin_member: is_admin_member(),
+        admin_group: admin_group_name(),
+        groups,
+    }
+}
+
+/// Runs the action: the failure text, or None when it worked. Call off the UI thread.
+pub fn run_user_action(a: UserAction, user: &str, owner: isize) -> Option<String> {
+    let done = match a {
+        UserAction::Lock => lock(),
+        UserAction::SwitchUser => switch_user(),
+        UserAction::SignOut => sign_out(),
+        UserAction::AccountSettings => negotium_actions::shell_open(Path::new("ms-settings:yourinfo"), owner),
+        UserAction::SignOutSession(id) => sign_out_session(id),
+        UserAction::Disconnect(id) => disconnect_session(id),
+    };
+    done.err().map(|e| failure_text(a, user, &e))
 }
 
 #[cfg(test)]

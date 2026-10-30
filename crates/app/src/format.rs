@@ -89,8 +89,14 @@ pub fn clock(ms: u64) -> String {
 }
 
 /// A length of time in its two largest units ("2 h 5 min").
-pub fn span(_secs: u64) -> String {
-    String::new()
+pub fn span(secs: u64) -> String {
+    let (d, h, m) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60);
+    match secs {
+        0..60 => "Less than 1 min".to_string(),
+        60..3_600 => format!("{m} min"),
+        3_600..86_400 => format!("{h} h {m} min"),
+        _ => format!("{d} d {h} h"),
+    }
 }
 
 #[cfg(test)]
