@@ -1,7 +1,8 @@
 //! Turns a row action into a job (pure), and runs jobs on action threads.
 use crate::view::Target;
 use negotium_actions::{
-    ActionError, end_many, force_close, open_file_location, process_details, toggle_efficiency_mode,
+    ActionError, create_dump, end_many, force_close, open_file_location, open_url, process_details, search_url,
+    show_properties, toggle_efficiency_mode,
 };
 use negotium_model::descendants_deepest_first;
 
@@ -12,6 +13,9 @@ pub enum JobKind {
     Efficiency,
     OpenLocation,
     Details,
+    Dump,
+    Properties,
+    SearchOnline,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +24,8 @@ pub struct Job {
     pub name: String,
     pub targets: Vec<(u32, i64)>,
     pub path: Option<String>,
+    /// The app's root process, when it has one.
+    pub root: Option<(u32, i64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +41,7 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
         name: t.name.clone(),
         targets,
         path: t.image_path.clone(),
+        root: t.root,
     };
     // The Windows group spans every system process: nothing may be done to it as a whole.
     if t.group {
@@ -57,8 +64,18 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
         },
         "efficiency" => job(JobKind::Efficiency, t.procs.clone()),
         "open-location" if t.image_path.is_some() => job(JobKind::OpenLocation, vec![]),
+        "search-online" if t.image_path.is_some() => job(JobKind::SearchOnline, vec![]),
+        "properties" if t.image_path.is_some() => job(JobKind::Properties, vec![]),
+        "dump" => match first {
+            Some(p) => job(JobKind::Dump, vec![p]),
+            None => return Plan::Nothing,
+        },
         "details" => match first {
-            Some(p) => job(JobKind::Details, vec![p]),
+            Some(p) => {
+                let mut rest: Vec<_> = t.procs.iter().copied().filter(|q| *q != p).collect();
+                rest.sort_unstable();
+                job(JobKind::Details, std::iter::once(p).chain(rest).collect())
+            }
             None => return Plan::Nothing,
         },
         _ => return Plan::Nothing,
@@ -71,6 +88,20 @@ pub fn plan(action: &str, t: &Target, all_procs: &[(u32, i64, u32)]) -> Plan {
         return Plan::Confirm(text, planned);
     }
     Plan::Run(planned)
+}
+
+/// The Services page search for "Go to service(s)": the main process's PID, when the app hosts
+/// services; `None` otherwise.
+pub fn services_search(t: &Target) -> Option<String> {
+    if t.group || !t.hosts_services {
+        return None;
+    }
+    t.root.or_else(|| t.procs.first().copied()).map(|(pid, _)| pid.to_string())
+}
+
+/// The file name of `path` (`C:\App\app.exe` → `app.exe`).
+fn file_name(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
 /// Notification for an end-process job: silent on full success, the plain message when the only
@@ -130,9 +161,70 @@ fn stuck_hint(ending: &[u32]) -> Option<String> {
     ending_hint(holds, &filters)
 }
 
-/// Blocking; call on an action thread. Returns the notification text ("" = silent success),
-/// or `details:`-prefixed details text for [`JobKind::Details`].
-pub fn run(job: Job, elevated: bool) -> String {
+/// What a finished job shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    Silent,
+    Toast(String),
+    Details(Box<crate::details::Opened>),
+    /// A memory dump was written: the toast text and the folder its Open folder button opens.
+    Dumped { text: String, file: std::path::PathBuf },
+}
+
+impl Outcome {
+    /// The toast text, "" when there is none (the window picker shows only text).
+    pub fn toast(self) -> String {
+        match self {
+            Outcome::Toast(text) | Outcome::Dumped { text, .. } => text,
+            Outcome::Silent | Outcome::Details(_) => String::new(),
+        }
+    }
+}
+
+/// Blocking; call on an action thread.
+pub fn run(job: Job, elevated: bool) -> Outcome {
+    if job.kind == JobKind::Details {
+        // The root's own failure (exited, access denied) is the toast; the others show dashes.
+        return match job.targets.first().map(|&(pid, ct)| process_details(pid, ct)) {
+            Some(Ok(_)) => Outcome::Details(Box::new(crate::details::read_opened(
+                &job.name,
+                job.root,
+                &job.targets,
+                job.path.as_deref(),
+            ))),
+            Some(Err(e)) => Outcome::Toast(e.message(&job.name, elevated)),
+            None => Outcome::Silent,
+        };
+    }
+    let fail = |e: ActionError| Outcome::Toast(e.message(&job.name, elevated));
+    let path = job.path.as_deref();
+    match job.kind {
+        JobKind::Dump => match job.targets.first() {
+            Some(&(pid, ct)) => {
+                let process = path.map_or(job.name.as_str(), file_name);
+                match create_dump(pid, ct, process, &std::env::temp_dir()) {
+                    Ok(file) => Outcome::Dumped { text: format!("Memory dump of {} saved.", job.name), file },
+                    Err(e) => fail(e),
+                }
+            }
+            None => Outcome::Silent,
+        },
+        JobKind::SearchOnline => match path.map(|p| open_url(&search_url(file_name(p)))) {
+            Some(Err(e)) => fail(e),
+            _ => Outcome::Silent,
+        },
+        JobKind::Properties => match path.map(show_properties) {
+            Some(Err(e)) => fail(e),
+            _ => Outcome::Silent,
+        },
+        _ => match run_text(job, elevated) {
+            text if text.is_empty() => Outcome::Silent,
+            text => Outcome::Toast(text),
+        },
+    }
+}
+
+fn run_text(job: Job, elevated: bool) -> String {
     let fail = |e: ActionError| e.message(&job.name, elevated);
     match job.kind {
         JobKind::EndMany => {
@@ -158,21 +250,7 @@ pub fn run(job: Job, elevated: bool) -> String {
             Some(Err(e)) => fail(e),
             _ => String::new(),
         },
-        JobKind::Details => match job.targets.first() {
-            Some(&(pid, ct)) => match process_details(pid, ct) {
-                Ok(d) => format!(
-                    "details:Name: {}\nPID: {}\nPath: {}\nCommand line: {}\nUser: {}\nPriority: {}",
-                    job.name,
-                    d.pid,
-                    d.image_path.as_deref().unwrap_or("\u{2014}"),
-                    d.command_line.as_deref().unwrap_or("\u{2014}"),
-                    d.user.as_deref().unwrap_or("\u{2014}"),
-                    d.priority.as_deref().unwrap_or("\u{2014}"),
-                ),
-                Err(e) => fail(e),
-            },
-            None => String::new(),
-        },
+        JobKind::Details | JobKind::Dump | JobKind::Properties | JobKind::SearchOnline => String::new(),
     }
 }
 
@@ -184,6 +262,7 @@ mod tests {
         Target {
             name: "App".into(), process_name: "app.exe".into(), root: Some((10, 1)), procs: vec![(10, 1), (11, 2), (12, 3)],
             hung_pid: Some((11, 2)), image_path: Some(r"C:\App\app.exe".into()), critical, group: false,
+            hosts_services: false,
         }
     }
     const ALL: &[(u32, i64, u32)] = &[(10, 1, 4), (11, 2, 10), (12, 3, 11), (13, 4, 4)];
@@ -212,6 +291,57 @@ mod tests {
     fn critical_targets_need_confirmation() {
         assert!(matches!(plan("end-task", &target(true), ALL), Plan::Confirm(text, _) if text.contains("unusable")));
         assert!(matches!(plan("details", &target(true), ALL), Plan::Run(_)));
+    }
+
+    #[test]
+    fn search_and_properties_need_a_path() {
+        let mut t = target(false);
+        let Plan::Run(job) = plan("search-online", &t, ALL) else { panic!("search-online") };
+        assert_eq!(job.kind, JobKind::SearchOnline);
+        let Plan::Run(job) = plan("properties", &t, ALL) else { panic!("properties") };
+        assert_eq!(job.kind, JobKind::Properties);
+        t.image_path = None;
+        assert_eq!(plan("search-online", &t, ALL), Plan::Nothing);
+        assert_eq!(plan("properties", &t, ALL), Plan::Nothing);
+    }
+
+    #[test]
+    fn dump_targets_the_main_process() {
+        let Plan::Run(job) = plan("dump", &target(false), ALL) else { panic!() };
+        assert_eq!((job.kind, job.targets), (JobKind::Dump, vec![(10, 1)]));
+    }
+
+    #[test]
+    fn the_windows_group_gets_none_of_the_new_actions() {
+        let mut t = target(false);
+        (t.group, t.hosts_services) = (true, true);
+        for action in ["search-online", "properties", "dump"] {
+            assert_eq!(plan(action, &t, ALL), Plan::Nothing, "{action}");
+        }
+        assert_eq!(services_search(&t), None);
+    }
+
+    #[test]
+    fn goto_services_needs_a_service_host() {
+        let mut t = target(false);
+        assert_eq!(services_search(&t), None);
+        t.hosts_services = true;
+        assert_eq!(services_search(&t).as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn details_job_returns_every_process_root_first() {
+        let mut t = target(false);
+        t.procs = vec![(11, 2), (10, 1), (12, 3)];
+        let Plan::Run(job) = plan("details", &t, ALL) else { panic!() };
+        assert_eq!(job.kind, JobKind::Details);
+        assert_eq!(job.targets, vec![(10, 1), (11, 2), (12, 3)]);
+    }
+
+    #[test]
+    fn a_job_with_nothing_to_say_is_silent() {
+        let job = Job { kind: JobKind::OpenLocation, name: "App".into(), targets: vec![], path: None, root: None };
+        assert_eq!(run(job, false), Outcome::Silent);
     }
 
     #[test]

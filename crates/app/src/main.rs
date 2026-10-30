@@ -1097,13 +1097,24 @@ fn main() -> Result<(), slint::PlatformError> {
         move |job: negotium::dispatch::Job| {
             let weak = weak.clone();
             std::thread::spawn(move || {
-                let text = negotium::dispatch::run(job, elevated);
+                let outcome = negotium::dispatch::run(job, elevated);
                 let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        if let Some(details) = text.strip_prefix("details:") {
-                            ui.invoke_show_details(details.into());
-                        } else if !text.is_empty() {
-                            ui.set_toast(text.into());
+                    let Some(ui) = weak.upgrade() else { return };
+                    match outcome {
+                        negotium::dispatch::Outcome::Details(opened) => {
+                            negotium::bridge::with_bridge(|b| b.open_details(&ui, *opened));
+                        }
+                        negotium::dispatch::Outcome::Dumped { text, file } => {
+                            ui.set_toast(text.as_str().into());
+                            ui.set_toast_action("Open folder".into());
+                            ui.set_toast_action_for(text.into());
+                            negotium::bridge::with_bridge(|b| b.set_toast_file(Some(file.to_string_lossy().into_owned())));
+                        }
+                        other => {
+                            let text = other.toast();
+                            if !text.is_empty() {
+                                ui.set_toast(text.into());
+                            }
                         }
                     }
                 });
@@ -1127,12 +1138,85 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     };
+    // The CPU affinity and priority dialogs, for the row menu and the Details popup alike.
+    let open_affinity = {
+        let (weak, settings, active_affinity) = (weak.clone(), settings.clone(), active_affinity.clone());
+        move |target: &negotium::view::Target| {
+            let root_proc = target.root.or_else(|| target.procs.first().copied());
+            let Some((pid, ct)) = root_proc else { return; };
+            match negotium_actions::get_process_affinity(pid, ct) {
+                Ok((proc_mask, sys_mask)) => {
+                    let selection = negotium::affinity::CoreSelection::new(
+                        proc_mask,
+                        sys_mask,
+                        &negotium_collector::sysinfo::cpu_groups(),
+                    );
+                    let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.affinity_mask.is_some());
+                    *active_affinity.lock().unwrap() = Some(ActiveAffinityTarget {
+                        name: target.name.clone(),
+                        process_name: target.process_name.clone(),
+                        procs: target.procs.clone(),
+                        selection: selection.clone(),
+                    });
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_affinity_title(format!("Set CPU Affinity - {} (PID {})", target.name, pid).into());
+                        ui.set_affinity_process_name(target.name.clone().into());
+                        show_affinity(&ui, &selection);
+                        ui.set_affinity_remember(has_rule);
+                        ui.set_affinity_visible(true);
+                    }
+                }
+                Err(err) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_toast(err.message(&target.name, elevated).into());
+                    }
+                }
+            }
+        }
+    };
+    let open_priority = {
+        let (weak, settings, active_priority) = (weak.clone(), settings.clone(), active_priority.clone());
+        move |target: &negotium::view::Target| {
+            let root_proc = target.root.or_else(|| target.procs.first().copied());
+            let Some((pid, ct)) = root_proc else { return; };
+            match negotium_actions::get_priority_class(pid, ct) {
+                Ok(priority) => {
+                    let idx = match priority {
+                        negotium_actions::PriorityClass::Realtime => 0,
+                        negotium_actions::PriorityClass::High => 1,
+                        negotium_actions::PriorityClass::AboveNormal => 2,
+                        negotium_actions::PriorityClass::Normal => 3,
+                        negotium_actions::PriorityClass::BelowNormal => 4,
+                        negotium_actions::PriorityClass::Idle => 5,
+                    };
+                    let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.priority.is_some());
+                    *active_priority.lock().unwrap() = Some(ActivePriorityTarget {
+                        name: target.name.clone(),
+                        process_name: target.process_name.clone(),
+                        procs: target.procs.clone(),
+                    });
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_priority_title(format!("Set CPU Priority - {} (PID {})", target.name, pid).into());
+                        ui.set_priority_process_name(target.name.clone().into());
+                        ui.set_priority_selected(idx);
+                        ui.set_priority_remember(has_rule);
+                        ui.set_priority_visible(true);
+                    }
+                }
+                Err(err) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_toast(err.message(&target.name, elevated).into());
+                    }
+                }
+            }
+        }
+    };
     {
         let b = bridge.clone();
         let weak = weak.clone();
         let run_plan = run_plan.clone();
         let (settings, controls, saver) = (settings.clone(), controls.clone(), saver.clone());
-        let (active_affinity, active_priority) = (active_affinity.clone(), active_priority.clone());
+        let (open_affinity, open_priority) = (open_affinity.clone(), open_priority.clone());
         ui.on_row_action(move |action, id| {
             // Clone out of the borrow and release it before doing anything else.
             let (target, procs) = {
@@ -1141,72 +1225,23 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let Some(target) = target else { return };
             if action.as_str() == "set-affinity" {
-                let root_proc = target.root.or_else(|| target.procs.first().copied());
-                let Some((pid, ct)) = root_proc else { return; };
-                match negotium_actions::get_process_affinity(pid, ct) {
-                    Ok((proc_mask, sys_mask)) => {
-                        let selection = negotium::affinity::CoreSelection::new(
-                            proc_mask,
-                            sys_mask,
-                            &negotium_collector::sysinfo::cpu_groups(),
-                        );
-                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.affinity_mask.is_some());
-                        *active_affinity.lock().unwrap() = Some(ActiveAffinityTarget {
-                            name: target.name.clone(),
-                            process_name: target.process_name.clone(),
-                            procs: target.procs.clone(),
-                            selection: selection.clone(),
-                        });
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_affinity_title(format!("Set CPU Affinity - {} (PID {})", target.name, pid).into());
-                            ui.set_affinity_process_name(target.name.clone().into());
-                            show_affinity(&ui, &selection);
-                            ui.set_affinity_remember(has_rule);
-                            ui.set_affinity_visible(true);
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_toast(err.message(&target.name, elevated).into());
-                        }
-                    }
-                }
+                open_affinity(&target);
                 return;
             }
             if action.as_str() == "set-priority" {
-                let root_proc = target.root.or_else(|| target.procs.first().copied());
-                let Some((pid, ct)) = root_proc else { return; };
-                match negotium_actions::get_priority_class(pid, ct) {
-                    Ok(priority) => {
-                        let idx = match priority {
-                            negotium_actions::PriorityClass::Realtime => 0,
-                            negotium_actions::PriorityClass::High => 1,
-                            negotium_actions::PriorityClass::AboveNormal => 2,
-                            negotium_actions::PriorityClass::Normal => 3,
-                            negotium_actions::PriorityClass::BelowNormal => 4,
-                            negotium_actions::PriorityClass::Idle => 5,
-                        };
-                        let has_rule = settings.borrow().moderator.rules.iter().any(|r| negotium_moderator::same_image(&r.name, &target.process_name) && r.priority.is_some());
-                        *active_priority.lock().unwrap() = Some(ActivePriorityTarget {
-                            name: target.name.clone(),
-                            process_name: target.process_name.clone(),
-                            procs: target.procs.clone(),
-                        });
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_priority_title(format!("Set CPU Priority - {} (PID {})", target.name, pid).into());
-                            ui.set_priority_process_name(target.name.clone().into());
-                            ui.set_priority_selected(idx);
-                            ui.set_priority_remember(has_rule);
-                            ui.set_priority_visible(true);
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_toast(err.message(&target.name, elevated).into());
-                        }
-                    }
+                open_priority(&target);
+                return;
+            }
+            if action.as_str() == "goto-services" {
+                if let (Some(query), Some(ui)) = (negotium::dispatch::services_search(&target), weak.upgrade()) {
+                    b.borrow_mut().go_to_services(&ui, &query);
                 }
                 return;
+            }
+            if action.as_str() == "dump"
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.set_toast(format!("Creating a memory dump of {}\u{2026}", target.name).into());
             }
             if action.as_str() == "toggle-aequilibrium-exclusion" {
                 // The moderator matches image names, not an app card's friendly name.
@@ -1264,10 +1299,61 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
-        let weak = weak.clone();
+        let (b, weak) = (bridge.clone(), weak.clone());
         ui.on_close_details(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_details_visible(false);
+                b.borrow_mut().close_details(&ui);
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_details_select(move |i| {
+            if let (Some(ui), Ok(i)) = (weak.upgrade(), usize::try_from(i)) {
+                b.borrow_mut().select_details(&ui, i);
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_details_copy_all(move || {
+            let Some(text) = b.borrow().details_text() else { return };
+            let toast = match negotium_actions::runtask::copy_to_clipboard(&text) {
+                Ok(()) => "Details copied to clipboard.".to_string(),
+                Err(e) => format!("Could not copy the details: {e}"),
+            };
+            if let Some(ui) = weak.upgrade() {
+                ui.set_toast(toast.into());
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_details_open_location(move || {
+            let Some(path) = b.borrow().details_path() else { return };
+            if let (Err(e), Some(ui)) = (negotium_actions::open_file_location(&path), weak.upgrade()) {
+                let name = b.borrow().details_target().map(|t| t.name).unwrap_or_default();
+                ui.set_toast(e.message(&name, elevated).into());
+            }
+        });
+    }
+    {
+        let b = bridge.clone();
+        let open_priority = open_priority.clone();
+        ui.on_details_change_priority(move || {
+            let target = b.borrow().details_target();
+            if let Some(t) = target {
+                open_priority(&t);
+            }
+        });
+    }
+    {
+        let b = bridge.clone();
+        let open_affinity = open_affinity.clone();
+        ui.on_details_change_affinity(move || {
+            let target = b.borrow().details_target();
+            if let Some(t) = target {
+                open_affinity(&t);
             }
         });
     }
@@ -1355,6 +1441,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 format!("No active process to set affinity for {}.", target.name)
             };
             ui.set_toast(toast.into());
+            negotium::bridge::with_bridge(|b| b.refresh_details_settings(&ui));
         });
     }
     {
@@ -1419,6 +1506,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 format!("No active process to set priority for {}.", target.name)
             };
             ui.set_toast(toast.into());
+            negotium::bridge::with_bridge(|b| b.refresh_details_settings(&ui));
         });
     }
 
@@ -1427,6 +1515,15 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_dismiss_toast(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_toast("".into());
+            }
+        });
+    }
+    {
+        let (b, weak) = (bridge.clone(), weak.clone());
+        ui.on_toast_action_clicked(move || {
+            let Some(file) = b.borrow().toast_file() else { return };
+            if let (Err(e), Some(ui)) = (negotium_actions::open_file_location(&file), weak.upgrade()) {
+                ui.set_toast(e.message("the dump folder", elevated).into());
             }
         });
     }
