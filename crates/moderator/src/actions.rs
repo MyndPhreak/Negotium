@@ -6,6 +6,8 @@ pub enum RestoreReason {
     CpuDropped,
     BecameForeground,
     ProcessExited,
+    /// The user excluded the process from Aequilibrium while it was restrained.
+    Excluded,
     /// Negotium is exiting or its worker is restarting: nothing will be left to restore it later.
     Shutdown,
 }

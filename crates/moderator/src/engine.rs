@@ -133,6 +133,11 @@ impl Moderator {
                 to_restore.push((*key, RestoreReason::BecameForeground));
                 continue;
             }
+            // Excluded after the restraint started (e.g. from the row menu): end it now.
+            if is_user_excluded(&r.name, &config.exclusions) {
+                to_restore.push((*key, RestoreReason::Excluded));
+                continue;
+            }
 
             let cpu = rates.get(key).copied().unwrap_or(0.0);
             if cpu >= config.restore_cpu_threshold_pct {

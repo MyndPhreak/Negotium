@@ -160,6 +160,51 @@ fn aequilibrium_immediate_restoration_when_process_becomes_foreground() {
 }
 
 #[test]
+fn aequilibrium_restores_restrained_process_when_user_excludes_it() {
+    let mut moderator = Moderator::new();
+    let mut config = ModeratorConfig::default();
+
+    let p = make_proc(100, 1, 1000, "Burner.exe");
+    let mut rates = HashMap::new();
+    rates.insert((100, 1000), 50.0);
+
+    moderator.tick(&make_snap(0, 90.0, vec![p.clone()]), &rates, None, &config);
+    moderator.tick(&make_snap(1000, 90.0, vec![p.clone()]), &rates, None, &config);
+    moderator.record_original_state(100, 1000, Some(PriorityClass::Normal), Some(false));
+    assert!(moderator.is_restrained(100, 1000));
+
+    // Still hot and in the background: only the new exclusion can end the restraint.
+    config.exclusions.push("burner".to_string());
+    let (actions, events) = moderator.tick(&make_snap(1500, 90.0, vec![p.clone()]), &rates, None, &config);
+
+    assert_eq!(
+        actions,
+        vec![ModeratorAction::Restore {
+            pid: 100,
+            create_time: 1000,
+            name: "Burner.exe".to_string(),
+            reason: RestoreReason::Excluded,
+            original_priority: Some(PriorityClass::Normal),
+            original_efficiency: Some(false),
+        }]
+    );
+    assert_eq!(
+        events,
+        vec![ModeratorEvent::RestraintRestored {
+            pid: 100,
+            name: "Burner.exe".to_string(),
+            reason: RestoreReason::Excluded,
+            duration_ms: 500,
+        }]
+    );
+    assert!(!moderator.is_restrained(100, 1000));
+
+    // And it is not restrained again on later ticks.
+    let (actions, _) = moderator.tick(&make_snap(5000, 90.0, vec![p]), &rates, None, &config);
+    assert!(actions.is_empty());
+}
+
+#[test]
 fn aequilibrium_cooldown_restoration_when_cpu_drops() {
     let mut moderator = Moderator::new();
     let config = ModeratorConfig::default();
