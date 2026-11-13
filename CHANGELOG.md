@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/MyndPhreak/Negotium/compare/v0.13.0...v0.13.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **moderator:** restore a restrained process when it is excluded from Aequilibrium ([2c1f601](https://github.com/MyndPhreak/Negotium/commit/2c1f601273237da5790290fa2296729ad712cebb))
+
 ## [0.13.0](https://github.com/MyndPhreak/Negotium/compare/v0.12.0...v0.13.0) (2026-10-30)
 
 
