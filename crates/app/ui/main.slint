@@ -34,6 +34,9 @@ export component MainWindow inherits Window {
     in property <bool> maximised;
     in property <bool> active: true;
     in property <int> max-button;
+    // Flipped when Windows dropped the window's pixels (crate::platform::ShellEvent::Repaint): the
+    // next frame then draws the whole window, not only what changed.
+    in-out property <bool> repaint-all;
     callback caption-minimise();
     callback caption-maximise();
     callback caption-close();
@@ -826,5 +829,15 @@ export component MainWindow inherits Window {
         minimise => { root.caption-minimise(); }
         maximise => { root.caption-maximise(); }
         close => { root.caption-close(); }
+    }
+    // Draws nothing (both colours are fully transparent) and takes no input, but covers the whole
+    // window: flipping `repaint-all` changes its colour, so the software renderer draws every
+    // pixel of the next frame again.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: root.repaint-all ? #ffffff00 : #00000000;
     }
 }
