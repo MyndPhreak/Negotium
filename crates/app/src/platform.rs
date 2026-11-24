@@ -27,7 +27,7 @@ use windows::Win32::System::Threading::{
     PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::Foundation::{POINT, RECT};
-use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::Graphics::Gdi::{GetUpdateRect, ScreenToClient};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
     GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WM_EXITSIZEMOVE,
     WPF_RESTORETOMAXIMIZED,
-    WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_SIZE,
+    WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
     GetClientRect, HTCAPTION, HTCLIENT, HTMAXBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, SC_CLOSE, SC_MAXIMIZE,
     SC_MINIMIZE, SC_RESTORE, SM_CXPADDEDBORDER, SM_CYFRAME, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
     WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
@@ -710,6 +710,14 @@ unsafe extern "system" fn subclass_proc(
         if !minimised {
             unsafe { (*hook)(ShellEvent::MovedOrResized) };
         }
+    } else if msg == WM_PAINT
+        // SAFETY: only reads our own window's update region.
+        && unsafe { GetUpdateRect(hwnd, None, false) }.as_bool()
+    {
+        // A paint with an area to update: Windows dropped those pixels. winit's own redraws are
+        // internal paints with no such area, so a frame Slint asked for never lands here.
+        // SAFETY: `hook` lives until WM_NCDESTROY.
+        unsafe { (*hook)(ShellEvent::Repaint) };
     } else if msg == WM_EXITSIZEMOVE {
         // SAFETY: as above.
         unsafe { (*hook)(ShellEvent::MovedOrResized) };

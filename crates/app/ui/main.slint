@@ -695,4 +695,14 @@ export component MainWindow inherits Window {
         maximise => { root.caption-maximise(); }
         close => { root.caption-close(); }
     }
+    // Draws nothing (both colours are fully transparent) and takes no input, but covers the whole
+    // window: flipping `repaint-all` changes its colour, so the software renderer draws every
+    // pixel of the next frame again.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: root.repaint-all ? #ffffff00 : #00000000;
+    }
 }

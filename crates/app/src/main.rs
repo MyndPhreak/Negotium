@@ -1467,7 +1467,9 @@ fn main() -> Result<(), slint::PlatformError> {
                             // The installer is about to replace the files.
                             ShellEvent::Exit => begin_exit(&controls, &weak, &tray_wiring.saver),
                             ShellEvent::Minimised(_) => {} // handled above
-                            ShellEvent::Repaint => {}
+                            ShellEvent::Repaint => {
+                                weak.upgrade().inspect(|ui| ui.set_repaint_all(!ui.get_repaint_all()));
+                            }
                             ShellEvent::MaxButton(state) => {
                                 weak.upgrade().inspect(|ui| ui.set_max_button(state.index()));
                             }
