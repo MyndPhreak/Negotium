@@ -605,6 +605,10 @@ pub enum ShellEvent {
     MaxButton(MaxButton),
     /// The window became active (true) or inactive (false): the caption dims while inactive.
     Active(bool),
+    /// Windows asks for part of the window to be painted again: its pixels were dropped (a
+    /// GPU-heavy game can make the compositor do that). The software renderer draws only what
+    /// changed, so the whole window must be drawn again (`MainWindow.repaint-all`).
+    Repaint,
 }
 
 // Cached: the subclass compares every message the main window receives against these.
@@ -1478,6 +1482,56 @@ mod tests {
         }
         let sizes: Vec<ShellEvent> = seen.borrow().iter().copied().filter(|e| matches!(e, ShellEvent::Minimised(_))).collect();
         assert_eq!(sizes, [ShellEvent::Minimised(true), ShellEvent::Minimised(false)]);
+    }
+
+    #[test]
+    fn only_a_paint_with_a_dropped_area_asks_for_a_repaint() {
+        use windows::Win32::Graphics::Gdi::{InvalidateRect, RDW_INTERNALPAINT, RedrawWindow, UpdateWindow};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, WM_PAINT, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_VISIBLE,
+        };
+        // Visible (Windows sends no WM_PAINT to a hidden window), but far off screen.
+        // SAFETY: plain window creation with a system class; destroyed below.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!("negotium-test"),
+                WS_OVERLAPPED | WS_VISIBLE,
+                -32000,
+                -32000,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("create test window");
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        assert!(install_window_hooks(hwnd, move |e| s.borrow_mut().push(e)));
+        let repaints = || seen.borrow().iter().filter(|e| **e == ShellEvent::Repaint).count();
+        // SAFETY: our own window on this thread; the loop only takes its paint message.
+        unsafe {
+            UpdateWindow(hwnd).ok().expect("first paint");
+            seen.borrow_mut().clear();
+            // What winit's request_redraw does: a paint with nothing dropped.
+            assert!(RedrawWindow(Some(hwnd), None, None, RDW_INTERNALPAINT).as_bool());
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, Some(hwnd), WM_PAINT, WM_PAINT, PM_REMOVE).as_bool() {
+                DispatchMessageW(&msg);
+            }
+        }
+        assert_eq!(repaints(), 0, "a redraw Negotium asked for itself is not a dropped area");
+        // SAFETY: as above.
+        unsafe {
+            assert!(InvalidateRect(Some(hwnd), None, false).as_bool());
+            UpdateWindow(hwnd).ok().expect("paint");
+            let _ = DestroyWindow(hwnd);
+        }
+        assert_eq!(repaints(), 1, "an area Windows dropped asks for a repaint");
     }
 
     #[test]
